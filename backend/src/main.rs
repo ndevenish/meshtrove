@@ -1,6 +1,8 @@
 mod config;
+mod error;
 mod extractors;
 mod routes;
+mod services;
 mod state;
 
 use anyhow::Result;
@@ -30,6 +32,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(routes::api::router())
         .merge(routes::auth::router())
+        .merge(routes::files::router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/docs")
                 .url("/openapi.json", routes::api::ApiDoc::openapi()),

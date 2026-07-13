@@ -4,12 +4,14 @@ use axum_extra::extract::cookie::Key;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::config::Configuration;
+use crate::services::blobstore::FsBlobStore;
 
 /// Single dependency container passed to every handler. Cheap to clone.
 #[derive(Clone)]
 pub struct AppState {
     pub config: Configuration,
     pub db: PgPool,
+    pub store: FsBlobStore,
 }
 
 impl AppState {
@@ -21,7 +23,8 @@ impl AppState {
             .connect(&config.database_url)
             .await
             .context("connecting to Postgres")?;
-        Ok(AppState { config, db })
+        let store = FsBlobStore::new(config.store_dir.clone());
+        Ok(AppState { config, db, store })
     }
 }
 
