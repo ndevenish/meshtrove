@@ -31,6 +31,8 @@ pub trait BlobStore: Clone + Send + Sync {
     /// Open a blob for reading, with its size. None if it doesn't exist.
     fn open(&self, sha256: &str) -> impl Future<Output = Result<Option<(fs::File, u64)>>> + Send;
 
+    /// Unused until the orphan-blob GC job lands (docs/decisions.md).
+    #[allow(dead_code)]
     fn delete(&self, sha256: &str) -> impl Future<Output = Result<()>> + Send;
 }
 

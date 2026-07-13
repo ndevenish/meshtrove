@@ -162,11 +162,11 @@ async fn login(
         None => (DUMMY_HASH.to_string(), None),
     };
 
-    if verify_password(creds.password, hash).await {
-        if let Some(user) = user {
-            let jar = jar.add(session_cookie(user.id));
-            return (jar, Json(user)).into_response();
-        }
+    if verify_password(creds.password, hash).await
+        && let Some(user) = user
+    {
+        let jar = jar.add(session_cookie(user.id));
+        return (jar, Json(user)).into_response();
     }
     (StatusCode::UNAUTHORIZED, "invalid username or password").into_response()
 }

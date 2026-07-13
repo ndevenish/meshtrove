@@ -67,10 +67,10 @@ async fn serve_static(state: &AppState, path: &str) -> Response {
 
     let mut target = state.config.static_dir.join(&rel_path);
     let has_extension = rel_path.extension().is_some();
-    if rel.is_empty() || !has_extension {
-        if !tokio::fs::try_exists(&target).await.unwrap_or(false) || rel.is_empty() {
-            target = state.config.static_dir.join("index.html");
-        }
+    if (rel.is_empty() || !has_extension)
+        && (!tokio::fs::try_exists(&target).await.unwrap_or(false) || rel.is_empty())
+    {
+        target = state.config.static_dir.join("index.html");
     }
 
     match tokio::fs::read(&target).await {

@@ -156,15 +156,15 @@ pub async fn render_preview(state: &AppState, payload: &Value) -> Result<()> {
     .await?;
     // Delete the image being replaced FIRST so the primary slot it may hold
     // falls through to the new render below.
-    if payload.mode == RenderMode::Replace {
-        if let Some(old) = payload.replace_image_id {
-            sqlx::query!(
-                "DELETE FROM images WHERE id = $1 AND kind = 'rendered'",
-                old
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
+    if payload.mode == RenderMode::Replace
+        && let Some(old) = payload.replace_image_id
+    {
+        sqlx::query!(
+            "DELETE FROM images WHERE id = $1 AND kind = 'rendered'",
+            old
+        )
+        .execute(&mut *tx)
+        .await?;
     }
     sqlx::query!(
         r#"INSERT INTO images (blob_sha256, model_id, variant_id, bundle_id, kind, mime,

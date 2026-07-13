@@ -131,10 +131,10 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     }
 
     // Clean up temp extraction dir
-    if let Some((_, first_tmp)) = entries.first() {
-        if let Some(dir) = first_tmp.parent() {
-            let _ = tokio::fs::remove_dir_all(dir).await;
-        }
+    if let Some((_, first_tmp)) = entries.first()
+        && let Some(dir) = first_tmp.parent()
+    {
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
     // Queue a preview render for the variant's first STL if it has no image yet.
