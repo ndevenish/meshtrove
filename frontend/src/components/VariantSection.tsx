@@ -18,6 +18,9 @@ import {
   TextField,
   Autocomplete,
   Alert,
+  Checkbox,
+  Select,
+  MenuItem,
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import AddIcon from '@mui/icons-material/Add'
@@ -181,8 +184,26 @@ function VariantRow({
   )
 }
 
-/// Rebuild the kept folder structure from the flat path column.
-function FileTree({ files }: { files: FileRecord[] }) {
+export const FILE_KINDS: FileRecord['kind'][] = ['model', 'document', 'archive', 'other']
+
+/// Rebuild the kept folder structure from the flat path column. When the
+/// optional editing props are supplied (used by the recategorisation UI), each
+/// row gains a select checkbox, an inline kind selector, and a delete button.
+export function FileTree({
+  files,
+  selectable = false,
+  selected,
+  onToggle,
+  onKindChange,
+  onDelete,
+}: {
+  files: FileRecord[]
+  selectable?: boolean
+  selected?: Set<string>
+  onToggle?: (id: string) => void
+  onKindChange?: (id: string, kind: FileRecord['kind']) => void
+  onDelete?: (id: string) => void
+}) {
   const groups = useMemo(() => {
     const byDir = new Map<string, FileRecord[]>()
     for (const file of files) {
@@ -218,11 +239,35 @@ function FileTree({ files }: { files: FileRecord[] }) {
               spacing={1}
               sx={{ alignItems: 'center', pl: dir !== '/' ? 3 : 0, py: 0.25 }}
             >
+              {selectable && (
+                <Checkbox
+                  size="small"
+                  sx={{ p: 0.25 }}
+                  checked={selected?.has(file.id) ?? false}
+                  onChange={() => onToggle?.(file.id)}
+                />
+              )}
               <InsertDriveFileIcon sx={{ fontSize: 16, opacity: 0.5 }} />
               <Typography variant="body2" sx={{ flexGrow: 1 }} noWrap>
                 {file.filename}
               </Typography>
-              <Chip label={file.kind} size="small" variant="outlined" sx={{ height: 20 }} />
+              {onKindChange ? (
+                <Select
+                  size="small"
+                  variant="standard"
+                  value={file.kind}
+                  onChange={(e) => onKindChange(file.id, e.target.value as FileRecord['kind'])}
+                  sx={{ minWidth: 96, fontSize: 13 }}
+                >
+                  {FILE_KINDS.map((k) => (
+                    <MenuItem key={k} value={k} sx={{ fontSize: 13 }}>
+                      {k}
+                    </MenuItem>
+                  ))}
+                </Select>
+              ) : (
+                <Chip label={file.kind} size="small" variant="outlined" sx={{ height: 20 }} />
+              )}
               <Typography variant="caption" color="text.secondary" sx={{ width: 64 }}>
                 {formatBytes(file.size)}
               </Typography>
@@ -231,6 +276,13 @@ function FileTree({ files }: { files: FileRecord[] }) {
                   <DownloadIcon sx={{ fontSize: 18 }} />
                 </IconButton>
               </Tooltip>
+              {onDelete && (
+                <Tooltip title="Delete file">
+                  <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>
+                    <DeleteIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
             </Stack>
           ))}
         </Box>

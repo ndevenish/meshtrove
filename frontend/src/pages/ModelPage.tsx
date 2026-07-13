@@ -24,6 +24,7 @@ import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import ModelEditDialog from '../components/ModelEditDialog'
 import VariantSection from '../components/VariantSection'
+import UnsortedSection from '../components/UnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 
 export default function ModelPage() {
@@ -224,6 +225,7 @@ export default function ModelPage() {
           </Box>
 
           <Divider sx={{ mb: 2 }} />
+          <UnsortedSection model={model} canEdit={!!canEdit} onChange={refresh} />
           <VariantSection model={model} canEdit={!!canEdit} onChange={refresh} />
         </Box>
       </Stack>
