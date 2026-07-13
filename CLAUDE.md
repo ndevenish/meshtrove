@@ -9,9 +9,19 @@ Design doc: `docs/plan.md` (ER diagram + rationale); decisions: `docs/decisions.
 ```bash
 docker compose up -d                 # postgres:17 on :5432
 cp .env.example .env                 # defaults are dev-ready (anonymous admin)
+cargo install sqlx-cli --no-default-features --features native-tls,postgres  # once
+cd backend && sqlx migrate run       # apply schema BEFORE first build (see below)
 cd frontend && npm install && npm run dev   # Vite on :5173
 cd backend && cargo run              # http://localhost:3001 (proxies to Vite)
 ```
+
+The `sqlx migrate run` step is **mandatory before the first `cargo run`**: the
+sqlx `query!` macros validate against a live DB at *compile* time, but the
+runtime `sqlx::migrate!()` in `main.rs` only applies the schema at startup — so a
+fresh empty DB won't compile. Running migrations via sqlx-cli (not raw `psql`)
+also records them in `_sqlx_migrations`, so the startup `migrate!()` skips them
+instead of erroring on re-apply. There is no `.sqlx` offline cache, so postgres
+must be up and migrated for any build.
 
 Bind is **3001** on this machine (3000 is taken by an ssh tunnel). All config is
 flag + env dual (`meshtrove --help`); `.env` is auto-loaded. `--anonymous` makes
