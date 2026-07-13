@@ -27,6 +27,8 @@ import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import ModelCard from '../components/ModelCard'
 import BundleEditDialog from '../components/BundleEditDialog'
+import BundleUnsortedSection from '../components/BundleUnsortedSection'
+import Dropzone from '../components/Dropzone'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 
 export default function BundlePage() {
@@ -36,6 +38,7 @@ export default function BundlePage() {
   const [editOpen, setEditOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
 
   const { data: bundle } = useQuery({
     queryKey: ['bundle', id],
@@ -212,6 +215,28 @@ export default function BundlePage() {
           </Box>
 
           <Divider sx={{ mb: 2 }} />
+          {canEdit && (
+            <Box sx={{ mb: 2 }}>
+              <Dropzone
+                label="Drop an archive to add its contents"
+                hint=".zip unpacks into this bundle, then sort into member models"
+                accept=".zip"
+                busy={uploading}
+                onFiles={async (droppedFiles) => {
+                  setUploading(true)
+                  try {
+                    const form = new FormData()
+                    form.append('file', droppedFiles[0])
+                    await api.uploadBundleFiles(bundle.id, form)
+                    await queryClient.invalidateQueries({ queryKey: ['bundle-files', bundle.id] })
+                  } finally {
+                    setUploading(false)
+                  }
+                }}
+              />
+            </Box>
+          )}
+          <BundleUnsortedSection bundle={bundle} canEdit={!!canEdit} onChange={refresh} />
           <MembersSection
             bundleId={bundle.id}
             models={bundle.models}
@@ -293,7 +318,7 @@ function MembersSection({
       {models.length === 0 ? (
         <Typography color="text.secondary" variant="body2">
           No models in this bundle yet
-          {canEdit ? ' — add one above, or drop an archive here (coming soon)' : ''}.
+          {canEdit ? ' — add one above, or drop an archive to unpack and sort' : ''}.
         </Typography>
       ) : (
         <Box

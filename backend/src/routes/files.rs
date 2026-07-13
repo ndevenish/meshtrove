@@ -32,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bundles/{id}/files", post(upload_bundle_files))
         .route("/api/variants/{id}/files", get(list_variant_files))
         .route("/api/models/{id}/files", get(list_model_files))
+        .route("/api/bundles/{id}/files", get(list_bundle_files))
         .route("/api/files/{id}", patch(update_file).delete(delete_file))
         .route("/api/files/{id}/download", get(download_file))
         // Uploads are multi-GB; the store streams to disk, so no body cap.
@@ -220,12 +221,15 @@ async fn upload_files(
                 )
                 .await?;
 
-                // Zips uploaded to a variant or a model unpack in the
-                // background (variant → onto the variant, model → into the
-                // model's "unsorted" bucket); the original archive row is kept
-                // for provenance. Bundle archives are not unpacked yet (Phase 2).
+                // Zips uploaded to a variant, model, or bundle unpack in the
+                // background into that owner's files (variant → onto the variant,
+                // model/bundle → into that owner's "unsorted" bucket); the
+                // original archive row is kept for provenance.
                 if matches!(record.kind, FileKind::Archive)
-                    && matches!(owner, Owner::Variant(_) | Owner::Model(_))
+                    && matches!(
+                        owner,
+                        Owner::Variant(_) | Owner::Model(_) | Owner::Bundle(_)
+                    )
                     && filename.to_lowercase().ends_with(".zip")
                 {
                     crate::services::jobs::enqueue(
@@ -366,19 +370,59 @@ async fn list_model_files(
     ))
 }
 
-/// Resolve a file to the model it ultimately belongs to (directly or via its
-/// variant) and that model's `created_by`, for permission checks. Bundle-owned
-/// files are not editable through this API yet (Phase 2).
-async fn file_owner_model(state: &AppState, file_id: Uuid) -> Result<(Uuid, Uuid), ApiError> {
+/// The "unsorted" bucket of a bundle: files owned directly by the bundle (from
+/// importing a bundle archive), to be carved into member models.
+async fn list_bundle_files(
+    State(state): State<AppState>,
+    _user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
+                  f.kind as "kind: FileKind", f.created_at, b.size
+           FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256
+           WHERE f.bundle_id = $1
+           ORDER BY f.path, f.filename"#,
+        id
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| FileRecord {
+                id: r.id,
+                blob_sha256: r.blob_sha256,
+                path: r.path,
+                filename: r.filename,
+                mime: r.mime,
+                kind: r.kind,
+                size: r.size,
+                created_at: r.created_at,
+            })
+            .collect(),
+    ))
+}
+
+/// The container a file is sorted within: a model (directly or via a variant),
+/// or a bundle (its unsorted bucket).
+enum FileContext {
+    Model(Uuid),
+    Bundle(Uuid),
+}
+
+/// Resolve a file to its editing context and the container's `created_by`.
+async fn file_context(state: &AppState, file_id: Uuid) -> Result<(FileContext, Uuid), ApiError> {
     let row = sqlx::query!(
         r#"SELECT
              coalesce(f.model_id, v.model_id) as "model_id?",
-             coalesce(mm.created_by, vm.created_by) as "created_by?",
-             f.bundle_id
+             f.bundle_id,
+             coalesce(mm.created_by, vm.created_by) as "model_created_by?",
+             bb.created_by as "bundle_created_by?"
            FROM files f
            LEFT JOIN models mm ON mm.id = f.model_id
            LEFT JOIN model_variants v ON v.id = f.variant_id
            LEFT JOIN models vm ON vm.id = v.model_id
+           LEFT JOIN bundles bb ON bb.id = f.bundle_id
            WHERE f.id = $1"#,
         file_id
     )
@@ -386,11 +430,16 @@ async fn file_owner_model(state: &AppState, file_id: Uuid) -> Result<(Uuid, Uuid
     .await?
     .ok_or(ApiError::NotFound)?;
 
-    match (row.model_id, row.created_by) {
-        (Some(model_id), Some(created_by)) => Ok((model_id, created_by)),
-        _ if row.bundle_id.is_some() => Err(ApiError::BadRequest(
-            "bundle files are not editable yet".into(),
-        )),
+    match (
+        row.model_id,
+        row.model_created_by,
+        row.bundle_id,
+        row.bundle_created_by,
+    ) {
+        (Some(model_id), Some(created_by), _, _) => Ok((FileContext::Model(model_id), created_by)),
+        (_, _, Some(bundle_id), Some(created_by)) => {
+            Ok((FileContext::Bundle(bundle_id), created_by))
+        }
         _ => Err(ApiError::NotFound),
     }
 }
@@ -399,16 +448,20 @@ async fn file_owner_model(state: &AppState, file_id: Uuid) -> Result<(Uuid, Uuid
 struct FileUpdate {
     /// Reclassify: model|document|archive|other.
     kind: Option<String>,
-    /// Move the file onto this variant (must belong to the same model).
+    /// Move a model-context file onto this variant (must belong to the same model).
     variant_id: Option<Uuid>,
-    /// Move the file back to the model's "unsorted" bucket.
+    /// Move a bundle-context file into this member model's unsorted bucket
+    /// (the model must be a member of the bundle).
+    model_id: Option<Uuid>,
+    /// Move a model-context file back to the model's "unsorted" bucket.
     unsorted: Option<bool>,
     filename: Option<String>,
     path: Option<String>,
 }
 
-/// Update a single file: reclassify its kind, move it between the model's
-/// "unsorted" bucket and a variant, and/or rename it. One endpoint keeps the
+/// Update a single file: reclassify its kind, move it (model files between the
+/// model's "unsorted" bucket and a variant; bundle files into a member model),
+/// and/or rename it. One endpoint keeps the
 /// `num_nonnulls(model_id, variant_id, bundle_id) = 1` invariant by rewriting
 /// all three owner columns together whenever a move is requested.
 async fn update_file(
@@ -417,23 +470,41 @@ async fn update_file(
     Path(id): Path<Uuid>,
     Json(body): Json<FileUpdate>,
 ) -> Result<Json<FileRecord>, ApiError> {
-    let (model_id, created_by) = file_owner_model(&state, id).await?;
+    let (ctx, created_by) = file_context(&state, id).await?;
     user.require_can_edit(created_by)?;
 
     let kind = body.kind.as_deref().map(parse_kind).transpose()?;
     let path = body.path.as_deref().map(sanitize_path).transpose()?;
 
-    // Determine the target owner, if a move was requested. `unsorted` and
-    // `variant_id` are mutually exclusive.
-    let move_target: Option<(Option<Uuid>, Option<Uuid>)> = match (body.unsorted, body.variant_id) {
-        (Some(true), Some(_)) => {
-            return Err(ApiError::BadRequest(
-                "specify either unsorted or variant_id, not both".into(),
-            ));
-        }
-        (Some(true), None) => Some((Some(model_id), None)),
-        (_, Some(variant_id)) => {
-            // The variant must belong to the same model (Phase 1 is single-model).
+    // At most one move target may be named.
+    let targets = [
+        body.unsorted == Some(true),
+        body.variant_id.is_some(),
+        body.model_id.is_some(),
+    ]
+    .into_iter()
+    .filter(|x| *x)
+    .count();
+    if targets > 1 {
+        return Err(ApiError::BadRequest(
+            "specify at most one move target".into(),
+        ));
+    }
+
+    // Determine the target owner (model_id, variant_id), if a move was
+    // requested. Valid moves depend on the file's context.
+    let move_target: Option<(Option<Uuid>, Option<Uuid>)> = match (
+        &ctx,
+        body.unsorted,
+        body.variant_id,
+        body.model_id,
+    ) {
+        // No move.
+        (_, None | Some(false), None, None) => None,
+        // Model file → back to the model's unsorted bucket.
+        (FileContext::Model(model_id), Some(true), None, None) => Some((Some(*model_id), None)),
+        // Model file → a variant of the same model.
+        (FileContext::Model(model_id), _, Some(variant_id), None) => {
             let variant_model = sqlx::query_scalar!(
                 "SELECT model_id FROM model_variants WHERE id = $1",
                 variant_id
@@ -441,14 +512,32 @@ async fn update_file(
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| ApiError::BadRequest("no such variant".into()))?;
-            if variant_model != model_id {
+            if variant_model != *model_id {
                 return Err(ApiError::BadRequest(
                     "variant belongs to a different model".into(),
                 ));
             }
             Some((None, Some(variant_id)))
         }
-        (None | Some(false), None) => None,
+        // Bundle file → carve into a member model's unsorted bucket.
+        (FileContext::Bundle(bundle_id), _, None, Some(target_model)) => {
+            let is_member = sqlx::query_scalar!(
+                r#"SELECT EXISTS (SELECT 1 FROM bundle_models WHERE bundle_id = $1 AND model_id = $2) as "e!""#,
+                bundle_id,
+                target_model,
+            )
+            .fetch_one(&state.db)
+            .await?;
+            if !is_member {
+                return Err(ApiError::BadRequest(
+                    "target model is not a member of this bundle".into(),
+                ));
+            }
+            Some((Some(target_model), None))
+        }
+        // Bundle file "unsorted" is a no-op (already bundle-owned).
+        (FileContext::Bundle(_), Some(true), None, None) => None,
+        _ => return Err(ApiError::BadRequest("invalid move for this file".into())),
     };
 
     // COALESCE keeps unspecified fields; when moving, both owner columns are
@@ -520,7 +609,7 @@ async fn delete_file(
     user: User,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (_model_id, created_by) = file_owner_model(&state, id).await?;
+    let (_ctx, created_by) = file_context(&state, id).await?;
     user.require_can_edit(created_by)?;
     sqlx::query!("DELETE FROM files WHERE id = $1", id)
         .execute(&state.db)

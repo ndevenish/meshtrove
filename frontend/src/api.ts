@@ -182,6 +182,8 @@ export interface Job {
 export interface FileUpdate {
   kind?: FileRecord['kind']
   variant_id?: string
+  /** carve a bundle-owned file into a member model */
+  model_id?: string
   unsorted?: boolean
   filename?: string
   path?: string

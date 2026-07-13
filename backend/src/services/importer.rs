@@ -22,7 +22,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         serde_json::from_value(payload.clone()).context("bad import_archive payload")?;
 
     let archive = sqlx::query!(
-        r#"SELECT f.blob_sha256, f.model_id, f.variant_id, f.path, f.filename FROM files f
+        r#"SELECT f.blob_sha256, f.model_id, f.variant_id, f.bundle_id, f.path, f.filename FROM files f
            WHERE f.id = $1"#,
         payload.archive_file_id,
     )
@@ -32,17 +32,16 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
 
     // Extracted files inherit the archive's owner: a variant archive unpacks
     // onto that variant; a model archive unpacks into the model's "unsorted"
-    // bucket (files.model_id) for later recategorisation. Bundle archives are
-    // not supported yet (Phase 2).
-    let (model_id, variant_id) = match (archive.model_id, archive.variant_id) {
-        (_, Some(v)) => (None, Some(v)),
-        (Some(m), None) => (Some(m), None),
-        (None, None) => {
-            return Err(anyhow!(
-                "import_archive requires a model- or variant-owned archive"
-            ));
-        }
-    };
+    // bucket (files.model_id); a bundle archive unpacks into the bundle's
+    // "unsorted" bucket (files.bundle_id) for carving into member models. Exactly
+    // one owner column is set, satisfying the files CHECK.
+    let (model_id, variant_id, bundle_id) =
+        match (archive.model_id, archive.variant_id, archive.bundle_id) {
+            (_, Some(v), _) => (None, Some(v), None),
+            (Some(m), None, _) => (Some(m), None, None),
+            (None, None, Some(b)) => (None, None, Some(b)),
+            (None, None, None) => return Err(anyhow!("import_archive requires an owned archive")),
+        };
 
     let archive_path = state.store.path_for(&archive.blob_sha256);
     let base_path = archive.path.clone();
@@ -121,11 +120,12 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         .execute(&mut *tx)
         .await?;
         let file_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO files (blob_sha256, model_id, variant_id, path, filename, mime, kind)
-               VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id"#,
+            r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, path, filename, mime, kind)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"#,
             blob.sha256,
             model_id,
             variant_id,
+            bundle_id,
             full_path,
             filename,
             mime,
@@ -152,7 +152,11 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     // Queue a preview render for the owner's first STL if it has no image yet.
     // The renderer stamps the image onto whichever owner the source file
     // carries (model or variant), so a fresh model still gets a browse thumbnail.
-    if let Some(file_id) = model_file_ids.first() {
+    // Bundle-owned imports are a staging bucket to be carved into members, so
+    // they don't get a bundle-level thumbnail here.
+    if bundle_id.is_none()
+        && let Some(file_id) = model_file_ids.first()
+    {
         let has_image = sqlx::query_scalar!(
             r#"SELECT EXISTS (
                  SELECT 1 FROM images
@@ -177,6 +181,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     tracing::info!(
         model = ?model_id,
         variant = ?variant_id,
+        bundle = ?bundle_id,
         files = entries.len(),
         renders_queued = i32::from(!model_file_ids.is_empty()),
         "archive imported"
