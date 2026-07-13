@@ -57,7 +57,7 @@ Implementation quirks worth knowing (found the hard way):
 - Original uploaded archives kept as `kind='archive'` file rows for provenance.
 - First registered user becomes admin; later users start as viewers.
 
-## In progress: file-first import + recategorisation
+## File-first import + recategorisation (Phases 1–2 done, 3 remaining)
 
 Phased build of drag-drop import + a classification UI (was under *Deferred*).
 Real archive shapes driving it: `docs/import-layouts.md`.
@@ -72,12 +72,20 @@ Real archive shapes driving it: `docs/import-layouts.md`.
   now accepts model-owned archives and the `.zip` trigger fires for model
   uploads too. No schema migration (the `files.model_id` nullable owner + the
   `num_nonnulls(...) = 1` CHECK already allowed this).
-- **Phase 2 (todo):** bundle CRUD (routes + UI), promote model→bundle / split,
-  and drop-onto / add-to an existing bundle (the Loot "DownloadAll" case). The
-  importer, `file_owner_model`, and the upload trigger all explicitly
-  skip/reject `bundle_id` today as the seam for this.
+- **Phase 2 (done):** bundles. Migration 0002 adds a `search` tsvector to
+  `bundles` (mirrors models) so they rank **inline** with models in a unified
+  `GET /api/browse` (UNION ALL, ranked+paginated together; a variant-axis `opt=`
+  filter excludes bundles). `routes/bundles.rs` = CRUD + description revisions +
+  `bundle_models` membership. UI: `BundleCard`/`BundlePage`/`BundleEditDialog`,
+  mixed browse grid, "Promote to bundle" on a model. **Drop onto a bundle**
+  unpacks into the bundle's own unsorted bucket (`files.bundle_id`); the bundle
+  page carves those files into new/existing **member models**
+  (`PATCH /api/files/{id}` with `model_id`, validated against `bundle_models`) —
+  symmetric with Phase 1 (model→variants), one level up (bundle→models→variants).
+  Deferred within bundles: `bundle_children` nesting; bundle likes.
 - **Phase 3 (todo):** layout detectors (Loot) + model-vs-bundle guess from
-  folder depth/naming, pre-filling an editable suggested structure.
+  folder depth/naming, pre-filling an editable suggested structure. Hooks:
+  `deriveModelName`, `MoveToVariantDialog`, `MoveToModelDialog`.
 
 ## Deferred (schema already accommodates)
 
