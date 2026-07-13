@@ -10,11 +10,11 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use utoipa::ToSchema;
@@ -31,6 +31,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/models/{id}/files", post(upload_model_files))
         .route("/api/bundles/{id}/files", post(upload_bundle_files))
         .route("/api/variants/{id}/files", get(list_variant_files))
+        .route("/api/models/{id}/files", get(list_model_files))
+        .route("/api/files/{id}", patch(update_file).delete(delete_file))
         .route("/api/files/{id}/download", get(download_file))
         // Uploads are multi-GB; the store streams to disk, so no body cap.
         .layer(DefaultBodyLimit::disable())
@@ -218,10 +220,12 @@ async fn upload_files(
                 )
                 .await?;
 
-                // Zips uploaded to a variant unpack in the background; the
-                // original archive row is kept for provenance.
+                // Zips uploaded to a variant or a model unpack in the
+                // background (variant → onto the variant, model → into the
+                // model's "unsorted" bucket); the original archive row is kept
+                // for provenance. Bundle archives are not unpacked yet (Phase 2).
                 if matches!(record.kind, FileKind::Archive)
-                    && matches!(owner, Owner::Variant(_))
+                    && matches!(owner, Owner::Variant(_) | Owner::Model(_))
                     && filename.to_lowercase().ends_with(".zip")
                 {
                     crate::services::jobs::enqueue(
@@ -326,6 +330,202 @@ async fn list_variant_files(
             })
             .collect(),
     ))
+}
+
+/// The "unsorted" bucket: files owned directly by a model (variant_id null),
+/// as produced by importing a model-owned archive. Same shape as the variant
+/// listing.
+async fn list_model_files(
+    State(state): State<AppState>,
+    _user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
+                  f.kind as "kind: FileKind", f.created_at, b.size
+           FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256
+           WHERE f.model_id = $1
+           ORDER BY f.path, f.filename"#,
+        id
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| FileRecord {
+                id: r.id,
+                blob_sha256: r.blob_sha256,
+                path: r.path,
+                filename: r.filename,
+                mime: r.mime,
+                kind: r.kind,
+                size: r.size,
+                created_at: r.created_at,
+            })
+            .collect(),
+    ))
+}
+
+/// Resolve a file to the model it ultimately belongs to (directly or via its
+/// variant) and that model's `created_by`, for permission checks. Bundle-owned
+/// files are not editable through this API yet (Phase 2).
+async fn file_owner_model(state: &AppState, file_id: Uuid) -> Result<(Uuid, Uuid), ApiError> {
+    let row = sqlx::query!(
+        r#"SELECT
+             coalesce(f.model_id, v.model_id) as "model_id?",
+             coalesce(mm.created_by, vm.created_by) as "created_by?",
+             f.bundle_id
+           FROM files f
+           LEFT JOIN models mm ON mm.id = f.model_id
+           LEFT JOIN model_variants v ON v.id = f.variant_id
+           LEFT JOIN models vm ON vm.id = v.model_id
+           WHERE f.id = $1"#,
+        file_id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    match (row.model_id, row.created_by) {
+        (Some(model_id), Some(created_by)) => Ok((model_id, created_by)),
+        _ if row.bundle_id.is_some() => Err(ApiError::BadRequest(
+            "bundle files are not editable yet".into(),
+        )),
+        _ => Err(ApiError::NotFound),
+    }
+}
+
+#[derive(Deserialize)]
+struct FileUpdate {
+    /// Reclassify: model|document|archive|other.
+    kind: Option<String>,
+    /// Move the file onto this variant (must belong to the same model).
+    variant_id: Option<Uuid>,
+    /// Move the file back to the model's "unsorted" bucket.
+    unsorted: Option<bool>,
+    filename: Option<String>,
+    path: Option<String>,
+}
+
+/// Update a single file: reclassify its kind, move it between the model's
+/// "unsorted" bucket and a variant, and/or rename it. One endpoint keeps the
+/// `num_nonnulls(model_id, variant_id, bundle_id) = 1` invariant by rewriting
+/// all three owner columns together whenever a move is requested.
+async fn update_file(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(body): Json<FileUpdate>,
+) -> Result<Json<FileRecord>, ApiError> {
+    let (model_id, created_by) = file_owner_model(&state, id).await?;
+    user.require_can_edit(created_by)?;
+
+    let kind = body.kind.as_deref().map(parse_kind).transpose()?;
+    let path = body.path.as_deref().map(sanitize_path).transpose()?;
+
+    // Determine the target owner, if a move was requested. `unsorted` and
+    // `variant_id` are mutually exclusive.
+    let move_target: Option<(Option<Uuid>, Option<Uuid>)> = match (body.unsorted, body.variant_id) {
+        (Some(true), Some(_)) => {
+            return Err(ApiError::BadRequest(
+                "specify either unsorted or variant_id, not both".into(),
+            ));
+        }
+        (Some(true), None) => Some((Some(model_id), None)),
+        (_, Some(variant_id)) => {
+            // The variant must belong to the same model (Phase 1 is single-model).
+            let variant_model = sqlx::query_scalar!(
+                "SELECT model_id FROM model_variants WHERE id = $1",
+                variant_id
+            )
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("no such variant".into()))?;
+            if variant_model != model_id {
+                return Err(ApiError::BadRequest(
+                    "variant belongs to a different model".into(),
+                ));
+            }
+            Some((None, Some(variant_id)))
+        }
+        (None | Some(false), None) => None,
+    };
+
+    // COALESCE keeps unspecified fields; when moving, both owner columns are
+    // written at once (bundle_id forced null) so the CHECK is never violated.
+    let (set_model_id, set_variant_id, do_move) = match move_target {
+        Some((m, v)) => (m, v, true),
+        None => (None, None, false),
+    };
+    let record = sqlx::query!(
+        r#"UPDATE files SET
+             kind = coalesce($2, kind),
+             filename = coalesce($3, filename),
+             path = coalesce($4, path),
+             model_id = CASE WHEN $5 THEN $6 ELSE model_id END,
+             variant_id = CASE WHEN $5 THEN $7 ELSE variant_id END,
+             bundle_id = CASE WHEN $5 THEN NULL ELSE bundle_id END
+           WHERE id = $1
+           RETURNING id, blob_sha256, path, filename, mime,
+                     kind as "kind: FileKind", created_at,
+                     (SELECT size FROM blobs WHERE sha256 = files.blob_sha256) as "size!""#,
+        id,
+        kind as Option<FileKind>,
+        body.filename,
+        path,
+        do_move,
+        set_model_id,
+        set_variant_id,
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    // If an STL landed on a variant that has no image yet, give it a thumbnail.
+    if let Some(variant_id) = set_variant_id.filter(|_| do_move)
+        && record.filename.to_lowercase().ends_with(".stl")
+    {
+        let has_image = sqlx::query_scalar!(
+            "SELECT EXISTS (SELECT 1 FROM images WHERE variant_id = $1) as \"exists!\"",
+            variant_id,
+        )
+        .fetch_one(&state.db)
+        .await?;
+        if !has_image {
+            crate::services::jobs::enqueue(
+                &state.db,
+                "render_preview",
+                serde_json::json!({ "file_id": record.id, "mode": "add" }),
+            )
+            .await?;
+        }
+    }
+
+    Ok(Json(FileRecord {
+        id: record.id,
+        blob_sha256: record.blob_sha256,
+        path: record.path,
+        filename: record.filename,
+        mime: record.mime,
+        kind: record.kind,
+        size: record.size,
+        created_at: record.created_at,
+    }))
+}
+
+/// Delete a single file row. The underlying blob is content-addressed and may
+/// be shared (dedup) with other files/images, so it is left in the store;
+/// orphan-blob GC is a separate maintenance concern.
+async fn delete_file(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (_model_id, created_by) = file_owner_model(&state, id).await?;
+    user.require_can_edit(created_by)?;
+    sqlx::query!("DELETE FROM files WHERE id = $1", id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn download_file(

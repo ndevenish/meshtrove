@@ -22,16 +22,27 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         serde_json::from_value(payload.clone()).context("bad import_archive payload")?;
 
     let archive = sqlx::query!(
-        r#"SELECT f.blob_sha256, f.variant_id, f.path, f.filename FROM files f
+        r#"SELECT f.blob_sha256, f.model_id, f.variant_id, f.path, f.filename FROM files f
            WHERE f.id = $1"#,
         payload.archive_file_id,
     )
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| anyhow!("archive file {} no longer exists", payload.archive_file_id))?;
-    let variant_id = archive
-        .variant_id
-        .ok_or_else(|| anyhow!("import_archive only supports variant archives for now"))?;
+
+    // Extracted files inherit the archive's owner: a variant archive unpacks
+    // onto that variant; a model archive unpacks into the model's "unsorted"
+    // bucket (files.model_id) for later recategorisation. Bundle archives are
+    // not supported yet (Phase 2).
+    let (model_id, variant_id) = match (archive.model_id, archive.variant_id) {
+        (_, Some(v)) => (None, Some(v)),
+        (Some(m), None) => (Some(m), None),
+        (None, None) => {
+            return Err(anyhow!(
+                "import_archive requires a model- or variant-owned archive"
+            ));
+        }
+    };
 
     let archive_path = state.store.path_for(&archive.blob_sha256);
     let base_path = archive.path.clone();
@@ -110,9 +121,10 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         .execute(&mut *tx)
         .await?;
         let file_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO files (blob_sha256, variant_id, path, filename, mime, kind)
-               VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"#,
+            r#"INSERT INTO files (blob_sha256, model_id, variant_id, path, filename, mime, kind)
+               VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id"#,
             blob.sha256,
+            model_id,
             variant_id,
             full_path,
             filename,
@@ -137,10 +149,17 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
-    // Queue a preview render for the variant's first STL if it has no image yet.
+    // Queue a preview render for the owner's first STL if it has no image yet.
+    // The renderer stamps the image onto whichever owner the source file
+    // carries (model or variant), so a fresh model still gets a browse thumbnail.
     if let Some(file_id) = model_file_ids.first() {
         let has_image = sqlx::query_scalar!(
-            "SELECT EXISTS (SELECT 1 FROM images WHERE variant_id = $1) as \"exists!\"",
+            r#"SELECT EXISTS (
+                 SELECT 1 FROM images
+                 WHERE ($1::uuid IS NOT NULL AND model_id = $1)
+                    OR ($2::uuid IS NOT NULL AND variant_id = $2)
+               ) as "exists!""#,
+            model_id,
             variant_id,
         )
         .fetch_one(&state.db)
@@ -156,7 +175,8 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     }
 
     tracing::info!(
-        variant = %variant_id,
+        model = ?model_id,
+        variant = ?variant_id,
         files = entries.len(),
         renders_queued = i32::from(!model_file_ids.is_empty()),
         "archive imported"
