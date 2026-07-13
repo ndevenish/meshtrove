@@ -116,6 +116,15 @@ export interface Job {
   attempts: number
   last_error: string | null
   created_at: string
+  payload?: unknown
+}
+
+export interface FileUpdate {
+  kind?: FileRecord['kind']
+  variant_id?: string
+  unsorted?: boolean
+  filename?: string
+  path?: string
 }
 
 export interface RendererConfig {
@@ -182,6 +191,12 @@ export const api = {
   variantFiles: (id: string) => request<FileRecord[]>(`/api/variants/${id}/files`),
   uploadVariantFiles: (id: string, form: FormData) =>
     request<FileRecord[]>(`/api/variants/${id}/files`, { method: 'POST', body: form }),
+  modelFiles: (id: string) => request<FileRecord[]>(`/api/models/${id}/files`),
+  uploadModelFiles: (id: string, form: FormData) =>
+    request<FileRecord[]>(`/api/models/${id}/files`, { method: 'POST', body: form }),
+  updateFile: (id: string, body: FileUpdate) =>
+    request<FileRecord>(`/api/files/${id}`, { ...json(body), method: 'PATCH' }),
+  deleteFile: (id: string) => request<void>(`/api/files/${id}`, { method: 'DELETE' }),
 
   uploadImage: (owner: 'models' | 'variants' | 'bundles', id: string, form: FormData) =>
     request<ImageRecord>(`/api/${owner}/${id}/images`, { method: 'POST', body: form }),

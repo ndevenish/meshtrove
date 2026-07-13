@@ -14,6 +14,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 
 import { api, type ModelDetail } from '../api'
+import Dropzone from './Dropzone'
+import { deriveModelName } from '../upload'
 
 /// Create (no `model`) or edit (with `model`) a model's metadata and tags.
 export default function ModelEditDialog({
@@ -36,6 +38,7 @@ export default function ModelEditDialog({
   const [description, setDescription] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [archive, setArchive] = useState<File | null>(null)
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
@@ -50,6 +53,7 @@ export default function ModelEditDialog({
       setTags(model?.tags ?? [])
       setDescription(model?.description_md ?? '')
       setError('')
+      setArchive(null)
     }
   }, [open, model])
 
@@ -84,6 +88,13 @@ export default function ModelEditDialog({
         }
       } else {
         saved = await api.createModel(body)
+        // File-first: a dropped archive unpacks into the model's unsorted
+        // bucket in the background; the model page shows unpack progress.
+        if (archive) {
+          const form = new FormData()
+          form.append('file', archive)
+          await api.uploadModelFiles(saved.id, form)
+        }
       }
       await queryClient.invalidateQueries()
       onClose()
@@ -101,6 +112,18 @@ export default function ModelEditDialog({
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           {error && <Alert severity="error">{error}</Alert>}
+          {!model && (
+            <Dropzone
+              label={archive ? archive.name : 'Drop an archive to import'}
+              hint={archive ? 'Will unpack after Create' : '.zip auto-unpacks · or click to browse'}
+              accept=".zip"
+              onFiles={(files) => {
+                const file = files[0]
+                setArchive(file)
+                if (!name.trim()) setName(deriveModelName(file.name))
+              }}
+            />
+          )}
           <TextField
             label="Name"
             value={name}

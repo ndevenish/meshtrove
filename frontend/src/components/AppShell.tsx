@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Outlet, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   AppBar,
@@ -11,24 +11,81 @@ import {
   MenuItem,
   Button,
   Tooltip,
+  Snackbar,
+  Alert,
+  CircularProgress,
   alpha,
 } from '@mui/material'
+import { useQueryClient } from '@tanstack/react-query'
 import SearchIcon from '@mui/icons-material/Search'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
 import LightModeIcon from '@mui/icons-material/LightMode'
 import AccountCircleIcon from '@mui/icons-material/AccountCircle'
+import UploadFileIcon from '@mui/icons-material/UploadFile'
 
 import { useAuth, useColorMode } from '../main'
 import { api } from '../api'
+import { importArchiveAsModel } from '../upload'
 
 export default function AppShell() {
   const { user, refresh } = useAuth()
   const { mode, toggle } = useColorMode()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [params] = useSearchParams()
   const [search, setSearch] = useState(params.get('q') ?? '')
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [dropError, setDropError] = useState('')
+
+  // Global file-first drop: dropping a file anywhere creates a new model named
+  // after it and unpacks it. Editors/admins only; viewers can't create.
+  const canCreate = !!user && user.role !== 'viewer'
+  useEffect(() => {
+    if (!canCreate) return
+    let depth = 0
+    const hasFiles = (e: DragEvent) => e.dataTransfer?.types.includes('Files')
+    const onEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      depth += 1
+      setDragging(true)
+    }
+    const onLeave = () => {
+      depth = Math.max(0, depth - 1)
+      if (depth === 0) setDragging(false)
+    }
+    const onOver = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault()
+    }
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      depth = 0
+      setDragging(false)
+      const file = e.dataTransfer?.files?.[0]
+      if (!file) return
+      setImporting(true)
+      importArchiveAsModel(file)
+        .then(async (model) => {
+          await queryClient.invalidateQueries()
+          navigate(`/models/${model.id}`)
+        })
+        .catch((err) => setDropError(err instanceof Error ? err.message : String(err)))
+        .finally(() => setImporting(false))
+    }
+    window.addEventListener('dragenter', onEnter)
+    window.addEventListener('dragleave', onLeave)
+    window.addEventListener('dragover', onOver)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onEnter)
+      window.removeEventListener('dragleave', onLeave)
+      window.removeEventListener('dragover', onOver)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [canCreate, navigate, queryClient])
 
   const submitSearch = (e: React.FormEvent) => {
     e.preventDefault()
@@ -146,6 +203,50 @@ export default function AppShell() {
       <Box component="main" sx={{ flexGrow: 1 }}>
         <Outlet />
       </Box>
+
+      {(dragging || importing) && (
+        <Box
+          sx={(theme) => ({
+            position: 'fixed',
+            inset: 0,
+            zIndex: theme.zIndex.modal + 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 2,
+            pointerEvents: 'none',
+            backgroundColor: alpha(theme.palette.background.default, 0.85),
+            border: `3px dashed ${theme.palette.primary.main}`,
+          })}
+        >
+          {importing ? (
+            <>
+              <CircularProgress />
+              <Typography variant="h6">Importing…</Typography>
+            </>
+          ) : (
+            <>
+              <UploadFileIcon sx={{ fontSize: 64, color: 'primary.main' }} />
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                Drop to import as a new model
+              </Typography>
+              <Typography color="text.secondary">.zip archives unpack automatically</Typography>
+            </>
+          )}
+        </Box>
+      )}
+
+      <Snackbar
+        open={!!dropError}
+        autoHideDuration={8000}
+        onClose={() => setDropError('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="error" onClose={() => setDropError('')}>
+          Import failed: {dropError}
+        </Alert>
+      </Snackbar>
     </Box>
   )
 }
