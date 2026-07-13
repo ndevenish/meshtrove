@@ -3,6 +3,30 @@
 Resolutions of the open questions in `spec.md`, plus gaps found during design.
 Full schema/architecture: `plan.md`.
 
+## Status (2026-07-13)
+
+**Milestone 1 ("core archive") is complete and verified end-to-end.**
+Everything in `plan.md` is implemented except the items under "Deferred"
+below. Verified live, not just compiled: zip upload → import job (folder
+structure kept) → f3d preview render → primary image on the browse card;
+unified search including the same-variant AND semantics for axis options;
+dedup (same STL twice → one blob, two file rows, byte-identical download);
+register/login/logout with role assignment; stale re-render converging to
+zero queued jobs. UI screenshots reviewed in headless Chromium with no
+console errors. A fresh session should pick up from the Deferred list.
+
+Implementation quirks worth knowing (found the hard way):
+
+- MUI v9 dropped direct system props on `Stack`/`Toolbar` — put
+  `alignItems` etc. in `sx`, or tsc fails with opaque overload errors.
+- `url::Url` Display always renders a trailing `/`; the Vite proxy must
+  trim it or `/@vite/client` becomes `//@vite/client` and modules come
+  back as `text/html` (frontend.rs has the fix + comment).
+- f3d obeys the user's `~/.config/f3d` — renders must pass `--no-config`
+  or grid/axis/filename overlays leak into previews.
+- Replace-mode re-renders delete the old image *before* inserting, in the
+  same transaction, so the primary slot carries over (renderer.rs).
+
 ## Resolved
 
 - **Name**: MeshTrove (crate `meshtrove`, env prefix `MESHTROVE_`).
