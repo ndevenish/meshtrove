@@ -1,0 +1,584 @@
+//! Bundles: CRUD, full-text search, markdown description revisions, and member
+//! model management. Mirrors `models.rs` (bundles have no variants or purchase
+//! fields, but add a `kind` and a `bundle_models` membership m2m).
+
+use anyhow::Context;
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::{get, put},
+};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::{QueryBuilder, Row};
+use utoipa::ToSchema;
+use uuid::Uuid;
+
+use crate::error::ApiError;
+use crate::extractors::User;
+use crate::routes::models::{
+    DescriptionInput, ImageSummary, LabelInput, ModelSummary, Revision, SearchQuery,
+};
+use crate::routes::tags::upsert_tag;
+use crate::state::AppState;
+use crate::util::slugify;
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/api/bundles", get(search).post(create))
+        .route("/api/bundles/{id}", get(detail).put(update).delete(remove))
+        .route("/api/bundles/{id}/description", put(update_description))
+        .route(
+            "/api/bundles/{id}/description/revisions",
+            get(list_revisions),
+        )
+        .route(
+            "/api/bundles/{id}/description/revisions/{rev}/label",
+            put(label_revision),
+        )
+        .route("/api/bundles/{id}/models", axum::routing::post(add_model))
+        .route(
+            "/api/bundles/{id}/models/{model_id}",
+            axum::routing::delete(remove_model),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// search
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, ToSchema)]
+pub struct BundleSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub kind: String,
+    pub creator_id: Option<Uuid>,
+    pub creator_name: Option<String>,
+    pub primary_image_id: Option<Uuid>,
+    pub tags: Vec<String>,
+    pub model_count: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BundleResults {
+    pub bundles: Vec<BundleSummary>,
+    pub total: i64,
+    pub page: u32,
+    pub per_page: u32,
+}
+
+/// Shared WHERE clauses for a bundle search (no variant opts — bundles have none).
+pub fn push_bundle_filters(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str, tags: &[String]) {
+    if !q.is_empty() {
+        qb.push(" AND (b.search @@ websearch_to_tsquery('english', ")
+            .push_bind(q.to_string())
+            .push(") OR b.name ILIKE '%' || ")
+            .push_bind(q.to_string())
+            .push(" || '%')");
+    }
+    for tag in tags {
+        qb.push(" AND EXISTS (SELECT 1 FROM bundle_tags bt JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id AND t.name = ")
+            .push_bind(tag.clone())
+            .push(")");
+    }
+}
+
+/// The shared SELECT list producing a `BundleSummary` (alias `b` for bundles).
+const BUNDLE_SUMMARY_COLS: &str = r#"b.id, b.name, b.slug, b.kind::text AS kind, b.creator_id,
+    b.updated_at, c.name AS creator_name,
+    (SELECT i.id FROM images i WHERE i.bundle_id = b.id AND i.is_primary) AS primary_image_id,
+    (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS model_count,
+    coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
+              JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags"#;
+
+fn bundle_summary_from_row(row: &sqlx::postgres::PgRow) -> Result<BundleSummary, sqlx::Error> {
+    Ok(BundleSummary {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        slug: row.try_get("slug")?,
+        kind: row.try_get("kind")?,
+        creator_id: row.try_get("creator_id")?,
+        creator_name: row.try_get("creator_name")?,
+        primary_image_id: row.try_get("primary_image_id")?,
+        tags: row.try_get("tags")?,
+        model_count: row.try_get("model_count")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+async fn search(
+    State(state): State<AppState>,
+    _user: User,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<BundleResults>, ApiError> {
+    let q = query.q.unwrap_or_default().trim().to_string();
+    let tags: Vec<String> = query
+        .tags
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(30).clamp(1, 100);
+
+    let mut count_qb = QueryBuilder::new("SELECT count(*) FROM bundles b WHERE TRUE");
+    push_bundle_filters(&mut count_qb, &q, &tags);
+    let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
+
+    let mut qb = QueryBuilder::new(format!(
+        "SELECT {BUNDLE_SUMMARY_COLS} FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id WHERE TRUE"
+    ));
+    push_bundle_filters(&mut qb, &q, &tags);
+    if q.is_empty() {
+        qb.push(" ORDER BY b.updated_at DESC");
+    } else {
+        qb.push(" ORDER BY ts_rank(b.search, websearch_to_tsquery('english', ")
+            .push_bind(&q)
+            .push(")) DESC, b.updated_at DESC");
+    }
+    qb.push(" LIMIT ")
+        .push_bind(per_page as i64)
+        .push(" OFFSET ")
+        .push_bind(((page - 1) * per_page) as i64);
+
+    let rows: Vec<sqlx::postgres::PgRow> = qb.build().fetch_all(&state.db).await?;
+    let bundles = rows
+        .iter()
+        .map(bundle_summary_from_row)
+        .collect::<Result<_, _>>()
+        .context("decoding bundle search row")?;
+
+    Ok(Json(BundleResults {
+        bundles,
+        total,
+        page,
+        per_page,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// CRUD
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, ToSchema)]
+pub struct BundleInput {
+    pub name: String,
+    pub creator_id: Option<Uuid>,
+    pub source_url: Option<String>,
+    /// 'purchased' (a bought pack) or 'collection' (a personal grouping)
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Initial markdown description (creates revision 1)
+    pub description_md: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BundleDetail {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub kind: String,
+    pub creator_id: Option<Uuid>,
+    pub creator_name: Option<String>,
+    pub source_url: Option<String>,
+    pub tags: Vec<String>,
+    pub description_md: Option<String>,
+    pub models: Vec<ModelSummary>,
+    pub images: Vec<ImageSummary>,
+    pub created_by: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+fn parse_kind(kind: Option<&str>) -> Result<&str, ApiError> {
+    match kind.unwrap_or("purchased") {
+        k @ ("purchased" | "collection") => Ok(k),
+        other => Err(ApiError::BadRequest(format!(
+            "unknown bundle kind {other:?}"
+        ))),
+    }
+}
+
+async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiError> {
+    let base = slugify(name);
+    let taken: Vec<String> = sqlx::query_scalar!(
+        "SELECT slug FROM bundles WHERE slug = $1 OR slug LIKE $1 || '-%'",
+        base,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    if !taken.iter().any(|s| s == &base) {
+        return Ok(base);
+    }
+    for n in 2.. {
+        let candidate = format!("{base}-{n}");
+        if !taken.iter().any(|s| s == &candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!()
+}
+
+async fn set_bundle_tags(
+    tx: &mut sqlx::PgConnection,
+    state: &AppState,
+    bundle_id: Uuid,
+    tags: &[String],
+) -> Result<(), ApiError> {
+    sqlx::query!("DELETE FROM bundle_tags WHERE bundle_id = $1", bundle_id)
+        .execute(&mut *tx)
+        .await?;
+    for tag in tags {
+        let tag = upsert_tag(state, tag).await?;
+        sqlx::query!(
+            "INSERT INTO bundle_tags (bundle_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            bundle_id,
+            tag.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn bundle_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiError> {
+    sqlx::query_scalar!("SELECT created_by FROM bundles WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+async fn create(
+    State(state): State<AppState>,
+    user: User,
+    Json(input): Json<BundleInput>,
+) -> Result<Json<BundleDetail>, ApiError> {
+    user.require_editor()?;
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+    let kind = parse_kind(input.kind.as_deref())?;
+    let slug = unique_slug(&state, &name).await?;
+
+    let mut tx = state.db.begin().await?;
+    let bundle_id: Uuid = sqlx::query_scalar!(
+        r#"INSERT INTO bundles (name, slug, creator_id, source_url, kind, created_by)
+           VALUES ($1, $2, $3, $4, $5::bundle_kind, $6)
+           RETURNING id"#,
+        name,
+        slug,
+        input.creator_id,
+        input.source_url,
+        kind as _,
+        user.id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    set_bundle_tags(&mut tx, &state, bundle_id, &input.tags).await?;
+
+    if let Some(body) = &input.description_md {
+        sqlx::query!(
+            "INSERT INTO bundle_description_revisions (bundle_id, body_md, created_by)
+             VALUES ($1, $2, $3)",
+            bundle_id,
+            body,
+            user.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    fetch_detail(&state, bundle_id).await.map(Json)
+}
+
+/// The member models of a bundle, shaped as ModelSummary for reuse by the UI.
+async fn fetch_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<ModelSummary>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?", m.updated_at,
+                  (SELECT i.id FROM images i WHERE i.model_id = m.id AND i.is_primary) as primary_image_id,
+                  (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as "like_count!",
+                  (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as "variant_count!",
+                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
+                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as "tags!"
+           FROM models m LEFT JOIN creators c ON c.id = m.creator_id
+           WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)
+           ORDER BY m.name"#,
+        bundle_id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ModelSummary {
+            id: r.id,
+            name: r.name,
+            slug: r.slug,
+            creator_id: r.creator_id,
+            creator_name: r.creator_name,
+            primary_image_id: r.primary_image_id,
+            like_count: r.like_count,
+            variant_count: r.variant_count,
+            tags: r.tags,
+            matched_variant_ids: None,
+            updated_at: r.updated_at,
+        })
+        .collect())
+}
+
+async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiError> {
+    let row = sqlx::query!(
+        r#"SELECT b.id, b.name, b.slug, b.kind::text as "kind!", b.creator_id,
+                  c.name as "creator_name?", b.source_url, b.created_by, b.created_at, b.updated_at,
+                  (SELECT r.body_md FROM bundle_description_revisions r
+                    WHERE r.bundle_id = b.id ORDER BY r.created_at DESC LIMIT 1) as description_md,
+                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
+                            JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') as "tags!"
+           FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id
+           WHERE b.id = $1"#,
+        id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let images = sqlx::query!(
+        r#"SELECT id, kind::text as "kind!", is_primary, width, height FROM images
+           WHERE bundle_id = $1 ORDER BY is_primary DESC, sort_order, created_at"#,
+        id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let models = fetch_members(state, id).await?;
+
+    Ok(BundleDetail {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        kind: row.kind,
+        creator_id: row.creator_id,
+        creator_name: row.creator_name,
+        source_url: row.source_url,
+        tags: row.tags,
+        description_md: row.description_md,
+        models,
+        images: images
+            .into_iter()
+            .map(|i| ImageSummary {
+                id: i.id,
+                kind: i.kind,
+                is_primary: i.is_primary,
+                width: i.width,
+                height: i.height,
+            })
+            .collect(),
+        created_by: row.created_by,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+async fn detail(
+    State(state): State<AppState>,
+    _user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<BundleDetail>, ApiError> {
+    fetch_detail(&state, id).await.map(Json)
+}
+
+async fn update(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<BundleInput>,
+) -> Result<Json<BundleDetail>, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let kind = parse_kind(input.kind.as_deref())?;
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query!(
+        r#"UPDATE bundles SET name = $2, creator_id = $3, source_url = $4,
+               kind = $5::bundle_kind, updated_at = now()
+           WHERE id = $1"#,
+        id,
+        input.name.trim(),
+        input.creator_id,
+        input.source_url,
+        kind as _,
+    )
+    .execute(&mut *tx)
+    .await?;
+    set_bundle_tags(&mut tx, &state, id, &input.tags).await?;
+    tx.commit().await?;
+
+    fetch_detail(&state, id).await.map(Json)
+}
+
+async fn remove(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    // Deletes the bundle and its bundle_models rows (cascade); member models
+    // themselves are standalone and remain.
+    sqlx::query!("DELETE FROM bundles WHERE id = $1", id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// membership
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, ToSchema)]
+pub struct AddModelInput {
+    pub model_id: Uuid,
+}
+
+async fn add_model(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<AddModelInput>,
+) -> Result<StatusCode, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let result = sqlx::query!(
+        "INSERT INTO bundle_models (bundle_id, model_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        id,
+        input.model_id,
+    )
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(_) => {}
+        // FK violation = no such model
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+            return Err(ApiError::BadRequest("no such model".into()));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_model(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, model_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let result = sqlx::query!(
+        "DELETE FROM bundle_models WHERE bundle_id = $1 AND model_id = $2",
+        id,
+        model_id,
+    )
+    .execute(&state.db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// description revisions (mirror of models', retargeted to bundles)
+// ---------------------------------------------------------------------------
+
+async fn update_description(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<DescriptionInput>,
+) -> Result<Json<Revision>, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let row = sqlx::query!(
+        r#"INSERT INTO bundle_description_revisions (bundle_id, body_md, created_by)
+           VALUES ($1, $2, $3)
+           RETURNING id, body_md, label as "label: String", created_by, created_at"#,
+        id,
+        input.body_md,
+        user.id,
+    )
+    .fetch_one(&state.db)
+    .await?;
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(Revision {
+        id: row.id,
+        body_md: row.body_md,
+        label: row.label,
+        created_by: row.created_by,
+        author: user.username,
+        created_at: row.created_at,
+    }))
+}
+
+async fn list_revisions(
+    State(state): State<AppState>,
+    _user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Revision>>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT r.id, r.body_md, r.label as "label: String", r.created_by, r.created_at,
+                  u.username as "author: String"
+           FROM bundle_description_revisions r JOIN users u ON u.id = r.created_by
+           WHERE r.bundle_id = $1 ORDER BY r.created_at DESC"#,
+        id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| Revision {
+                id: r.id,
+                body_md: r.body_md,
+                label: r.label,
+                created_by: r.created_by,
+                author: r.author,
+                created_at: r.created_at,
+            })
+            .collect(),
+    ))
+}
+
+async fn label_revision(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, rev)): Path<(Uuid, Uuid)>,
+    Json(input): Json<LabelInput>,
+) -> Result<StatusCode, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let result = sqlx::query!(
+        "UPDATE bundle_description_revisions SET label = $3 WHERE id = $2 AND bundle_id = $1",
+        id,
+        rev,
+        input.label.as_deref(),
+    )
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(r) if r.rows_affected() == 0 => Err(ApiError::NotFound),
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(ApiError::Conflict(
+            "that label is already used on this bundle".into(),
+        )),
+        Err(e) => Err(e.into()),
+    }
+}

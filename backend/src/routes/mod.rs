@@ -2,6 +2,8 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod axes;
+pub mod browse;
+pub mod bundles;
 pub mod creators;
 pub mod files;
 pub mod frontend;

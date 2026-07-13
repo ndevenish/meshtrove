@@ -76,7 +76,7 @@ pub struct SearchResults {
     pub per_page: u32,
 }
 
-fn parse_opts(opts: &str) -> Result<Vec<(String, String)>, ApiError> {
+pub fn parse_opts(opts: &str) -> Result<Vec<(String, String)>, ApiError> {
     opts.split(',')
         .filter(|s| !s.trim().is_empty())
         .map(|pair| {
@@ -89,8 +89,8 @@ fn parse_opts(opts: &str) -> Result<Vec<(String, String)>, ApiError> {
         .collect()
 }
 
-/// Append the shared WHERE clauses for a search to a query builder.
-fn push_filters(
+/// Append the shared WHERE clauses for a search to a query builder (alias `m`).
+pub fn push_filters(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     q: &str,
     tags: &[String],
