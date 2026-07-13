@@ -4,6 +4,7 @@ mod extractors;
 mod routes;
 mod services;
 mod state;
+mod util;
 
 use anyhow::Result;
 use axum::{Router, routing::get};
@@ -32,7 +33,13 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(routes::api::router())
         .merge(routes::auth::router())
+        .merge(routes::axes::router())
+        .merge(routes::creators::router())
         .merge(routes::files::router())
+        .merge(routes::images::router())
+        .merge(routes::models::router())
+        .merge(routes::tags::router())
+        .merge(routes::variants::router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/docs")
                 .url("/openapi.json", routes::api::ApiDoc::openapi()),

@@ -1,4 +1,10 @@
 pub mod api;
 pub mod auth;
+pub mod axes;
+pub mod creators;
 pub mod files;
 pub mod frontend;
+pub mod images;
+pub mod models;
+pub mod tags;
+pub mod variants;

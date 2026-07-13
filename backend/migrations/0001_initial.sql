@@ -217,6 +217,7 @@ CREATE TABLE images (
     source_file_id  uuid REFERENCES files (id) ON DELETE SET NULL,
     renderer        text,
     renderer_config jsonb,
+    mime            text,
     width           int,
     height          int,
     is_primary      boolean NOT NULL DEFAULT false,
