@@ -57,11 +57,31 @@ Implementation quirks worth knowing (found the hard way):
 - Original uploaded archives kept as `kind='archive'` file rows for provenance.
 - First registered user becomes admin; later users start as viewers.
 
+## In progress: file-first import + recategorisation
+
+Phased build of drag-drop import + a classification UI (was under *Deferred*).
+Real archive shapes driving it: `docs/import-layouts.md`.
+
+- **Phase 1 (done):** drop a file anywhere (global overlay) or into the New
+  Model dialog → a model is auto-created + named from the archive filename → a
+  `.zip` unpacks **flat into the model's "unsorted" bucket** (model-owned
+  `files`, `variant_id` null). The model page's *Unsorted files* section
+  reclassifies file kinds, moves a selection into variants (new — with
+  scale/support axes — or existing), and deletes files. New API:
+  `GET /api/models/{id}/files`, `PATCH`/`DELETE /api/files/{id}`; the importer
+  now accepts model-owned archives and the `.zip` trigger fires for model
+  uploads too. No schema migration (the `files.model_id` nullable owner + the
+  `num_nonnulls(...) = 1` CHECK already allowed this).
+- **Phase 2 (todo):** bundle CRUD (routes + UI), promote model→bundle / split,
+  and drop-onto / add-to an existing bundle (the Loot "DownloadAll" case). The
+  importer, `file_owner_model`, and the upload trigger all explicitly
+  skip/reject `bundle_id` today as the seam for this.
+- **Phase 3 (todo):** layout detectors (Loot) + model-vs-bundle guess from
+  folder depth/naming, pre-filling an editable suggested structure.
+
 ## Deferred (schema already accommodates)
 
-- Multi-variant zip classification UI (import currently targets one variant;
-  folder-name heuristics like "32mm/Supported" prefill later).
-- Bundles UI, likes/printed/wanted UI (`user_model_marks` exists).
+- Likes/printed/wanted UI (`user_model_marks` exists).
 - Orphan-blob GC + store integrity re-hash as maintenance jobs.
 - Print logs richer than a mark (`print_logs` table later).
 - Browser-import helper (needs token auth, not cookies).
