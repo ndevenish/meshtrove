@@ -79,6 +79,14 @@ erDiagram
         uuid created_by FK
         timestamptz created_at
     }
+    bundle_description_revisions {
+        uuid id PK
+        uuid bundle_id FK
+        text body_md "markdown"
+        citext label "optional name"
+        uuid created_by FK
+        timestamptz created_at
+    }
     model_variants {
         uuid id PK
         uuid model_id FK
@@ -123,7 +131,7 @@ erDiagram
         uuid source_file_id FK
         text renderer "provenance for re-render"
         jsonb renderer_config
-        bool is_primary
+        bool is_primary "at most one per owner"
     }
     bundles {
         uuid id PK
@@ -156,6 +164,7 @@ erDiagram
     creators ||--o{ bundles : "made by"
     users ||--o{ models : "created"
     models ||--o{ model_description_revisions : "description history"
+    bundles ||--o{ bundle_description_revisions : "description history"
     models ||--o{ model_variants : "has"
     model_variants o|--o{ model_variants : "derived_from"
     variant_axes ||--o{ variant_axis_options : "declares"
@@ -202,11 +211,16 @@ models           id, name, slug UNIQUE, creator_id FK NULL,
                  -- name + current revision body, maintained by trigger + GIN index
 
 -- markdown descriptions with full edit history; every save is a new immutable
--- revision (current = newest), optionally nameable ("v1", "v2")
+-- revision (current = newest), optionally nameable ("v1", "v2").
+-- Models and bundles get identical treatment.
 model_description_revisions
                  id, model_id FK, body_md text, label citext NULL,
                  created_by FK users, created_at
                  UNIQUE (model_id, label) WHERE label IS NOT NULL
+bundle_description_revisions
+                 id, bundle_id FK, body_md text, label citext NULL,
+                 created_by FK users, created_at
+                 UNIQUE (bundle_id, label) WHERE label IS NOT NULL
 
 model_variants   id, model_id FK, name,
                  derived_from_variant_id FK NULL, -- user-made variants point at origin
@@ -248,10 +262,19 @@ images           id, blob_sha256 FK,
                  source_file_id FK files NULL,      -- what a render was made from
                  renderer text NULL, renderer_config jsonb NULL,  -- provenance for re-render
                  width, height, is_primary bool, sort_order, created_by, created_at
+                 -- images attach to models, VARIANTS, or BUNDLES alike; the
+                 -- "Primary" image (used for preview cards) is enforced as at
+                 -- most one per owner via partial unique indexes:
+                 --   UNIQUE (model_id)  WHERE is_primary,
+                 --   UNIQUE (variant_id) WHERE is_primary,
+                 --   UNIQUE (bundle_id) WHERE is_primary
+                 -- (setting a new primary clears the old one in the same txn)
 
 -- bundles (purchasable packs AND personal uber-bundles)
-bundles          id, name, slug, description, creator_id FK NULL, source_url,
+bundles          id, name, slug, creator_id FK NULL, source_url,
                  kind bundle_kind ('purchased'|'collection'), created_by, timestamps
+                 -- description lives in bundle_description_revisions, same
+                 -- pattern as models; images via images.bundle_id
 bundle_models    (bundle_id, model_id) PK
 bundle_children  (parent_bundle_id, child_bundle_id) PK, CHECK parent<>child
 
@@ -351,14 +374,16 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
   `{axis: option}` assignments, and the UI comboboxes offer "add new option"
   inline so new axes/options appear organically during import
 - `GET/POST/PUT/DELETE /api/models/{id}/variants`
-- `PUT /api/models/{id}/description` (creates a new revision);
-  `GET /api/models/{id}/description/revisions` (history);
+- `PUT /api/{models|bundles}/{id}/description` (creates a new revision);
+  `GET /api/{models|bundles}/{id}/description/revisions` (history);
   `PUT …/revisions/{rev}/label` (name a revision, e.g. "v1")
 - `POST /api/variants/{id}/files` — multipart upload; a `.zip` triggers an
   `import_archive` job (original archive kept as kind='archive'); others stored
   directly with an optional `path`
 - `GET /api/files/{id}/download` (streams from blob store, Content-Disposition)
-- `GET/POST /api/models/{id}/images` upload; `GET /api/images/{id}` (serve)
+- `GET/POST /api/{models|bundles|variants}/{id}/images` upload;
+  `GET /api/images/{id}` (serve); `PUT /api/images/{id}/primary` (mark as the
+  owner's preview image, atomically demoting the previous primary)
 - `GET/POST /api/tags`; tag assignment on model create/update
 - `GET /api/jobs?status=` (visibility into queue); `POST /api/jobs/{id}/retry`
 - Admin: `GET/PUT /api/admin/settings/renderer`;
