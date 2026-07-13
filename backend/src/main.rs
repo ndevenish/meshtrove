@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
     tracing::info!(version = VERSION, "starting meshtrove");
 
     let state = AppState::new().await?;
+    sqlx::migrate!().run(&state.db).await?;
 
     let app = Router::new()
         .merge(routes::api::router())
