@@ -1,4 +1,5 @@
 mod config;
+mod extractors;
 mod routes;
 mod state;
 
@@ -24,9 +25,11 @@ async fn main() -> Result<()> {
 
     let state = AppState::new().await?;
     sqlx::migrate!().run(&state.db).await?;
+    routes::auth::ensure_startup_users(&state).await?;
 
     let app = Router::new()
         .merge(routes::api::router())
+        .merge(routes::auth::router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/docs")
                 .url("/openapi.json", routes::api::ApiDoc::openapi()),
