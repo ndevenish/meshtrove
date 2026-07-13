@@ -43,7 +43,7 @@ enum Owner {
     Bundle(Uuid),
 }
 
-#[derive(Debug, Serialize, ToSchema, sqlx::Type)]
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, sqlx::Type)]
 #[sqlx(type_name = "file_kind", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
@@ -66,7 +66,7 @@ pub struct FileRecord {
 }
 
 /// Kind heuristic from the filename; an explicit `kind` form field overrides.
-fn guess_kind(filename: &str) -> FileKind {
+pub fn guess_kind(filename: &str) -> FileKind {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "stl" | "obj" | "3mf" | "step" | "stp" | "ply" | "gltf" | "glb" => FileKind::Model,
@@ -217,6 +217,20 @@ async fn upload_files(
                     kind,
                 )
                 .await?;
+
+                // Zips uploaded to a variant unpack in the background; the
+                // original archive row is kept for provenance.
+                if matches!(record.kind, FileKind::Archive)
+                    && matches!(owner, Owner::Variant(_))
+                    && filename.to_lowercase().ends_with(".zip")
+                {
+                    crate::services::jobs::enqueue(
+                        &state.db,
+                        "import_archive",
+                        serde_json::json!({ "archive_file_id": record.id }),
+                    )
+                    .await?;
+                }
                 records.push(record);
             }
             _ => {}

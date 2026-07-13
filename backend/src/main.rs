@@ -29,11 +29,15 @@ async fn main() -> Result<()> {
     let state = AppState::new().await?;
     sqlx::migrate!().run(&state.db).await?;
     routes::auth::ensure_startup_users(&state).await?;
+    services::jobs::recover_stranded(&state.db).await?;
+    tokio::spawn(services::jobs::worker(state.clone()));
 
     let app = Router::new()
+        .merge(routes::admin::router())
         .merge(routes::api::router())
         .merge(routes::auth::router())
         .merge(routes::axes::router())
+        .merge(routes::jobs::router())
         .merge(routes::creators::router())
         .merge(routes::files::router())
         .merge(routes::images::router())
