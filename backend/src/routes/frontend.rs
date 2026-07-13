@@ -86,7 +86,13 @@ async fn serve_static(state: &AppState, path: &str) -> Response {
 /// so the browser gets on-the-fly compilation through the backend's origin.
 async fn proxy_to_vite(state: &AppState, uri: &Uri) -> Response {
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let target = format!("{}{}", state.config.vite_url, path_and_query);
+    // Url's Display always renders a trailing "/" path; trim it or paths like
+    // /@vite/client become //@vite/client, which Vite serves as index.html.
+    let target = format!(
+        "{}{}",
+        state.config.vite_url.as_str().trim_end_matches('/'),
+        path_and_query
+    );
 
     match reqwest::get(&target).await {
         Ok(upstream) => {
