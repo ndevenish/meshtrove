@@ -9,60 +9,55 @@ import {
   Stack,
   Autocomplete,
   Alert,
+  MenuItem,
 } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 
-import { api, type ModelDetail } from '../api'
-import Dropzone from './Dropzone'
-import { deriveModelName } from '../upload'
+import { api, type BundleDetail } from '../api'
 
-/// Create (no `model`) or edit (with `model`) a model's metadata and tags.
-export default function ModelEditDialog({
+/// Create (no `bundle`) or edit a bundle's metadata and tags. Trimmed clone of
+/// ModelEditDialog — bundles have a `kind` but no price/variant/archive fields.
+export default function BundleEditDialog({
   open,
   onClose,
-  model,
+  bundle,
 }: {
   open: boolean
   onClose: () => void
-  model?: ModelDetail
+  bundle?: BundleDetail
 }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [creatorName, setCreatorName] = useState('')
+  const [kind, setKind] = useState('purchased')
   const [sourceUrl, setSourceUrl] = useState('')
-  const [license, setLicense] = useState('')
-  const [price, setPrice] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [description, setDescription] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [archive, setArchive] = useState<File | null>(null)
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
 
   useEffect(() => {
     if (open) {
-      setName(model?.name ?? '')
-      setCreatorName(model?.creator_name ?? '')
-      setSourceUrl(model?.source_url ?? '')
-      setLicense(model?.license ?? '')
-      setPrice(model?.purchase_price != null ? String(model.purchase_price) : '')
-      setTags(model?.tags ?? [])
-      setDescription(model?.description_md ?? '')
+      setName(bundle?.name ?? '')
+      setCreatorName(bundle?.creator_name ?? '')
+      setKind(bundle?.kind ?? 'purchased')
+      setSourceUrl(bundle?.source_url ?? '')
+      setTags(bundle?.tags ?? [])
+      setDescription(bundle?.description_md ?? '')
       setError('')
-      setArchive(null)
     }
-  }, [open, model])
+  }, [open, bundle])
 
   const submit = async () => {
     setBusy(true)
     setError('')
     try {
-      // Resolve or create the creator by name.
-      let creator_id: string | null = model?.creator_id ?? null
+      let creator_id: string | null = bundle?.creator_id ?? null
       const trimmed = creatorName.trim()
       if (!trimmed) {
         creator_id = null
@@ -74,31 +69,23 @@ export default function ModelEditDialog({
       const body = {
         name,
         creator_id,
+        kind,
         source_url: sourceUrl || null,
-        license: license || null,
-        purchase_price: price ? Number(price) : null,
         tags,
-        description_md: model ? undefined : description || null,
+        description_md: bundle ? undefined : description || null,
       }
-      let saved: ModelDetail
-      if (model) {
-        saved = await api.updateModel(model.id, body)
-        if (description !== (model.description_md ?? '')) {
-          await api.updateDescription('models', model.id, description)
+      let saved: BundleDetail
+      if (bundle) {
+        saved = await api.updateBundle(bundle.id, body)
+        if (description !== (bundle.description_md ?? '')) {
+          await api.updateDescription('bundles', bundle.id, description)
         }
       } else {
-        saved = await api.createModel(body)
-        // File-first: a dropped archive unpacks into the model's unsorted
-        // bucket in the background; the model page shows unpack progress.
-        if (archive) {
-          const form = new FormData()
-          form.append('file', archive)
-          await api.uploadModelFiles(saved.id, form)
-        }
+        saved = await api.createBundle(body)
       }
       await queryClient.invalidateQueries()
       onClose()
-      navigate(`/models/${saved.id}`)
+      navigate(`/bundles/${saved.id}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -108,22 +95,10 @@ export default function ModelEditDialog({
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>{model ? 'Edit model' : 'New model'}</DialogTitle>
+      <DialogTitle>{bundle ? 'Edit bundle' : 'New bundle'}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           {error && <Alert severity="error">{error}</Alert>}
-          {!model && (
-            <Dropzone
-              label={archive ? archive.name : 'Drop an archive to import'}
-              hint={archive ? 'Will unpack after Create' : '.zip auto-unpacks · or click to browse'}
-              accept=".zip"
-              onFiles={(files) => {
-                const file = files[0]
-                setArchive(file)
-                if (!name.trim()) setName(deriveModelName(file.name))
-              }}
-            />
-          )}
           <TextField
             label="Name"
             value={name}
@@ -131,6 +106,10 @@ export default function ModelEditDialog({
             autoFocus
             required
           />
+          <TextField select label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <MenuItem value="purchased">Purchased (a bought pack)</MenuItem>
+            <MenuItem value="collection">Collection (a personal grouping)</MenuItem>
+          </TextField>
           <Autocomplete
             freeSolo
             options={(creators ?? []).map((c) => c.name)}
@@ -153,34 +132,21 @@ export default function ModelEditDialog({
             value={sourceUrl}
             onChange={(e) => setSourceUrl(e.target.value)}
           />
-          <Stack direction="row" spacing={2}>
+          {!bundle && (
             <TextField
-              label="License"
-              value={license}
-              onChange={(e) => setLicense(e.target.value)}
-              fullWidth
+              label="Description (markdown)"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              multiline
+              minRows={4}
             />
-            <TextField
-              label="Purchase price"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-              type="number"
-              fullWidth
-            />
-          </Stack>
-          <TextField
-            label="Description (markdown)"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            multiline
-            minRows={4}
-          />
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" onClick={submit} disabled={busy || !name.trim()}>
-          {model ? 'Save' : 'Create'}
+          {bundle ? 'Save' : 'Create'}
         </Button>
       </DialogActions>
     </Dialog>

@@ -15,20 +15,22 @@ import {
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, type ModelDetail } from '../api'
+import { api, type DescOwner } from '../api'
 
-/// Full revision history of a model's markdown description: label revisions
-/// ("v1", "v2"), and restore an old revision by re-saving it as the newest.
+/// Full revision history of a model's or bundle's markdown description: label
+/// revisions ("v1", "v2"), and restore an old revision by re-saving it newest.
 export default function DescriptionHistoryDialog({
   open,
   onClose,
-  model,
+  owner,
+  entity,
   canEdit,
   onChange,
 }: {
   open: boolean
   onClose: () => void
-  model: ModelDetail
+  owner: DescOwner
+  entity: { id: string; name: string }
   canEdit: boolean
   onChange: () => void
 }) {
@@ -36,19 +38,19 @@ export default function DescriptionHistoryDialog({
   const [labelDrafts, setLabelDrafts] = useState<Record<string, string>>({})
 
   const { data: revisions } = useQuery({
-    queryKey: ['revisions', model.id],
-    queryFn: () => api.revisions(model.id),
+    queryKey: ['revisions', owner, entity.id],
+    queryFn: () => api.revisions(owner, entity.id),
     enabled: open,
   })
 
   const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: ['revisions', model.id] })
+    await queryClient.invalidateQueries({ queryKey: ['revisions', owner, entity.id] })
     onChange()
   }
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Description history — {model.name}</DialogTitle>
+      <DialogTitle>Description history — {entity.name}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           {(revisions ?? []).map((revision, index) => (
@@ -75,7 +77,7 @@ export default function DescriptionHistoryDialog({
                         size="small"
                         onClick={async () => {
                           const label = (labelDrafts[revision.id] ?? '').trim()
-                          await api.labelRevision(model.id, revision.id, label || null)
+                          await api.labelRevision(owner, entity.id, revision.id, label || null)
                           await refresh()
                         }}
                       >
@@ -85,7 +87,7 @@ export default function DescriptionHistoryDialog({
                         <Button
                           size="small"
                           onClick={async () => {
-                            await api.updateDescription(model.id, revision.body_md)
+                            await api.updateDescription(owner, entity.id, revision.body_md)
                             await refresh()
                           }}
                         >

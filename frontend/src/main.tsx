@@ -10,6 +10,7 @@ import { api, type User, ApiError } from './api'
 import AppShell from './components/AppShell'
 import BrowsePage from './pages/BrowsePage'
 import ModelPage from './pages/ModelPage'
+import BundlePage from './pages/BundlePage'
 import CreatorsPage from './pages/CreatorsPage'
 import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
@@ -78,6 +79,7 @@ function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<BrowsePage />} />
               <Route path="/models/:id" element={<ModelPage />} />
+              <Route path="/bundles/:id" element={<BundlePage />} />
               <Route path="/creators" element={<CreatorsPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/admin" element={<AdminPage />} />

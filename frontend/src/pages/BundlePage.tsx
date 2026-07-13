@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import {
   Container,
   Box,
@@ -11,49 +11,49 @@ import {
   IconButton,
   Tooltip,
   Divider,
+  Autocomplete,
+  TextField,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import StarIcon from '@mui/icons-material/Star'
 import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate'
-import Inventory2Icon from '@mui/icons-material/Inventory2'
+import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
-import ModelEditDialog from '../components/ModelEditDialog'
-import VariantSection from '../components/VariantSection'
-import UnsortedSection from '../components/UnsortedSection'
+import ModelCard from '../components/ModelCard'
+import BundleEditDialog from '../components/BundleEditDialog'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 
-export default function ModelPage() {
+export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
   const { user } = useAuth()
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
 
-  const { data: model } = useQuery({
-    queryKey: ['model', id],
-    queryFn: () => api.model(id!),
+  const { data: bundle } = useQuery({
+    queryKey: ['bundle', id],
+    queryFn: () => api.bundle(id!),
     enabled: !!id,
   })
 
-  if (!model) return null
+  if (!bundle) return null
   const canEdit =
-    user && (user.role === 'admin' || (user.role === 'editor' && user.id === model.created_by))
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ['model', id] })
+    user && (user.role === 'admin' || (user.role === 'editor' && user.id === bundle.created_by))
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['bundle', id] })
 
-  const shownImage = selectedImage ?? model.images[0]?.id ?? null
+  const shownImage = selectedImage ?? bundle.images[0]?.id ?? null
 
   const uploadImage = async (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    await api.uploadImage('models', model.id, form)
+    await api.uploadImage('bundles', bundle.id, form)
     refresh()
   }
 
@@ -76,7 +76,7 @@ export default function ModelPage() {
               <Box
                 component="img"
                 src={imageUrl(shownImage)}
-                alt={model.name}
+                alt={bundle.name}
                 sx={{ width: '100%', height: '100%', objectFit: 'contain' }}
               />
             ) : (
@@ -84,7 +84,7 @@ export default function ModelPage() {
             )}
           </Paper>
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}>
-            {model.images.map((image) => (
+            {bundle.images.map((image) => (
               <Box key={image.id} sx={{ position: 'relative' }}>
                 <Box
                   component="img"
@@ -162,68 +162,36 @@ export default function ModelPage() {
         {/* Details */}
         <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Stack sx={{ alignItems: 'flex-start' }} direction="row" spacing={1}>
-            <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>
-              {model.name}
-            </Typography>
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexGrow: 1 }}>
+              <Typography variant="h4" sx={{ fontWeight: 700 }}>
+                {bundle.name}
+              </Typography>
+              <Chip label={bundle.kind} size="small" color="primary" variant="outlined" />
+            </Stack>
             {canEdit && (
-              <Stack direction="row" spacing={1}>
-                <Button
-                  startIcon={<Inventory2Icon />}
-                  onClick={async () => {
-                    const bundle = await api.createBundle({
-                      name: model.name,
-                      kind: 'collection',
-                      creator_id: model.creator_id,
-                    })
-                    await api.addModelToBundle(bundle.id, model.id)
-                    await queryClient.invalidateQueries()
-                    navigate(`/bundles/${bundle.id}`)
-                  }}
-                >
-                  Promote to bundle
-                </Button>
-                <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
-                  Edit
-                </Button>
-              </Stack>
+              <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
+                Edit
+              </Button>
             )}
           </Stack>
-          {model.creator_name && (
+          {bundle.creator_name && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
-              by{' '}
-              <Link to={`/creators?q=${encodeURIComponent(model.creator_name)}`}>
-                {model.creator_name}
-              </Link>
+              by {bundle.creator_name}
             </Typography>
           )}
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
-            {model.tags.map((tag) => (
-              <Chip
-                key={tag}
-                label={tag}
-                size="small"
-                component={Link}
-                to={`/?tags=${encodeURIComponent(tag)}`}
-                clickable
-              />
+            {bundle.tags.map((tag) => (
+              <Chip key={tag} label={tag} size="small" />
             ))}
           </Stack>
 
-          {(model.license || model.purchase_price != null || model.source_url) && (
+          {bundle.source_url && (
             <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
-              <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap', gap: 1 }}>
-                {model.source_url && (
-                  <Typography variant="body2">
-                    <a href={model.source_url} target="_blank" rel="noreferrer">
-                      Source page
-                    </a>
-                  </Typography>
-                )}
-                {model.license && <Typography variant="body2">License: {model.license}</Typography>}
-                {model.purchase_price != null && (
-                  <Typography variant="body2">Purchased: {model.purchase_price}</Typography>
-                )}
-              </Stack>
+              <Typography variant="body2">
+                <a href={bundle.source_url} target="_blank" rel="noreferrer">
+                  Source page
+                </a>
+              </Typography>
             </Paper>
           )}
 
@@ -234,8 +202,8 @@ export default function ModelPage() {
             </Button>
           </Stack>
           <Box sx={{ '& p': { mt: 0.5 }, mb: 2 }}>
-            {model.description_md ? (
-              <ReactMarkdown>{model.description_md}</ReactMarkdown>
+            {bundle.description_md ? (
+              <ReactMarkdown>{bundle.description_md}</ReactMarkdown>
             ) : (
               <Typography color="text.secondary" variant="body2">
                 No description.
@@ -244,20 +212,124 @@ export default function ModelPage() {
           </Box>
 
           <Divider sx={{ mb: 2 }} />
-          <UnsortedSection model={model} canEdit={!!canEdit} onChange={refresh} />
-          <VariantSection model={model} canEdit={!!canEdit} onChange={refresh} />
+          <MembersSection
+            bundleId={bundle.id}
+            models={bundle.models}
+            canEdit={!!canEdit}
+            onChange={refresh}
+          />
         </Box>
       </Stack>
 
-      <ModelEditDialog open={editOpen} onClose={() => setEditOpen(false)} model={model} />
+      <BundleEditDialog open={editOpen} onClose={() => setEditOpen(false)} bundle={bundle} />
       <DescriptionHistoryDialog
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
-        owner="models"
-        entity={model}
+        owner="bundles"
+        entity={bundle}
         canEdit={!!canEdit}
         onChange={refresh}
       />
     </Container>
+  )
+}
+
+function MembersSection({
+  bundleId,
+  models,
+  canEdit,
+  onChange,
+}: {
+  bundleId: string
+  models: import('../api').ModelSummary[]
+  canEdit: boolean
+  onChange: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [search, setSearch] = useState('')
+  const { data: candidates } = useQuery({
+    queryKey: ['model-search', search],
+    queryFn: () => api.searchModels(new URLSearchParams({ q: search, per_page: '10' })),
+    enabled: canEdit && search.trim().length > 0,
+  })
+
+  const refreshAll = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
+    onChange()
+  }
+
+  const memberIds = new Set(models.map((m) => m.id))
+  const options = (candidates?.models ?? []).filter((m) => !memberIds.has(m.id))
+
+  return (
+    <Box>
+      <Stack direction="row" sx={{ alignItems: 'center', mb: 1 }} spacing={1}>
+        <Typography variant="h6">Models</Typography>
+        <Typography variant="body2" color="text.secondary">
+          {models.length}
+        </Typography>
+      </Stack>
+
+      {canEdit && (
+        <Autocomplete
+          sx={{ mb: 2, maxWidth: 420 }}
+          options={options}
+          getOptionLabel={(m) => m.name}
+          filterOptions={(x) => x}
+          onInputChange={(_, value) => setSearch(value)}
+          onChange={async (_, value) => {
+            if (value) {
+              await api.addModelToBundle(bundleId, value.id)
+              setSearch('')
+              await refreshAll()
+            }
+          }}
+          renderInput={(params) => (
+            <TextField {...params} size="small" label="Add an existing model…" />
+          )}
+        />
+      )}
+
+      {models.length === 0 ? (
+        <Typography color="text.secondary" variant="body2">
+          No models in this bundle yet
+          {canEdit ? ' — add one above, or drop an archive here (coming soon)' : ''}.
+        </Typography>
+      ) : (
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+            gap: 2,
+          }}
+        >
+          {models.map((model) => (
+            <Box key={model.id} sx={{ position: 'relative' }}>
+              <ModelCard model={model} />
+              {canEdit && (
+                <Tooltip title="Remove from bundle">
+                  <IconButton
+                    size="small"
+                    sx={{
+                      position: 'absolute',
+                      top: 4,
+                      right: 4,
+                      bgcolor: 'background.paper',
+                      zIndex: 1,
+                    }}
+                    onClick={async () => {
+                      await api.removeModelFromBundle(bundleId, model.id)
+                      await refreshAll()
+                    }}
+                  >
+                    <RemoveCircleIcon fontSize="small" color="error" />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </Box>
+          ))}
+        </Box>
+      )}
+    </Box>
   )
 }

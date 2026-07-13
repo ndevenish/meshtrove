@@ -109,6 +109,66 @@ export interface Revision {
   created_at: string
 }
 
+export type DescOwner = 'models' | 'bundles'
+
+export interface BundleSummary {
+  id: string
+  name: string
+  slug: string
+  kind: string
+  creator_id: string | null
+  creator_name: string | null
+  primary_image_id: string | null
+  tags: string[]
+  model_count: number
+  updated_at: string
+}
+
+export interface BundleDetail {
+  id: string
+  name: string
+  slug: string
+  kind: string
+  creator_id: string | null
+  creator_name: string | null
+  source_url: string | null
+  tags: string[]
+  description_md: string | null
+  models: ModelSummary[]
+  images: ImageRecord[]
+  created_by: string
+}
+
+export interface BundleResults {
+  bundles: BundleSummary[]
+  total: number
+  page: number
+  per_page: number
+}
+
+/// One row in the unified browse (models + bundles mixed). `count` is
+/// variant_count for models, model_count for bundles.
+export interface BrowseItem {
+  type: 'model' | 'bundle'
+  id: string
+  name: string
+  slug: string
+  creator_id: string | null
+  creator_name: string | null
+  primary_image_id: string | null
+  tags: string[]
+  like_count: number | null
+  count: number
+  updated_at: string
+}
+
+export interface BrowseResults {
+  items: BrowseItem[]
+  total: number
+  page: number
+  per_page: number
+}
+
 export interface Job {
   id: number
   kind: string
@@ -170,18 +230,31 @@ export const api = {
     request<ModelDetail>(`/api/models/${id}`, { ...json(body), method: 'PUT' }),
   deleteModel: (id: string) => request<void>(`/api/models/${id}`, { method: 'DELETE' }),
 
-  updateDescription: (modelId: string, body_md: string) =>
-    request<Revision>(`/api/models/${modelId}/description`, {
-      ...json({ body_md }),
-      method: 'PUT',
-    }),
-  revisions: (modelId: string) =>
-    request<Revision[]>(`/api/models/${modelId}/description/revisions`),
-  labelRevision: (modelId: string, revId: string, label: string | null) =>
-    request<void>(`/api/models/${modelId}/description/revisions/${revId}/label`, {
+  // Description revisions work identically for models and bundles.
+  updateDescription: (owner: DescOwner, id: string, body_md: string) =>
+    request<Revision>(`/api/${owner}/${id}/description`, { ...json({ body_md }), method: 'PUT' }),
+  revisions: (owner: DescOwner, id: string) =>
+    request<Revision[]>(`/api/${owner}/${id}/description/revisions`),
+  labelRevision: (owner: DescOwner, id: string, revId: string, label: string | null) =>
+    request<void>(`/api/${owner}/${id}/description/revisions/${revId}/label`, {
       ...json({ label }),
       method: 'PUT',
     }),
+
+  browse: (params: URLSearchParams) => request<BrowseResults>(`/api/browse?${params}`),
+  searchBundles: (params: URLSearchParams) => request<BundleResults>(`/api/bundles?${params}`),
+  bundle: (id: string) => request<BundleDetail>(`/api/bundles/${id}`),
+  createBundle: (body: unknown) => request<BundleDetail>('/api/bundles', json(body)),
+  updateBundle: (id: string, body: unknown) =>
+    request<BundleDetail>(`/api/bundles/${id}`, { ...json(body), method: 'PUT' }),
+  deleteBundle: (id: string) => request<void>(`/api/bundles/${id}`, { method: 'DELETE' }),
+  addModelToBundle: (bundleId: string, modelId: string) =>
+    request<void>(`/api/bundles/${bundleId}/models`, json({ model_id: modelId })),
+  removeModelFromBundle: (bundleId: string, modelId: string) =>
+    request<void>(`/api/bundles/${bundleId}/models/${modelId}`, { method: 'DELETE' }),
+  bundleFiles: (id: string) => request<FileRecord[]>(`/api/bundles/${id}/files`),
+  uploadBundleFiles: (id: string, form: FormData) =>
+    request<FileRecord[]>(`/api/bundles/${id}/files`, { method: 'POST', body: form }),
 
   createVariant: (modelId: string, body: unknown) =>
     request<VariantDetail>(`/api/models/${modelId}/variants`, json(body)),
