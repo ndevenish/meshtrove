@@ -1,9 +1,10 @@
-# MySTL — Milestone 1: Core Archive
+# MeshTrove — Milestone 1: Core Archive
 
 ## Context
 
 Greenfield project (repo contains only `docs/spec.md` and `docs/PROJECT_TEMPLATE.md`).
-MySTL is a self-hosted Printables/Thingiverse-style archive for downloaded **and
+MeshTrove (working title in the spec: "MySTL") is a self-hosted
+Printables/Thingiverse-style archive for downloaded **and
 purchased** 3D models: one central place for models, their variants, files, print
 notes, images, and bundles. Backend is Rust/Axum/SQLx (Postgres, with migrations);
 frontend is React/TypeScript/MaterialUI via Vite, structured per
@@ -12,14 +13,21 @@ to Vite; no CORS; clap config with env/flag duality).
 
 ### Decisions made with the user
 
+0. **Name**: **MeshTrove**. Crate/binary `meshtrove`, env-var prefix `MESHTROVE_`,
+   default DB name `meshtrove`. (The repo directory is still `mystl`; renaming it
+   is up to the user.)
+
 1. **Storage**: content-addressed filesystem blob store (`store/ab/cd/<sha256>`),
    behind a `BlobStore` trait so S3 can be swapped in later. Postgres owns all
    metadata including logical folder structure. Dedup falls out of hash-keying.
 2. **Tags vs variants**: two separate systems, unified at the search API. Variants
-   are structured children of a model (scale, support state as queryable columns);
-   tags are free-form labels on models/bundles. A search like
-   `tags=egypt,undead & scale=32mm & support=unsupported` filters models by tags
-   and variants by attributes.
+   are structured children of a model; tags are free-form labels on models/bundles.
+   Variant attributes are **not hard-coded columns or enums**: categories ("axes",
+   e.g. scale, support) and their options (e.g. 32mm, 75mm; unsupported, supported,
+   supported_hollow, lychee_project, merged) are **declarable data** in their own
+   tables — users add new axes and options at will; scale/support are only seed
+   rows. A search like `tags=egypt,undead & opt=scale:32mm & opt=support:unsupported`
+   filters models by tags and variants by their axis options.
 3. **Scope**: "core archive first" — the **full** schema lands in migration 0001
    (including jobs, bundles, tags, marks, settings, so it reviews as a whole), but
    this milestone implements: scaffold, auth+roles, blob store, model/variant/file
@@ -63,15 +71,37 @@ erDiagram
         uuid created_by FK
         tsvector search
     }
+    model_description_revisions {
+        uuid id PK
+        uuid model_id FK
+        text body_md "markdown"
+        citext label "optional name, e.g. v1, v2"
+        uuid created_by FK
+        timestamptz created_at
+    }
     model_variants {
         uuid id PK
         uuid model_id FK
         text name
-        text scale "32mm, 75mm, ..."
-        text support_state "unsupported | supported | ..."
-        jsonb attributes
         uuid derived_from_variant_id FK
         text print_notes
+    }
+    variant_axes {
+        uuid id PK
+        citext name UK "scale, support, ... (seed data, user-extendable)"
+        text description
+        int sort_order
+    }
+    variant_axis_options {
+        uuid id PK
+        uuid axis_id FK
+        citext value "32mm, unsupported, ... (user-extendable)"
+        int sort_order
+    }
+    variant_options {
+        uuid variant_id PK_FK
+        uuid axis_id PK_FK "one option per axis per variant"
+        uuid option_id FK
     }
     blobs {
         char64 sha256 PK
@@ -125,8 +155,12 @@ erDiagram
     creators ||--o{ models : "made by"
     creators ||--o{ bundles : "made by"
     users ||--o{ models : "created"
+    models ||--o{ model_description_revisions : "description history"
     models ||--o{ model_variants : "has"
     model_variants o|--o{ model_variants : "derived_from"
+    variant_axes ||--o{ variant_axis_options : "declares"
+    model_variants ||--o{ variant_options : "assigned"
+    variant_axis_options ||--o{ variant_options : ""
     blobs ||--o{ files : "content"
     blobs ||--o{ images : "content"
     model_variants ||--o{ files : "parts"
@@ -160,21 +194,39 @@ creators         id, name, kind creator_kind ('author'|'company'|'site'),
                  -- e.g. Loot Studios (company), Printables (site), an author
 
 -- core catalogue
-models           id, name, slug UNIQUE, description, creator_id FK NULL,
+models           id, name, slug UNIQUE, creator_id FK NULL,
                  source_url, license text NULL,
                  purchase_price / purchase_date / order_ref NULL,   -- bought models
-                 created_by FK users, created_at, updated_at,
-                 search tsvector GENERATED (name+description) + GIN index
+                 created_by FK users, created_at, updated_at
+                 -- description lives in revisions (below); search tsvector over
+                 -- name + current revision body, maintained by trigger + GIN index
+
+-- markdown descriptions with full edit history; every save is a new immutable
+-- revision (current = newest), optionally nameable ("v1", "v2")
+model_description_revisions
+                 id, model_id FK, body_md text, label citext NULL,
+                 created_by FK users, created_at
+                 UNIQUE (model_id, label) WHERE label IS NOT NULL
 
 model_variants   id, model_id FK, name,
-                 scale text NULL            -- '32mm', '75mm' … (free text, suggested values)
-                 support_state text NULL    -- 'unsupported'|'supported'|'supported_hollow'
-                                            -- |'lychee_project'|'merged'|… (CHECKed list + 'other')
-                 attributes jsonb DEFAULT '{}',   -- escape hatch for future axes
                  derived_from_variant_id FK NULL, -- user-made variants point at origin
                  print_notes text NULL,           -- per-variant print settings/notes
                  created_by, created_at
                  UNIQUE (model_id, name)
+
+-- variant attributes: declarable categories with declarable options (no
+-- hard-coded enums — the spec's scale/support examples are just seed data)
+variant_axes         id, name citext UNIQUE, description NULL, sort_order,
+                     created_by, created_at
+variant_axis_options id, axis_id FK, value citext, sort_order, created_by,
+                     created_at, UNIQUE (axis_id, value),
+                     UNIQUE (axis_id, id)   -- target for composite FK below
+variant_options      (variant_id, axis_id) PK,   -- one option per axis per variant
+                     option_id,
+                     FK (axis_id, option_id) REFERENCES variant_axis_options (axis_id, id)
+                     -- composite FK guarantees the option belongs to the axis
+-- migration seeds: axis 'scale' (32mm, 75mm) and axis 'support' (unsupported,
+-- supported, supported_hollow, lychee_project, merged) — editable/extendable data
 
 -- content-addressed storage
 blobs            sha256 char(64) PK, size bigint, created_at
@@ -224,6 +276,33 @@ settings         key text PK, value jsonb, updated_at, updated_by
                  -- e.g. 'renderer' → {"tool":"f3d","args":[…]}
 ```
 
+## Search design (unified text + tags + variant options)
+
+One endpoint (`GET /api/models?q=&tags=&opt=axis:value…`) resolved by a single
+SQL query in Postgres — no external search engine.
+
+- **Full text**: a `search tsvector` column on `models`, GIN-indexed, maintained
+  by triggers and built with weights from everything a user would call "the
+  model's text": name (weight A), tag names (B), creator name (B), and the
+  **current** description revision's markdown (C, tags stripped). Triggers on
+  `models`, `model_description_revisions` (insert = new current), `model_tags`,
+  and `creators` keep it fresh; no application code has to remember to reindex.
+  Queries use `websearch_to_tsquery('english', $q)` (supports quoted phrases,
+  `-exclusions`) and rank with `ts_rank`.
+- **Fuzzy/prefix match**: `pg_trgm` GIN index on `models.name` (and `tags.name`)
+  OR-ed in, so misspellings ("anubus") and substring hits still match; also
+  powers typeahead for tag and creator comboboxes.
+- **Tags**: AND semantics — each requested tag becomes an `EXISTS` against
+  `model_tags` (names resolved case-insensitively via `citext`).
+- **Variant options**: each `opt=axis:value` pair filters via a single `EXISTS`
+  requiring **one variant that satisfies all requested pairs at once** (a model
+  with a 32mm-supported and a 75mm-unsupported variant does NOT match
+  `32mm + unsupported`); the response marks which variants matched so the UI can
+  highlight them.
+- All filters compose as `AND` in one statement; ordered by `ts_rank` when `q`
+  is present, else `updated_at DESC`; paginated. Filter-sidebar counts come from
+  a grouped facet query over the same predicates.
+
 ## Architecture
 
 Follow `docs/PROJECT_TEMPLATE.md` closely:
@@ -264,8 +343,17 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
 
 - `POST /auth/register|login|logout`; `GET /api/me`
 - `GET/POST/PUT/DELETE /api/creators`
-- `GET/POST/PUT/DELETE /api/models` (+ `?tags=&q=&scale=&support=` unified search)
+- `GET/POST/PUT/DELETE /api/models` (+ `?tags=&q=&opt=axis:value&opt=…` unified
+  search — `opt` is repeatable, one per axis, values resolved against the
+  declarable axis/option tables)
+- `GET/POST/PUT/DELETE /api/variant-axes` and `…/variant-axes/{id}/options` —
+  manage declarable categories/options (editor+); variant create/update takes
+  `{axis: option}` assignments, and the UI comboboxes offer "add new option"
+  inline so new axes/options appear organically during import
 - `GET/POST/PUT/DELETE /api/models/{id}/variants`
+- `PUT /api/models/{id}/description` (creates a new revision);
+  `GET /api/models/{id}/description/revisions` (history);
+  `PUT …/revisions/{rev}/label` (name a revision, e.g. "v1")
 - `POST /api/variants/{id}/files` — multipart upload; a `.zip` triggers an
   `import_archive` job (original archive kept as kind='archive'); others stored
   directly with an optional `path`
@@ -285,13 +373,16 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
 orange primary (~`#FA6831`) on a clean white surface, plus a dark mode variant;
 layout mirrors printables.com: top app bar (logo, big centred search, user menu),
 model browsing as a dense card grid of large square-ish thumbnails with
-name/creator/like-count underneath, and a left filter sidebar (tags, scale,
-support state) on the browse page.
+name/creator/like-count underneath, and a left filter sidebar on the browse page
+(tags, plus one filter group per declared variant axis, generated dynamically
+from the axis/option tables).
 
 - Login/Register
-- Model grid: thumbnail cards, text search, tag chips, scale/support filters
-- Model detail: image gallery (primary image), variant list with per-variant file
-  tree (rebuilt from `path`), download buttons, print notes, tags, creator link
+- Model grid: thumbnail cards, text search, tag chips, dynamic per-axis filters
+- Model detail: image gallery (primary image), rendered-markdown description
+  (edit dialog with revision history + "name this version"), variant list with
+  per-variant file tree (rebuilt from `path`), download buttons, print notes,
+  tags, creator link
 - Model create/edit + upload/import dialog (drag-drop, zip import progress via
   job polling)
 - Creators list/detail
@@ -339,9 +430,12 @@ Schema above already accommodates these; flagged for the user:
   building) + `cargo clippy`; `npm run build` clean.
 - End-to-end via /verify: `docker compose up -d postgres`; run backend `--dev
   --anonymous` + Vite; then through the real UI/API: register/login (non-anonymous
-  run), create creator + model + 32mm/unsupported variant, upload a zip, watch
-  import job complete, confirm folder structure and file download round-trips
-  byte-identical (hash check), tag it, search by tag+scale+support, upload an
+  run), create creator + model + a variant assigned 32mm/unsupported from the
+  seeded axes (and declare a new axis+option inline to prove extensibility),
+  edit the markdown description twice and name a revision "v1", upload a zip,
+  watch import job complete, confirm folder structure and file download
+  round-trips byte-identical (hash check), tag it, search by text + tag + axis
+  options (verifying same-variant AND semantics), upload an
   image; if `f3d` is installed locally, confirm a preview renders and lands in the
   gallery, then change renderer args and use re-render(replace) on the stale image.
 - Duplicate check: upload the same STL twice → one blob on disk, two file rows.
