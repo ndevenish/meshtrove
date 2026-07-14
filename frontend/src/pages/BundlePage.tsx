@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container,
   Box,
@@ -25,9 +25,10 @@ import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, imageUrl, uploadWithProgress, type FileRecord } from '../api'
+import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
+import { startImport } from '../upload'
 import ModelCard from '../components/ModelCard'
 import BundleEditDialog from '../components/BundleEditDialog'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
@@ -37,6 +38,7 @@ import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
   const { user } = useAuth()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -246,10 +248,10 @@ export default function BundlePage() {
                   uploading
                     ? uploadPct < 100
                       ? `Uploading ${uploadPct}%…`
-                      : 'Unpacking…'
+                      : 'Staging…'
                     : 'Drop an archive to add its contents'
                 }
-                hint=".zip unpacks into this bundle, then sort into member models"
+                hint=".zip stages as an import, preset to add to this bundle"
                 accept=".zip"
                 busy={uploading}
                 progress={uploading && uploadPct < 100 ? uploadPct : undefined}
@@ -257,14 +259,14 @@ export default function BundlePage() {
                   setUploading(true)
                   setUploadPct(0)
                   try {
-                    const form = new FormData()
-                    form.append('file', droppedFiles[0])
-                    await uploadWithProgress<FileRecord[]>(
-                      `/api/bundles/${bundle.id}/files`,
-                      form,
-                      (f) => setUploadPct(Math.round(f * 100)),
+                    // Same staging path as every other drop — just preselecting
+                    // this bundle as the destination, so the archive can still be
+                    // reviewed (or sent somewhere else) before it lands.
+                    const staged = await startImport(droppedFiles[0], (f) =>
+                      setUploadPct(Math.round(f * 100)),
                     )
-                    await queryClient.invalidateQueries({ queryKey: ['bundle-files', bundle.id] })
+                    await queryClient.invalidateQueries({ queryKey: ['imports'] })
+                    navigate(`/imports/${staged.id}?bundle=${bundle.id}`)
                   } finally {
                     setUploading(false)
                   }

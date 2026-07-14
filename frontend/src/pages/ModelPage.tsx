@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import {
   Container,
   Box,
@@ -34,13 +34,11 @@ import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 export default function ModelPage() {
   const { id } = useParams<{ id: string }>()
   const { user } = useAuth()
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
-  const [promoting, setPromoting] = useState(false)
 
   const { data: model } = useQuery({
     queryKey: ['model', id],
@@ -190,34 +188,9 @@ export default function ModelPage() {
               {model.name}
             </Typography>
             {canEdit && (
-              <Stack direction="row" spacing={1}>
-                {model.bundles.length === 0 && (
-                  <Button
-                    startIcon={<Inventory2Icon />}
-                    disabled={promoting}
-                    onClick={async () => {
-                      setPromoting(true)
-                      try {
-                        const bundle = await api.createBundle({
-                          name: model.name,
-                          kind: 'collection',
-                          creator_id: model.creator_id,
-                        })
-                        await api.addModelToBundle(bundle.id, model.id)
-                        await queryClient.invalidateQueries()
-                        navigate(`/bundles/${bundle.id}`)
-                      } finally {
-                        setPromoting(false)
-                      }
-                    }}
-                  >
-                    Promote to bundle
-                  </Button>
-                )}
-                <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
-                  Edit
-                </Button>
-              </Stack>
+              <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
+                Edit
+              </Button>
             )}
           </Stack>
           {model.creator_name && (

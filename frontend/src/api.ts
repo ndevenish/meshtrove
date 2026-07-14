@@ -176,6 +176,30 @@ export interface BrowseResults {
   per_page: number
 }
 
+/// A dropped archive, staged. Neither a model nor a bundle: it stays out of
+/// browse until it is committed to one (see `commitImport`).
+export interface ImportSummary {
+  id: string
+  name: string
+  created_by: string
+  created_at: string
+  file_count: number
+  /** its archive is still unpacking; committing is refused until this clears */
+  unpacking: boolean
+}
+
+/// The single decision an import exists to defer: what is this archive?
+export type CommitTarget =
+  | { target: 'new_model'; name?: string; creator_id?: string | null }
+  | { target: 'new_bundle'; name?: string; creator_id?: string | null; kind?: string }
+  | { target: 'bundle'; bundle_id: string }
+
+export interface CommitResult {
+  type: 'model' | 'bundle'
+  id: string
+  slug: string
+}
+
 export interface Job {
   id: number
   kind: string
@@ -292,6 +316,16 @@ export const api = {
   bundleFiles: (id: string) => request<FileRecord[]>(`/api/bundles/${id}/files`),
   uploadBundleFiles: (id: string, form: FormData) =>
     request<FileRecord[]>(`/api/bundles/${id}/files`, { method: 'POST', body: form }),
+
+  imports: () => request<ImportSummary[]>('/api/imports'),
+  import: (id: string) => request<ImportSummary>(`/api/imports/${id}`),
+  createImport: (name: string) => request<ImportSummary>('/api/imports', json({ name })),
+  renameImport: (id: string, name: string) =>
+    request<ImportSummary>(`/api/imports/${id}`, { ...json({ name }), method: 'PUT' }),
+  deleteImport: (id: string) => request<void>(`/api/imports/${id}`, { method: 'DELETE' }),
+  importFiles: (id: string) => request<FileRecord[]>(`/api/imports/${id}/files`),
+  commitImport: (id: string, target: CommitTarget) =>
+    request<CommitResult>(`/api/imports/${id}/commit`, json(target)),
 
   createVariant: (modelId: string, body: unknown) =>
     request<VariantDetail>(`/api/models/${modelId}/variants`, json(body)),

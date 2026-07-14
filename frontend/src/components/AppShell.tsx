@@ -10,13 +10,14 @@ import {
   Menu,
   MenuItem,
   Button,
+  Badge,
   Tooltip,
   Snackbar,
   Alert,
   LinearProgress,
   alpha,
 } from '@mui/material'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import SearchIcon from '@mui/icons-material/Search'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
@@ -26,7 +27,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile'
 
 import { useAuth, useColorMode } from '../main'
 import { api } from '../api'
-import { importArchiveAsModel } from '../upload'
+import { startImport } from '../upload'
 
 export default function AppShell() {
   const { user, refresh } = useAuth()
@@ -42,9 +43,20 @@ export default function AppShell() {
   const [uploadName, setUploadName] = useState('')
   const [dropError, setDropError] = useState('')
 
-  // Global file-first drop: dropping a file anywhere creates a new model named
-  // after it and unpacks it. Editors/admins only; viewers can't create.
+  // Global file-first drop: dropping a file anywhere stages it as an import and
+  // takes you to its page, where you say what it is once it has unpacked.
+  // Editors/admins only; viewers can't create.
   const canCreate = !!user && user.role !== 'viewer'
+
+  // Imports are transient, so the badge polls: an unpack finishing is what makes
+  // one actionable, and that happens in the background.
+  const { data: staged } = useQuery({
+    queryKey: ['imports'],
+    queryFn: () => api.imports(),
+    enabled: canCreate,
+    refetchInterval: 5000,
+  })
+
   useEffect(() => {
     if (!canCreate) return
     let depth = 0
@@ -71,10 +83,10 @@ export default function AppShell() {
       setImporting(true)
       setProgress(0)
       setUploadName(file.name)
-      importArchiveAsModel(file, setProgress)
-        .then(async (model) => {
+      startImport(file, setProgress)
+        .then(async (staged) => {
           await queryClient.invalidateQueries()
-          navigate(`/models/${model.id}`)
+          navigate(`/imports/${staged.id}`)
         })
         .catch((err) => setDropError(err instanceof Error ? err.message : String(err)))
         .finally(() => setImporting(false))
@@ -151,6 +163,13 @@ export default function AppShell() {
             />
           </Box>
 
+          {canCreate && (
+            <Button component={Link} to="/imports" color="inherit">
+              <Badge badgeContent={staged?.length ?? 0} color="primary" sx={{ px: 0.5 }}>
+                Importing
+              </Badge>
+            </Button>
+          )}
           <Button component={Link} to="/creators" color="inherit">
             Creators
           </Button>
@@ -249,9 +268,11 @@ export default function AppShell() {
             <>
               <UploadFileIcon sx={{ fontSize: 64, color: 'primary.main' }} />
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                Drop to import as a new model
+                Drop to import
               </Typography>
-              <Typography color="text.secondary">.zip archives unpack automatically</Typography>
+              <Typography color="text.secondary">
+                .zip archives unpack, then you choose: model or bundle
+              </Typography>
             </>
           )}
         </Box>

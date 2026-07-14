@@ -1,0 +1,201 @@
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import {
+  Alert,
+  Autocomplete,
+  Box,
+  Button,
+  CircularProgress,
+  Container,
+  Divider,
+  LinearProgress,
+  Paper,
+  Snackbar,
+  Stack,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+} from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
+import ViewInArIcon from '@mui/icons-material/ViewInAr'
+import Inventory2Icon from '@mui/icons-material/Inventory2'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+
+import { api, type BundleSummary, type CommitTarget } from '../api'
+import { FileTree } from '../components/VariantSection'
+
+type Destination = 'new_model' | 'new_bundle' | 'bundle'
+
+/// The one place the model-vs-bundle question gets asked — after the archive has
+/// unpacked and you can see what's actually in it. Committing moves every staged
+/// file onto the destination and the import disappears.
+export default function ImportPage() {
+  const { id } = useParams<{ id: string }>()
+  const [params] = useSearchParams()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [name, setName] = useState('')
+  const [dest, setDest] = useState<Destination>(params.get('bundle') ? 'bundle' : 'new_model')
+  const [target, setTarget] = useState<BundleSummary | null>(null)
+  const [committing, setCommitting] = useState(false)
+  const [error, setError] = useState('')
+
+  const { data: staged, isLoading } = useQuery({
+    queryKey: ['import', id],
+    queryFn: () => api.import(id!),
+    enabled: !!id,
+    // While the archive is unpacking, the file list is still growing.
+    refetchInterval: (query) => (query.state.data?.unpacking ? 1500 : false),
+  })
+  const { data: files } = useQuery({
+    queryKey: ['import-files', id, staged?.file_count],
+    queryFn: () => api.importFiles(id!),
+    enabled: !!id,
+  })
+  const { data: bundles } = useQuery({
+    queryKey: ['bundles-all'],
+    queryFn: () => api.searchBundles(new URLSearchParams({ per_page: '100' })),
+  })
+
+  // Seed the editable name once the import loads, and preselect the bundle when
+  // the drop happened on a bundle page (?bundle=…).
+  useEffect(() => {
+    if (staged && !name) setName(staged.name)
+  }, [staged, name])
+  useEffect(() => {
+    const wanted = params.get('bundle')
+    if (wanted && !target && bundles) {
+      setTarget(bundles.bundles.find((b) => b.id === wanted) ?? null)
+    }
+  }, [params, bundles, target])
+
+  if (isLoading || !staged) return null
+
+  const commit = async () => {
+    if (!name.trim()) return setError('Give it a name first')
+    if (dest === 'bundle' && !target) return setError('Pick a bundle to add to')
+    setCommitting(true)
+    try {
+      const body: CommitTarget =
+        dest === 'bundle'
+          ? { target: 'bundle', bundle_id: target!.id }
+          : dest === 'new_bundle'
+            ? { target: 'new_bundle', name: name.trim(), kind: 'purchased' }
+            : { target: 'new_model', name: name.trim() }
+      const result = await api.commitImport(staged.id, body)
+      await queryClient.invalidateQueries()
+      navigate(result.type === 'model' ? `/models/${result.id}` : `/bundles/${result.id}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setCommitting(false)
+    }
+  }
+
+  const discard = async () => {
+    await api.deleteImport(staged.id)
+    await queryClient.invalidateQueries({ queryKey: ['imports'] })
+    navigate('/imports')
+  }
+
+  return (
+    <Container maxWidth="md" sx={{ py: 3 }}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 2 }}>
+        <Box sx={{ flexGrow: 1 }}>
+          <Typography variant="h5">Importing</Typography>
+          <Typography color="text.secondary" variant="body2">
+            {staged.file_count} file{staged.file_count === 1 ? '' : 's'} staged — not in your
+            library until you place it below.
+          </Typography>
+        </Box>
+        <Button color="error" startIcon={<DeleteIcon />} onClick={discard} disabled={committing}>
+          Discard
+        </Button>
+      </Stack>
+
+      {staged.unpacking && (
+        <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+          <Typography sx={{ mb: 1 }}>Unpacking the archive…</Typography>
+          <LinearProgress />
+        </Paper>
+      )}
+
+      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+        <TextField
+          fullWidth
+          label="Name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          helperText="Used for the model or bundle this becomes"
+          sx={{ mb: 2 }}
+        />
+
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+          What is this?
+        </Typography>
+        <ToggleButtonGroup
+          exclusive
+          value={dest}
+          onChange={(_, value) => value && setDest(value as Destination)}
+          sx={{ mb: 2, flexWrap: 'wrap' }}
+        >
+          <ToggleButton value="new_model" sx={{ gap: 1 }}>
+            <ViewInArIcon fontSize="small" /> One model
+          </ToggleButton>
+          <ToggleButton value="new_bundle" sx={{ gap: 1 }}>
+            <Inventory2Icon fontSize="small" /> A new bundle
+          </ToggleButton>
+          <ToggleButton value="bundle" sx={{ gap: 1 }}>
+            <Inventory2Icon fontSize="small" /> Add to an existing bundle
+          </ToggleButton>
+        </ToggleButtonGroup>
+
+        {dest === 'bundle' && (
+          <Autocomplete
+            options={bundles?.bundles ?? []}
+            getOptionLabel={(b) => b.name}
+            value={target}
+            onChange={(_, value) => setTarget(value)}
+            renderInput={(props) => <TextField {...props} label="Bundle" />}
+            sx={{ mb: 2 }}
+          />
+        )}
+
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          {dest === 'new_model'
+            ? 'Files land in the model’s unsorted list; sort them into variants on the model page.'
+            : 'Files land in the bundle’s unsorted list; carve them into member models on the bundle page.'}
+        </Typography>
+
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="large"
+            onClick={commit}
+            disabled={staged.unpacking || committing || staged.file_count === 0}
+            startIcon={committing ? <CircularProgress size={16} color="inherit" /> : undefined}
+          >
+            {staged.unpacking ? 'Waiting for unpack…' : 'Import'}
+          </Button>
+        </Stack>
+      </Paper>
+
+      <Divider sx={{ mb: 2 }} />
+      <Typography variant="h6" sx={{ mb: 1 }}>
+        Contents
+      </Typography>
+      <FileTree files={files ?? []} />
+
+      <Snackbar
+        open={!!error}
+        autoHideDuration={8000}
+        onClose={() => setError('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="error" onClose={() => setError('')}>
+          {error}
+        </Alert>
+      </Snackbar>
+    </Container>
+  )
+}
