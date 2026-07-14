@@ -11,6 +11,7 @@ pub mod import_layouts;
 pub mod imports;
 pub mod jobs;
 pub mod models;
+pub mod patch;
 pub mod tags;
 pub mod variant_tags;
 pub mod variants;

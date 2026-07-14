@@ -480,6 +480,57 @@ export const api = {
     request<RendererConfig>('/api/admin/settings/renderer', { ...json(config), method: 'PUT' }),
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
+
+  previewBundlePatch: (bundleId: string, zip: File) => {
+    const form = new FormData()
+    form.append('file', zip)
+    return request<PatchPreview>(`/api/bundles/${bundleId}/patch/preview`, {
+      method: 'POST',
+      body: form,
+    })
+  },
+  applyBundlePatch: (bundleId: string, zip: File, options: PatchApplyOptions) => {
+    const form = new FormData()
+    form.append('options', JSON.stringify(options))
+    form.append('file', zip)
+    return request<PatchApplyResult>(`/api/bundles/${bundleId}/patch`, {
+      method: 'POST',
+      body: form,
+    })
+  },
+}
+
+// --- Bundle metadata patch --------------------------------------------------
+
+export interface PatchPreview {
+  bundle_has_description: boolean
+  bundle_cover_count: number
+  matched: {
+    patch_name: string
+    model_id: string
+    model_name: string
+    add_tags: string[]
+    has_image: boolean
+  }[]
+  ambiguous: { patch_name: string; candidates: { id: string; name: string }[] }[]
+  unmatched_patch: string[]
+  unmatched_members: string[]
+}
+
+export interface PatchApplyOptions {
+  rename_models: boolean
+  model_tags: 'merge' | 'replace' | 'skip'
+  model_images: 'replace_generated' | 'add' | 'skip'
+  bundle_cover: boolean
+  bundle_description: boolean
+  /** patch model label -> chosen member id; resolves ambiguous / adopts unmatched */
+  matches: Record<string, string>
+}
+
+export interface PatchApplyResult {
+  models_updated: number
+  images_added: number
+  tags_added: number
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`

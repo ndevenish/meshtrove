@@ -15,6 +15,7 @@ import {
   Alert,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
+import CloudUploadIcon from '@mui/icons-material/CloudUpload'
 import StarIcon from '@mui/icons-material/Star'
 import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
@@ -32,6 +33,7 @@ import { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ImportErrorDialog from '../components/ImportErrorDialog'
+import BundlePatchDialog from '../components/BundlePatchDialog'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -44,6 +46,7 @@ export default function BundlePage() {
   // Save and Cancel take the Edit button's place in the header.
   const editorRef = useRef<DetailsEditorHandle>(null)
   const [saving, setSaving] = useState(false)
+  const [patchOpen, setPatchOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState('')
@@ -230,13 +233,23 @@ export default function BundlePage() {
           </Stack>
 
           {editing && (
-            <BundleDetailsEditor
-              key={bundle.id}
-              ref={editorRef}
-              bundle={bundle}
-              onDone={() => setEditing(false)}
-              onBusyChange={setSaving}
-            />
+            <>
+              <BundleDetailsEditor
+                key={bundle.id}
+                ref={editorRef}
+                bundle={bundle}
+                onDone={() => setEditing(false)}
+                onBusyChange={setSaving}
+              />
+              <Button
+                size="small"
+                startIcon={<CloudUploadIcon />}
+                onClick={() => setPatchOpen(true)}
+                sx={{ mb: 2 }}
+              >
+                Import scraped metadata…
+              </Button>
+            </>
           )}
           {!editing && bundle.creator_name && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
@@ -301,6 +314,12 @@ export default function BundlePage() {
         entity={bundle}
         canEdit={!!canEdit}
         onChange={refresh}
+      />
+      <BundlePatchDialog
+        bundleId={bundle.id}
+        open={patchOpen}
+        onClose={() => setPatchOpen(false)}
+        onApplied={refresh}
       />
       <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
       <Snackbar
