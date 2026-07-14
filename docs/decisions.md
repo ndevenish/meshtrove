@@ -73,7 +73,18 @@ Implementation quirks worth knowing (found the hard way):
 ## Additions beyond the spec
 
 - License + purchase tracking (price/date/order ref) on models.
-- Original uploaded archives kept as `kind='archive'` file rows for provenance.
+- Original uploaded archives are **not** kept (reversed 2026-07-14, migration
+  0006). Keeping the zip as a `kind='archive'` file row meant the store held the
+  archive *and* every file unpacked out of it — a permanent ~1.3–1.5x surcharge
+  for bytes nobody browses, and the direct cause of a disk filling mid-upload.
+  Committing an import now deletes the archive and writes a `source_archives`
+  row: filename, sha256, size — the provenance anyone actually asks for ("what
+  was this dropped from?"), at ~100 bytes instead of gigabytes. An import that is
+  *only* an archive (its unpack failed) keeps it: there would be nothing left.
+- **Orphan-blob GC** (`services/gc.rs`) exists because of the above. Blobs are
+  shared, so deleting a `files` row can never delete bytes on its own; `collect_blob`
+  drops a blob only when no `files` *or* `images` row still points at it, and only
+  after the transaction that removed the last reference has committed.
 - First registered user becomes admin; later users start as viewers.
 
 ## File-first import + recategorisation (Phases 1–2 done, 3 remaining)

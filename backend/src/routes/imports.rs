@@ -27,6 +27,7 @@ use crate::routes::models;
 use crate::routes::tags::upsert_tag;
 use crate::routes::variant_tags::upsert_variant_tag;
 use crate::routes::variants::{set_variant_tags, variant_with_tag_set};
+use crate::services::gc;
 use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan, PlanVariant};
 use crate::state::AppState;
 use crate::util::slugify;
@@ -326,6 +327,11 @@ async fn commit(
 
     let mut tx = state.db.begin().await?;
 
+    // What the import was unpacked *from*. Read while the files still carry
+    // `import_id`; the rows themselves are dropped further down, once the commit
+    // knows which model or bundle to hang the provenance off.
+    let archives = gc::redundant_archives(&mut tx, id).await?;
+
     // Dry-run the layout carve first: a bad pattern or an unmapped value must
     // fail the commit before anything is created. Same `analyze` as the plan
     // endpoint, so the preview the user confirmed is exactly what happens.
@@ -474,10 +480,45 @@ async fn commit(
         }
     };
 
+    // Drop the original archive: every byte in it is now also on disk as the
+    // files it unpacked into, so keeping it charges the store ~1.3-1.5x forever
+    // for a copy nobody browses. What survives is the provenance — name, hash,
+    // size of what was dropped — which is the part anyone actually asks for.
+    let (owner_model, owner_bundle) = match result.kind.as_str() {
+        "model" => (Some(result.id), None),
+        _ => (None, Some(result.id)),
+    };
+    for archive in &archives {
+        sqlx::query!(
+            "INSERT INTO source_archives (model_id, bundle_id, filename, sha256, size)
+             VALUES ($1, $2, $3, $4, $5)",
+            owner_model,
+            owner_bundle,
+            archive.filename,
+            archive.sha256,
+            archive.size,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!("DELETE FROM files WHERE id = $1", archive.file_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
     sqlx::query!("DELETE FROM imports WHERE id = $1", id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+
+    // Only now that the last reference is committed can the bytes go: a rollback
+    // above must not find its blob already deleted from under it.
+    let mut freed: i64 = 0;
+    for archive in &archives {
+        freed += gc::collect_blob(&state, &archive.sha256).await?;
+    }
+    if freed > 0 {
+        tracing::info!(import = %id, freed, archives = archives.len(), "dropped source archives");
+    }
 
     // A fresh model gets a browse thumbnail from its first STL — whether that
     // file sits unsorted on the model or was carved onto one of its variants.

@@ -270,8 +270,9 @@ async fn consume_fields(
 
                 // A zip unpacks in the background into its owner's files: onto a
                 // variant, into a model's or bundle's "unsorted" bucket, or into
-                // an import's staging bucket. The original archive row is kept
-                // for provenance and travels with the rest on commit.
+                // an import's staging bucket. The archive itself only lives as
+                // long as the import does — committing one drops the original and
+                // keeps a `source_archives` row in its place (services/gc.rs).
                 if matches!(record.kind, FileKind::Archive)
                     && filename.to_lowercase().ends_with(".zip")
                 {
