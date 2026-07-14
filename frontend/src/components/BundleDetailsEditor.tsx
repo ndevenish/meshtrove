@@ -1,18 +1,20 @@
-import { useState } from 'react'
-import { Alert, Autocomplete, Button, MenuItem, Stack, TextField } from '@mui/material'
+import { forwardRef, useImperativeHandle, useState } from 'react'
+import { Alert, Autocomplete, MenuItem, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type BundleDetail } from '../api'
+import type { DetailsEditorHandle } from './ModelDetailsEditor'
 
 /// The bundle's fields, edited in place. Mirrors ModelDetailsEditor — a bundle
 /// has a `kind` and no variants, and is otherwise the same handful of facts.
-export default function BundleDetailsEditor({
-  bundle,
-  onDone,
-}: {
-  bundle: BundleDetail
-  onDone: () => void
-}) {
+const BundleDetailsEditor = forwardRef<
+  DetailsEditorHandle,
+  {
+    bundle: BundleDetail
+    onDone: () => void
+    onBusyChange?: (busy: boolean) => void
+  }
+>(function BundleDetailsEditor({ bundle, onDone, onBusyChange }, ref) {
   const queryClient = useQueryClient()
   const [name, setName] = useState(bundle.name)
   const [kind, setKind] = useState(bundle.kind)
@@ -21,14 +23,16 @@ export default function BundleDetailsEditor({
   const [sourceUrl, setSourceUrl] = useState(bundle.source_url ?? '')
   const [description, setDescription] = useState(bundle.description_md ?? '')
   const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
 
   const save = async () => {
-    if (!name.trim()) return setError('A bundle needs a name')
-    setBusy(true)
+    if (!name.trim()) {
+      setError('A bundle needs a name')
+      throw new Error('A bundle needs a name')
+    }
+    onBusyChange?.(true)
     setError('')
     try {
       const typed = creatorName.trim()
@@ -54,9 +58,13 @@ export default function BundleDetailsEditor({
       onDone()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-      setBusy(false)
+      throw err
+    } finally {
+      onBusyChange?.(false)
     }
   }
+
+  useImperativeHandle(ref, () => ({ save }))
 
   return (
     <Stack spacing={2} sx={{ mb: 2 }}>
@@ -99,14 +107,8 @@ export default function BundleDetailsEditor({
         multiline
         minRows={4}
       />
-      <Stack direction="row" spacing={1}>
-        <Button variant="contained" onClick={save} disabled={busy}>
-          Save
-        </Button>
-        <Button onClick={onDone} disabled={busy}>
-          Cancel
-        </Button>
-      </Stack>
     </Stack>
   )
-}
+})
+
+export default BundleDetailsEditor

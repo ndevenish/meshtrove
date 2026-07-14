@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Container,
@@ -28,6 +28,7 @@ import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import ModelCard from '../components/ModelCard'
 import BundleDetailsEditor from '../components/BundleDetailsEditor'
+import { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ImportErrorDialog from '../components/ImportErrorDialog'
@@ -40,6 +41,9 @@ export default function BundlePage() {
   // controls — remove a model from the bundle, delete a file, delete an image —
   // appear only here.
   const [editing, setEditing] = useState(false)
+  // Save and Cancel take the Edit button's place in the header.
+  const editorRef = useRef<DetailsEditorHandle>(null)
+  const [saving, setSaving] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState('')
@@ -204,10 +208,35 @@ export default function BundlePage() {
                 Edit
               </Button>
             )}
+            {canEdit && editing && (
+              <Stack direction="row" spacing={1}>
+                <Button
+                  variant="contained"
+                  disabled={saving}
+                  onClick={() => {
+                    void editorRef.current?.save().catch(() => {
+                      // The editor reports why; stay in edit mode rather than
+                      // discarding what was typed.
+                    })
+                  }}
+                >
+                  Save
+                </Button>
+                <Button disabled={saving} onClick={() => setEditing(false)}>
+                  Cancel
+                </Button>
+              </Stack>
+            )}
           </Stack>
 
           {editing && (
-            <BundleDetailsEditor key={bundle.id} bundle={bundle} onDone={() => setEditing(false)} />
+            <BundleDetailsEditor
+              key={bundle.id}
+              ref={editorRef}
+              bundle={bundle}
+              onDone={() => setEditing(false)}
+              onBusyChange={setSaving}
+            />
           )}
           {!editing && bundle.creator_name && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>

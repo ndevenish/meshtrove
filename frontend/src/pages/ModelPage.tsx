@@ -26,7 +26,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
-import ModelDetailsEditor from '../components/ModelDetailsEditor'
+import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
 import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
@@ -40,6 +40,11 @@ export default function ModelPage() {
   // appear only here. Browsing a model should not be one stray click away from
   // deleting a file of it.
   const [editing, setEditing] = useState(false)
+  // Save and Cancel replace Edit in the header — leaving the mode belongs where
+  // entering it was. The fields live in the editor below, so the page reaches
+  // into it to save.
+  const editorRef = useRef<DetailsEditorHandle>(null)
+  const [saving, setSaving] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
@@ -246,10 +251,35 @@ export default function ModelPage() {
                 Edit
               </Button>
             )}
+            {canEdit && editing && (
+              <Stack direction="row" spacing={1}>
+                <Button
+                  variant="contained"
+                  disabled={saving}
+                  onClick={() => {
+                    void editorRef.current?.save().catch(() => {
+                      // The editor shows the reason; stay in edit mode so the
+                      // half-typed changes are not thrown away.
+                    })
+                  }}
+                >
+                  Save
+                </Button>
+                <Button disabled={saving} onClick={() => setEditing(false)}>
+                  Cancel
+                </Button>
+              </Stack>
+            )}
           </Stack>
 
           {editing && (
-            <ModelDetailsEditor key={model.id} model={model} onDone={() => setEditing(false)} />
+            <ModelDetailsEditor
+              key={model.id}
+              ref={editorRef}
+              model={model}
+              onDone={() => setEditing(false)}
+              onBusyChange={setSaving}
+            />
           )}
           {!editing && model.creator_name && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
