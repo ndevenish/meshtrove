@@ -12,13 +12,17 @@ export type StagedFile = { file: File; path: string }
 /// was actually dropped (the folder, or the single file).
 export type Drop = { name: string; files: StagedFile[] }
 
-/// Derive a human name: strip a leading "DownloadAll_" prefix, turn separators
-/// into spaces, and Title Case. Seeds the import's name, and through it the
-/// model/bundle it becomes. Folders keep their dots (a `v1.2` folder is not an
-/// extension), so only filenames get the extension stripped.
+/// Derive a human name: strip a leading "DownloadAll_" prefix, split camel case,
+/// turn separators into spaces, and Title Case. Seeds the import's name, and
+/// through it the model/bundle it becomes. Folders keep their dots (a `v1.2`
+/// folder is not an extension), so only filenames get the extension stripped.
 export function deriveModelName(name: string, stripExtension = true): string {
   const base = (stripExtension ? name.replace(/\.[^.]+$/, '') : name)
     .replace(/^DownloadAll[_-]?/i, '') // Loot-style "DownloadAll_32mm"
+    // `KnightRider` -> `Knight Rider`, `STLKnight` -> `STL Knight`: a run of
+    // capitals is an acronym, and breaks only before the word it runs into.
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/[_-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()

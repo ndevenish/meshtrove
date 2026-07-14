@@ -320,7 +320,10 @@ pub fn analyze(
                 examples.examples.push(raw.to_string());
             }
             match role {
-                Role::ModelName => model_name = Some(raw.to_string()),
+                // Archives name their folders in camel case constantly, and the
+                // capture becomes the model's name verbatim — so `DwarfBerserker`
+                // would be the name in the library. Put the spaces back.
+                Role::ModelName => model_name = Some(crate::util::expand_camel_case(raw)),
                 Role::ModelTag => {
                     if !model_tags.iter().any(|t| fold(t) == fold(raw)) {
                         model_tags.push(raw.to_string());

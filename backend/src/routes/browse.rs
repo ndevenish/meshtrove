@@ -67,6 +67,21 @@ fn push_bundle_where(
     }
 }
 
+/// The front page shows a bundle *instead of* the twenty models inside it: one
+/// card for the box set, not a wall of identikit knights that says nothing about
+/// where they came from. A member model is therefore collapsed into its bundle —
+/// but only while nobody is looking for anything.
+///
+/// The moment there is a query or a filter, every model is back in the running,
+/// members included: a search that cannot find a model because it happens to
+/// live in a bundle is a search that lies. So this narrows the *idle* browse and
+/// nothing else.
+fn push_member_collapse(qb: &mut QueryBuilder<sqlx::Postgres>, idle: bool) {
+    if idle {
+        qb.push(" AND NOT EXISTS (SELECT 1 FROM bundle_models bm WHERE bm.model_id = m.id)");
+    }
+}
+
 async fn browse(
     State(state): State<AppState>,
     _user: User,
@@ -78,9 +93,13 @@ async fn browse(
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(30).clamp(1, 100);
 
+    // Nobody is looking for anything in particular: the plain front page.
+    let idle = q.is_empty() && tags.is_empty() && vtags.is_empty();
+
     // Count over a lean union of just the matching ids.
     let mut cq = QueryBuilder::new("SELECT count(*) FROM (SELECT m.id FROM models m WHERE TRUE");
     push_filters(&mut cq, &q, &tags, &vtags);
+    push_member_collapse(&mut cq, idle);
     cq.push(" UNION ALL SELECT b.id FROM bundles b WHERE TRUE");
     push_bundle_where(&mut cq, &q, &tags, !vtags.is_empty());
     cq.push(") x");
@@ -110,6 +129,7 @@ async fn browse(
     }
     qb.push(" FROM models m LEFT JOIN creators c ON c.id = m.creator_id WHERE TRUE");
     push_filters(&mut qb, &q, &tags, &vtags);
+    push_member_collapse(&mut qb, idle);
 
     qb.push(
         r#" UNION ALL

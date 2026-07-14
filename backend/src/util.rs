@@ -19,9 +19,55 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
+/// Put the spaces back into a name that never had them: `KnightRider` reads as
+/// "Knight Rider", `STLKnight` as "STL Knight". Archives name folders in camel
+/// case constantly, and a library full of `DwarfBerserkerAxe` is a library you
+/// cannot skim.
+///
+/// Two boundaries, and only two: lower/digit followed by upper (`rKnight`), and
+/// a run of capitals followed by a capitalised word (`STLKnight` — the run is an
+/// acronym, and the last letter of it starts the next word). Casing is left
+/// exactly as found: an acronym stays an acronym.
+pub fn expand_camel_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            let prev = chars[i - 1];
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            let ends_a_word = prev.is_lowercase() || prev.is_numeric();
+            let ends_an_acronym = prev.is_uppercase() && next_is_lower;
+            if (ends_a_word || ends_an_acronym) && !out.ends_with(' ') {
+                out.push(' ');
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::slugify;
+    use super::{expand_camel_case, slugify};
+
+    #[test]
+    fn camel_case_gets_its_spaces_back() {
+        assert_eq!(expand_camel_case("KnightRider"), "Knight Rider");
+        assert_eq!(
+            expand_camel_case("DwarfBerserkerAxe"),
+            "Dwarf Berserker Axe"
+        );
+        // An acronym is a word: the run breaks before the capital that starts
+        // the next one, not between every letter of it.
+        assert_eq!(expand_camel_case("STLKnight"), "STL Knight");
+        assert_eq!(expand_camel_case("USB"), "USB");
+        // Digits end a word too.
+        assert_eq!(expand_camel_case("Knight2Pose"), "Knight2 Pose");
+        // Already spaced, or nothing to do: left alone.
+        assert_eq!(expand_camel_case("Knight Rider"), "Knight Rider");
+        assert_eq!(expand_camel_case("knight"), "knight");
+        assert_eq!(expand_camel_case(""), "");
+    }
 
     #[test]
     fn slugs() {

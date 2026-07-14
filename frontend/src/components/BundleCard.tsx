@@ -47,6 +47,26 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
             color="primary"
             sx={{ position: 'absolute', top: 8, left: 8, height: 20 }}
           />
+          {/* What the card is standing in for. On the front page a bundle takes
+              the place of its members, so the one thing it owes the reader is how
+              many models are behind it. Sits on the image, with its own scrim —
+              a preview photo can be any colour underneath. */}
+          <Typography
+            variant="caption"
+            sx={{
+              position: 'absolute',
+              bottom: 8,
+              left: 8,
+              px: 0.75,
+              py: 0.25,
+              borderRadius: 1,
+              lineHeight: 1.4,
+              color: 'common.white',
+              backgroundColor: 'rgba(0, 0, 0, 0.6)',
+            }}
+          >
+            {bundle.model_count} model{bundle.model_count === 1 ? '' : 's'}
+          </Typography>
         </Box>
         <CardContent sx={{ flexGrow: 1, width: '100%', pb: '12px !important' }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.25 }} noWrap>
@@ -56,10 +76,6 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
             {bundle.creator_name ?? 'Unknown creator'}
           </Typography>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.75 }}>
-            <Inventory2Icon sx={{ fontSize: 16, color: 'primary.main' }} />
-            <Typography variant="caption">
-              {bundle.model_count} model{bundle.model_count === 1 ? '' : 's'}
-            </Typography>
             <Box sx={{ flexGrow: 1 }} />
             {bundle.tags.slice(0, 2).map((tag) => (
               <Chip key={tag} label={tag} size="small" variant="outlined" />

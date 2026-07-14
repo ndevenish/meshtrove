@@ -11,8 +11,6 @@ import {
   IconButton,
   Tooltip,
   Divider,
-  Autocomplete,
-  TextField,
   Snackbar,
   Alert,
 } from '@mui/material'
@@ -312,6 +310,11 @@ export default function BundlePage() {
   )
 }
 
+/// A bundle's members. Deliberately *not* a place to add a model: membership is
+/// something a carve decides, on the way in from an import — picking an existing
+/// model out of a search box and dropping it in a box set is how a model ends up
+/// in two collections it was never sold with. Removing one stays, because a bad
+/// carve has to be undoable.
 function MembersSection({
   bundleId,
   models,
@@ -324,20 +327,11 @@ function MembersSection({
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
-  const [search, setSearch] = useState('')
-  const { data: candidates } = useQuery({
-    queryKey: ['model-search', search],
-    queryFn: () => api.searchModels(new URLSearchParams({ q: search, per_page: '10' })),
-    enabled: canEdit && search.trim().length > 0,
-  })
 
   const refreshAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
     onChange()
   }
-
-  const memberIds = new Set(models.map((m) => m.id))
-  const options = (candidates?.models ?? []).filter((m) => !memberIds.has(m.id))
 
   return (
     <Box>
@@ -348,30 +342,10 @@ function MembersSection({
         </Typography>
       </Stack>
 
-      {canEdit && (
-        <Autocomplete
-          sx={{ mb: 2, maxWidth: 420 }}
-          options={options}
-          getOptionLabel={(m) => m.name}
-          filterOptions={(x) => x}
-          onInputChange={(_, value) => setSearch(value)}
-          onChange={async (_, value) => {
-            if (value) {
-              await api.addModelToBundle(bundleId, value.id)
-              setSearch('')
-              await refreshAll()
-            }
-          }}
-          renderInput={(params) => (
-            <TextField {...params} size="small" label="Add an existing model…" />
-          )}
-        />
-      )}
-
       {models.length === 0 ? (
         <Typography color="text.secondary" variant="body2">
           No models in this bundle yet
-          {canEdit ? ' — add one above, or drop an archive to unpack and sort' : ''}.
+          {canEdit ? ' — drop an archive or folder above, then carve it into models' : ''}.
         </Typography>
       ) : (
         <Box
