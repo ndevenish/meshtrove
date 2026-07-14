@@ -43,10 +43,21 @@ export default function ModelCard({ model }: { model: ModelSummary }) {
             {model.creator_name ?? 'Unknown creator'}
           </Typography>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.75 }}>
-            <FavoriteIcon sx={{ fontSize: 16, color: 'primary.main' }} />
-            <Typography variant="caption">{model.like_count}</Typography>
+            {/* Nothing can set a like yet (no endpoint, no button), so a heart on
+                every card is a row of honest zeroes telling the reader nothing.
+                Shown only once there is something to show — which is also what
+                makes this outlive the feature landing. */}
+            {model.like_count > 0 && (
+              <>
+                <FavoriteIcon sx={{ fontSize: 16, color: 'primary.main' }} />
+                <Typography variant="caption">{model.like_count}</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  ·
+                </Typography>
+              </>
+            )}
             <Typography variant="caption" color="text.secondary">
-              · {model.variant_count} variant{model.variant_count === 1 ? '' : 's'}
+              {model.variant_count} variant{model.variant_count === 1 ? '' : 's'}
             </Typography>
             <Box sx={{ flexGrow: 1 }} />
             {model.tags.slice(0, 2).map((tag) => (
