@@ -58,14 +58,24 @@ export default function ImportPage() {
     refetchInterval: (query) => (query.state.data?.unpacking ? 1500 : false),
   })
   // Poll the *same* query while the archive unpacks, so arriving files are added
-  // to a list that stays mounted. Keying it on `file_count` made every tick a
+  // to a list that stays mounted. (Keying it on `file_count` made every tick a
   // different query with an empty cache: `files` blanked to undefined and
-  // everything drawn from it tore down and rebuilt — the page-wide flicker.
+  // everything drawn from it tore down and rebuilt — a page-wide flicker.)
+  //
+  // Stop on what we're holding, not on the flag: the last files land *between*
+  // the final poll and `unpacking` going false, so a poll that stops when the
+  // flag clears stops one fetch too early and leaves the tail of the archive
+  // off the page until a reload. Keep going until the list matches the count the
+  // import reports.
   const { data: files } = useQuery({
     queryKey: ['import-files', id],
     queryFn: () => api.importFiles(id!),
     enabled: !!id,
-    refetchInterval: staged?.unpacking ? 1500 : false,
+    refetchInterval: (query) => {
+      if (!staged) return false
+      const held = query.state.data?.length ?? 0
+      return staged.unpacking || held !== staged.file_count ? 1500 : false
+    },
   })
   const { data: bundles } = useQuery({
     queryKey: ['bundles-all'],
