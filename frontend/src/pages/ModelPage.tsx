@@ -11,6 +11,8 @@ import {
   IconButton,
   Tooltip,
   Divider,
+  Snackbar,
+  Alert,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import StarIcon from '@mui/icons-material/Star'
@@ -23,6 +25,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
+import { usePasteImage } from '../usePasteImage'
 import ModelEditDialog from '../components/ModelEditDialog'
 import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
@@ -36,11 +39,24 @@ export default function ModelPage() {
   const [editOpen, setEditOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
+  const [toast, setToast] = useState('')
 
   const { data: model } = useQuery({
     queryKey: ['model', id],
     queryFn: () => api.model(id!),
     enabled: !!id,
+  })
+
+  const canEditModel =
+    !!model &&
+    !!user &&
+    (user.role === 'admin' || (user.role === 'editor' && user.id === model.created_by))
+  usePasteImage(canEditModel, 'models', id ?? '', {
+    onUploaded: () => {
+      void queryClient.invalidateQueries({ queryKey: ['model', id] })
+      setToast('Image added from clipboard')
+    },
+    onError: (m) => setToast(`Paste failed: ${m}`),
   })
 
   if (!model) return null
@@ -80,7 +96,14 @@ export default function ModelPage() {
                 sx={{ width: '100%', height: '100%', objectFit: 'contain' }}
               />
             ) : (
-              <Typography color="text.secondary">No images yet</Typography>
+              <Typography color="text.secondary" sx={{ textAlign: 'center', px: 2 }}>
+                No images yet
+                {canEdit && (
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                    Paste an image (⌘V) to add one
+                  </Typography>
+                )}
+              </Typography>
             )}
           </Paper>
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}>
@@ -258,6 +281,19 @@ export default function ModelPage() {
         canEdit={!!canEdit}
         onChange={refresh}
       />
+      <Snackbar
+        open={!!toast}
+        autoHideDuration={4000}
+        onClose={() => setToast('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          severity={toast.startsWith('Paste failed') ? 'error' : 'success'}
+          onClose={() => setToast('')}
+        >
+          {toast}
+        </Alert>
+      </Snackbar>
     </Container>
   )
 }
