@@ -22,8 +22,15 @@ import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, type BundleSummary, type CommitTarget } from '../api'
+import {
+  api,
+  type BundleSummary,
+  type CommitTarget,
+  type LayoutPlan,
+  type LayoutSpec,
+} from '../api'
 import { FileTree } from '../components/VariantSection'
+import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayoutPanel'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
 
@@ -36,8 +43,10 @@ export default function ImportPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
+  const [nameEdited, setNameEdited] = useState(false)
   const [dest, setDest] = useState<Destination>(params.get('bundle') ? 'bundle' : 'new_model')
   const [target, setTarget] = useState<BundleSummary | null>(null)
+  const [layout, setLayout] = useState<{ spec: LayoutSpec; plan: LayoutPlan } | null>(null)
   const [committing, setCommitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -70,6 +79,13 @@ export default function ImportPage() {
     }
   }, [params, bundles, target])
 
+  // A one-model layout that captured a single model name suggests it — unless
+  // the user has typed their own.
+  const suggestedName = dest === 'new_model' ? layout?.plan.models[0]?.name : undefined
+  useEffect(() => {
+    if (suggestedName && !nameEdited) setName(suggestedName)
+  }, [suggestedName, nameEdited])
+
   if (isLoading || !staged) return null
 
   const commit = async () => {
@@ -77,12 +93,13 @@ export default function ImportPage() {
     if (dest === 'bundle' && !target) return setError('Pick a bundle to add to')
     setCommitting(true)
     try {
+      const spec = layout?.spec
       const body: CommitTarget =
         dest === 'bundle'
-          ? { target: 'bundle', bundle_id: target!.id }
+          ? { target: 'bundle', bundle_id: target!.id, layout: spec }
           : dest === 'new_bundle'
-            ? { target: 'new_bundle', name: name.trim(), kind: 'purchased' }
-            : { target: 'new_model', name: name.trim() }
+            ? { target: 'new_bundle', name: name.trim(), kind: 'purchased', layout: spec }
+            : { target: 'new_model', name: name.trim(), layout: spec }
       const result = await api.commitImport(staged.id, body)
       await queryClient.invalidateQueries()
       navigate(result.type === 'model' ? `/models/${result.id}` : `/bundles/${result.id}`)
@@ -125,7 +142,10 @@ export default function ImportPage() {
           fullWidth
           label="Name"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value)
+            setNameEdited(true)
+          }}
           helperText="Used for the model or bundle this becomes"
           sx={{ mb: 2 }}
         />
@@ -161,10 +181,39 @@ export default function ImportPage() {
           />
         )}
 
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+          Carve it up? (optional)
+        </Typography>
+        <ImportLayoutPanel
+          importId={staged.id}
+          fileCount={staged.file_count}
+          target={dest === 'new_model' ? 'model' : 'bundle'}
+          onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
+        />
+
+        {dest === 'new_model' && layout && layout.plan.model_names.length > 1 && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={
+              <Button size="small" onClick={() => setDest('new_bundle')}>
+                Make it a bundle
+              </Button>
+            }
+          >
+            This layout finds {layout.plan.model_names.length} different model names — it looks like
+            a collection.
+          </Alert>
+        )}
+
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          {dest === 'new_model'
-            ? 'Files land in the model’s unsorted list; sort them into variants on the model page.'
-            : 'Files land in the bundle’s unsorted list; carve them into member models on the bundle page.'}
+          {layout
+            ? dest === 'new_model'
+              ? `Matched files are carved into ${layout.plan.models[0]?.variants.length ?? 0} variant(s); the rest land in the model’s unsorted list.`
+              : `Matched files are carved into ${layout.plan.models.length} member model(s) with their variants; the rest land in the bundle’s unsorted list.`
+            : dest === 'new_model'
+              ? 'Files land in the model’s unsorted list; sort them into variants on the model page.'
+              : 'Files land in the bundle’s unsorted list; carve them into member models on the bundle page.'}
         </Typography>
 
         <Stack direction="row" spacing={1}>
@@ -184,7 +233,15 @@ export default function ImportPage() {
       <Typography variant="h6" sx={{ mb: 1 }}>
         Contents
       </Typography>
-      <FileTree files={files ?? []} />
+      {layout ? (
+        <AnnotatedFileList
+          files={files ?? []}
+          annotations={layout.plan.annotations}
+          roles={layout.spec.roles}
+        />
+      ) : (
+        <FileTree files={files ?? []} />
+      )}
 
       <Snackbar
         open={!!error}

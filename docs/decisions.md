@@ -132,24 +132,25 @@ Real archive shapes driving it: `docs/import-layouts.md`.
   bundle" / "Flatten to model" conversions (both now gone). A dedicated table,
   rather than a `status` flag on `bundles`, means a staged import cannot leak
   into the library through a query that forgot to filter it out.
-- **Phase 3 (todo) — suggestions, once the contents are known:** every choice on
-  the import page is currently a blank form. The name is `deriveModelName(file)`
-  (the archive's filename, de-slugged), the destination toggle defaults to *One
-  model* (or the bundle you dropped on), and the carve into variants/member
-  models is entirely by hand afterwards. Phase 3 reads the **staged file tree**
-  — which imports made available *before* anything is committed — and turns each
-  of those into a pre-filled default:
-  - **Destination:** shallow + few files + no support-suffix folders ⇒ *One
-    model*; deep nesting, many leaf folders, `DownloadAll_<scale>` naming ⇒ *A
-    new bundle*. Preselects the toggle in `ImportPage`; the user still confirms.
-  - **Name:** from the wrapper folder inside the archive rather than the
-    filename, when they disagree.
-  - **The carve:** map the Loot layout (`docs/import-layouts.md` B) onto the
-    variant tags we already seed — leaf folders → member models, `_NoSupports` /
-    `_Supported_LYCHEE` suffixes and the `32mm` wrapper → variant tags on one
-    variant, top-level `1 - Heroes` → a model tag, *not* a variant tag. Feeds the
-    unsorted-file sections (`UnsortedSection`, `BundleUnsortedSection`) as
-    a proposed grouping to accept or edit.
+- **Phase 3 (carve done 2026-07-14, heuristics partial) — suggestions, once the
+  contents are known:** Phase 3 reads the **staged file tree** — which imports
+  made available *before* anything is committed — and turns each choice on the
+  import page into a pre-filled default:
+  - **Destination (partial):** the layout panel's multi-model-name hint covers
+    the bundle direction ("this layout finds N model names — make it a
+    bundle"); a folder-shape heuristic preselecting the toggle before any
+    layout is chosen remains todo.
+  - **Name (done via layouts):** a one-model layout with a single captured
+    model name prefills the name field, unless the user typed their own.
+  - **The carve (done 2026-07-14):** regex **import layout templates** with
+    role-assigned capture groups — full design under *Import layout templates*
+    in `docs/plan.md`. Implemented as migration 0005 (`import_layouts` +
+    seeded Loot Studios preset), `services/layout.rs` (`analyze`, fancy-regex,
+    unit-tested), `POST /api/imports/{id}/plan` (dry run: coverage, grouped
+    tree, per-file highlight spans + resolved chips), `layout` on every commit
+    target (atomic carve; reuses matching member models so a 75mm drop lands
+    on the 32mm drop's models; refuses unmapped values), `/api/import-layouts`
+    CRUD, and the `ImportLayoutPanel` + annotated file list on `ImportPage`.
 
   *Why it stayed a suggestion:* imports removed the need to guess at drop time,
   so a detector that is wrong now costs an edit, not a migration between kinds.

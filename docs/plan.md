@@ -1,15 +1,20 @@
-# MeshTrove — Milestone 1: Core Archive
+# MeshTrove — Design
 
 ## Context
 
-Greenfield project (repo contains only `docs/spec.md` and `docs/PROJECT_TEMPLATE.md`).
-MeshTrove (working title in the spec: "MySTL") is a self-hosted
+MeshTrove (working title in the original spec: "MySTL") is a self-hosted
 Printables/Thingiverse-style archive for downloaded **and
 purchased** 3D models: one central place for models, their variants, files, print
 notes, images, and bundles. Backend is Rust/Axum/SQLx (Postgres, with migrations);
 frontend is React/TypeScript/MaterialUI via Vite, structured per
 `docs/PROJECT_TEMPLATE.md` (single binary serves prod static files or dev-proxies
 to Vite; no CORS; clap config with env/flag duality).
+
+This is the **living design doc** — schema, search, architecture, API surface,
+and feature designs, kept current as the code moves. Companions:
+`docs/decisions.md` (decision log + build status), `docs/import-layouts.md`
+(real archive shapes the import flow must cope with), `docs/spec.md` (the
+original prompt, historical).
 
 ### Decisions made with the user
 
@@ -30,11 +35,10 @@ to Vite; no CORS; clap config with env/flag duality).
    **anonymous** variant: files separated out without an explicit variant tag. A
    search like `tags=egypt,undead & vtags=32mm,unsupported` filters models by
    tags and variants by their tag sets.
-3. **Scope**: "core archive first" — the **full** schema lands in migration 0001
-   (including jobs, bundles, tags, marks, settings, so it reviews as a whole), but
-   this milestone implements: scaffold, auth+roles, blob store, model/variant/file
-   upload with zip import, browse/detail UI, tagging, job queue, f3d preview
-   rendering. Bundles UI, likes/printed UI, dedup report are fast follow-ups.
+3. **Scope**: "core archive first" — the **full** schema landed in migration
+   0001 (including jobs, bundles, tags, marks, settings, so it reviewed as a
+   whole); later migrations extend it (0002 bundle search, 0003 imports,
+   0004 flat variant tags). Build status per feature: `docs/decisions.md`.
 4. **Rendering**: shell out to an external tool (f3d first) from a background job —
    no in-project mesh parser/renderer. The renderer command is an **admin-global
    setting**; changing it affects only new renders. Each rendered image records
@@ -42,9 +46,7 @@ to Vite; no CORS; clap config with env/flag duality).
    "everything still on the previous renderer", choosing **add** (keep old image)
    or **replace**.
 
-> The canonical copy of this plan lives in the repo at `docs/plan.md`.
-
-## Database schema (migration `0001_initial.sql`)
+## Database schema (migrations `0001`–`0004`)
 
 ### Entity-relationship diagram
 
@@ -113,10 +115,15 @@ erDiagram
     files {
         uuid id PK
         char64 blob_sha256 FK
-        uuid model_or_variant_or_bundle_id FK "exactly one"
+        uuid model_variant_bundle_or_import_id FK "exactly one owner"
         text path "kept folder structure"
         text filename
         file_kind kind "model | document | archive | other"
+    }
+    imports {
+        uuid id PK
+        text name "seeded from archive filename; default for what it becomes"
+        uuid created_by FK
     }
     images {
         uuid id PK
@@ -169,6 +176,7 @@ erDiagram
     model_variants ||--o{ files : "parts"
     models ||--o{ files : "documents"
     bundles ||--o{ files : "documents"
+    imports ||--o{ files : "staged"
     models ||--o{ images : ""
     model_variants ||--o{ images : ""
     bundles ||--o{ images : ""
@@ -239,7 +247,8 @@ variant_tag_assignments (variant_id, tag_id) PK
 blobs            sha256 char(64) PK, size bigint, created_at
 
 files            id, blob_sha256 FK blobs,
-                 model_id / variant_id / bundle_id  -- exactly one non-null (CHECK)
+                 model_id / variant_id / bundle_id / import_id
+                                  -- exactly one non-null (num_nonnulls CHECK)
                  path text        -- kept folder structure ('' = root)
                  filename text, mime text,
                  kind file_kind ('model'|'document'|'archive'|'other'),
@@ -248,6 +257,13 @@ files            id, blob_sha256 FK blobs,
                  -- associated documents (stat guides, painting guides, magazines);
                  -- kind='archive' keeps the original uploaded zip for provenance.
                  -- Duplicate discovery = files joined on shared blob_sha256.
+
+-- the staging area for dropped archives (migration 0003; see Imports below)
+imports          id, name,        -- seeded from the archive filename; editable,
+                                  -- default name for the model/bundle it becomes
+                 created_by FK users, created_at, updated_at
+                 -- never in browse/search; commit moves its files onto one
+                 -- owner and deletes the row (files cascade)
 
 images           id, blob_sha256 FK,
                  model_id / variant_id / bundle_id  -- exactly one non-null (CHECK)
@@ -267,7 +283,8 @@ images           id, blob_sha256 FK,
 bundles          id, name, slug, creator_id FK NULL, source_url,
                  kind bundle_kind ('purchased'|'collection'), created_by, timestamps
                  -- description lives in bundle_description_revisions, same
-                 -- pattern as models; images via images.bundle_id
+                 -- pattern as models; images via images.bundle_id; migration
+                 -- 0002 added a search tsvector (mirrors models) for /api/browse
 bundle_models    (bundle_id, model_id) PK
 bundle_children  (parent_bundle_id, child_bundle_id) PK, CHECK parent<>child
 
@@ -294,8 +311,11 @@ settings         key text PK, value jsonb, updated_at, updated_by
 
 ## Search design (unified text + tags + variant tags)
 
-One endpoint (`GET /api/models?q=&tags=&opt=axis:value…`) resolved by a single
-SQL query in Postgres — no external search engine.
+One query shape (`?q=&tags=&vtags=`, all CSV) resolved by a single SQL query in
+Postgres — no external search engine. `GET /api/models` searches models;
+`GET /api/browse` UNION ALLs bundles in (migration 0002 gave `bundles` the same
+`search` tsvector), ranked and paginated together — a `vtags` filter excludes
+bundles, since only variants carry variant tags.
 
 - **Full text**: a `search tsvector` column on `models`, GIN-indexed, maintained
   by triggers and built with weights from everything a user would call "the
@@ -355,28 +375,40 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
 .env.example
 ```
 
-## API surface (milestone 1)
+## API surface
 
-- `POST /auth/register|login|logout`; `GET /api/me`
+- `POST /auth/register|login|logout`; `GET /api/me`; `GET /api/version`
+- `GET /api/browse` — unified model+bundle search (`?q=&tags=&vtags=`, see
+  Search design above)
 - `GET/POST/PUT/DELETE /api/creators`
-- `GET/POST/PUT/DELETE /api/models` (+ `?q=&tags=&vtags=` unified search —
+- `GET/POST/PUT/DELETE /api/models` (GET takes the same `?q=&tags=&vtags=` —
   `vtags` is a comma-separated list of variant tag names, all of which one
-  variant must carry)
+  variant must carry; the response marks which variants matched)
 - `GET/POST/PUT/DELETE /api/variant-tags` — manage the flat variant vocabulary
   (editor+). Variant create/update takes tag *names* and get-or-creates them, so
   the vocabulary grows organically during import; deleting a tag merges any
   variants its removal leaves with identical tag sets
-- `GET/POST/PUT/DELETE /api/models/{id}/variants` — create/update are
-  get-or-create **by tag set**: hitting a tag set the model already has returns
-  that variant and merges into it (files and images move across), rather than
-  conflicting. Omitting name and tags addresses the model's anonymous variant
+- `POST /api/models/{id}/variants`; `PUT/DELETE /api/variants/{id}` —
+  create/update are get-or-create **by tag set**: hitting a tag set the model
+  already has returns that variant and merges into it (files and images move
+  across), rather than conflicting. Omitting name and tags addresses the
+  model's anonymous variant
+- `GET/POST/PUT/DELETE /api/bundles` (+ description revisions, as models);
+  `POST/DELETE /api/bundles/{id}/models` — membership (`bundle_models` is a
+  true many-to-many; a model can span bundles)
+- `GET/POST /api/imports`; `GET/PUT/DELETE /api/imports/{id}`;
+  `POST /api/imports/{id}/commit` — the staging area (see Imports below)
 - `PUT /api/{models|bundles}/{id}/description` (creates a new revision);
   `GET /api/{models|bundles}/{id}/description/revisions` (history);
   `PUT …/revisions/{rev}/label` (name a revision, e.g. "v1")
-- `POST /api/variants/{id}/files` — multipart upload; a `.zip` triggers an
-  `import_archive` job (original archive kept as kind='archive'); others stored
-  directly with an optional `path`
-- `GET /api/files/{id}/download` (streams from blob store, Content-Disposition)
+- `GET/POST /api/{models|variants|bundles|imports}/{id}/files` — multipart
+  upload onto any owner; a `.zip` triggers an `import_archive` job (original
+  archive kept as kind='archive'); others stored directly, an optional `path`
+  field applying to every `file` part that follows it (how folder drops carry
+  their tree in one request)
+- `PATCH /api/files/{id}` (rekind/move between owners — the manual carve);
+  `DELETE /api/files/{id}`;
+  `GET /api/files/{id}/download` (streams from blob store, Content-Disposition)
 - `GET/POST /api/{models|bundles|variants}/{id}/images` upload;
   `GET /api/images/{id}` (serve); `PUT /api/images/{id}/primary` (mark as the
   owner's preview image, atomically demoting the previous primary)
@@ -388,6 +420,25 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
 - Permissions: viewer = read + marks; editor = edit own models/bundles;
   admin = edit all + settings
 
+## Imports — the staging area
+
+A dropped archive (or folder — `webkitGetAsEntry` tree walk in
+`frontend/src/upload.ts`) lands in an **import**: a holding object that is
+neither a model nor a bundle, never appears in browse/search, and is listed
+only on the *Importing* page. The model-vs-bundle question can't be answered at
+drop time — contents aren't unpacked and the filename doesn't say — so the
+import defers it by one step, which is what removed "promote to bundle" /
+"flatten to model" conversions entirely: models and bundles are fixed kinds.
+
+Once the unpack job finishes, `POST /api/imports/{id}/commit` takes one
+destination — **new model**, **new bundle**, or **existing bundle**
+(preselected when the drop happened on a bundle page) — and moves every staged
+file onto that owner in one transaction, dropping the import row. It refuses
+while an unpack is in flight so files can't be stranded. Files land in the
+owner's "unsorted" bucket, then get carved by hand (`PATCH /api/files/{id}`):
+bundle → member models → variants — or, designed below, by a layout template
+at commit time. History and phasing: `docs/decisions.md`.
+
 ## Frontend pages (MUI)
 
 **Look & feel: vaguely Printables** (user request). MUI theme with Printables-style
@@ -398,51 +449,144 @@ name/creator/like-count underneath, and a left filter sidebar on the browse page
 (two chip clouds: model tags, and the variant tag vocabulary).
 
 - Login/Register
-- Model grid: thumbnail cards, text search, tag chips, variant tag chips
+- Browse: mixed model+bundle card grid, text search, left filter sidebar (two
+  chip clouds: model tags, variant tag vocabulary)
 - Model detail: image gallery (primary image), rendered-markdown description
-  (edit dialog with revision history + "name this version"), variant list with
-  per-variant file tree (rebuilt from `path`), download buttons, print notes,
-  tags, creator link
-- Model create/edit + upload/import dialog (drag-drop, zip import progress via
-  job polling)
-- Creators list/detail
+  (edit dialog with revision history + "name this version"), variant sections
+  with per-variant file tree (rebuilt from `path`), *Unsorted files* section
+  (rekind / move into variants / delete), download buttons, print notes, tags,
+  creator link
+- Bundle detail: description, member models, its own unsorted section carving
+  files into member models
+- *Importing* list + import page: staged file tree, name, destination toggle
+  (one model / new bundle / existing bundle), commit
+- Global drag-drop overlay (files, zips, or whole folders → a new import)
+- Creators list/detail; Jobs page (queue visibility + retry)
 - Admin settings page (renderer config + "re-render stale" button with add/replace)
 
-## Implementation order
+Deferred work (likes/printed UI, print logs, orphan-blob GC, browser-import
+helper, …) is tracked in `docs/decisions.md`.
 
-1. Scaffold backend+frontend per template; docker-compose postgres; `.env.example`;
-   verify dev-mode proxy + HMR works end to end.
-2. Migration 0001 (full schema above); sqlx offline metadata (`cargo sqlx prepare`).
-3. Auth: argon2id, private cookie, User extractor, roles, `--create-admin`,
-   `--anonymous` dev short-circuit.
-4. `FsBlobStore` + upload/download routes (streaming, never buffering whole files
-   in memory — bundles are multi-GB).
-5. Creators/models/variants/tags CRUD + unified search query.
-6. Job queue worker + `import_archive` job (zip extraction preserving structure).
-7. Renderer setting + `render_preview` (f3d shell-out; graceful failure → job
-   'failed' with error, model still browsable) + admin re-render endpoint.
-8. Frontend pages in the order above.
-9. `backend/CLAUDE.md` + top-level `CLAUDE.md` (run instructions), update
-   `docs/spec.md` open questions as resolved (or a `docs/decisions.md`).
+## Import layout templates — regex-driven carve
 
-## Suggestions / gaps in the spec (to record in docs/decisions.md)
+The concrete mechanism for Phase 3's "carve" (`docs/decisions.md`; real archive
+shapes in `docs/import-layouts.md`). A **layout** is a regex matched
+**full-path** (implicitly `^…$`) against each staged file's logical `path`; its
+capture groups are assigned **roles**, and the resolved captures turn one flat
+import into a proposed models → variants tree, previewed before commit.
 
-Schema above already accommodates these; flagged for the user:
+Example — Loot layout B:
 
-- **License + purchase tracking** on models (price, date, order ref, commercial
-  terms) — implied by "models I have bought" but not spec'd.
-- **Keep the original archive** as a blob (kind='archive') for provenance/re-import.
-- **Import is necessarily staged**: a Loot Studios zip contains many variants, so
-  upload → background extract/hash → assignment of folders to variants (heuristic
-  prefill from folder names like "32mm/Supported", user-correctable). Milestone 1
-  imports a zip into ONE variant; multi-variant classification UI is a follow-up.
-- **Model updates**: creators re-release files; `files.created_at` + re-import into
-  the same variant covers v1, real versioning deferred.
-- **Maintenance jobs**: orphan-blob GC and store integrity re-hash fit the job
-  system; deferred but the design allows them.
-- **"Printed" is richer than a flag**: printer/resin/exposure/outcome logs —
-  `user_model_marks.notes` for now, a `print_logs` table later.
-- **Browser import helper** needs token auth (not cookies) — follow-up.
+```
+\d+ - ([^/]+)/[^/]+/([^_]+)_(\d+mm)_([^/]+)/[^/]*\.stl
+```
+
+| group | example capture | role |
+|---|---|---|
+| 1 | `Heroes` | model tag |
+| 2 | `Gold` | model name |
+| 3 | `32mm` | variant tag |
+| 4 | `Supported_Lychee` | variant tag |
+
+### Roles
+
+Each capture group is radio-assigned one of: **model name** (at most one
+group), **model tag**, **variant tag**, **ignore** (any number of groups each).
+There is no "variant" role — a variant *is* its tag set, so the union of a
+file's variant-tag captures (after mapping, below) simply *is* its variant,
+materialized per distinct tag set per model via the existing `tag_key`
+get-or-create/merge semantics. Re-running a layout is therefore idempotent.
+A layout with **no** model-name group carves variants within a single model
+(covers layout A's `.3mf` print-config files).
+
+Layouts apply to **both destinations**. Under a *one model* destination a
+model-name group isn't a conflict: bundle templates either won't match at all,
+or the captured name prefills the model's name field (when still unset) and
+the rest of the captures carve variants. Resolving **multiple distinct** model
+names under a one-model destination is the "this is really a bundle" signal —
+surface it as a destination suggestion, don't error.
+
+### Vocabulary mapping
+
+Raw captures aren't tags: `NoSupports`, `Supported_LYCHEE`,
+`Supported_Lychee` need case-folding and sometimes splitting
+(`Supported_LYCHEE` → `supported` + `lychee_project`). After role assignment
+the UI lists each **distinct** captured value (a dozen or so even for a
+thousand-file archive) with a mapping to 0..n tags, creatable inline — the
+same organic vocabulary growth as variant create/update, never an enum.
+
+### Identity and merging
+
+Grouping keys are computed on **resolved** tags, post-mapping, never raw
+captures — symmetric at both levels:
+
+- a planned **model** is *(name + resolved model-tag set)* — so `Gold` under
+  Heroes and `Gold` under Treasure stay two models (slugs deduped by
+  `unique_slug`; the preview shows each name's tag set to disambiguate), while
+  `1 - Heroes` and `01-Heroes` both mapping to `heroes` merge;
+- a planned **variant** is its resolved variant-tag set (existing semantics).
+
+### Matching, selection, fallback
+
+- Candidate templates are ranked by **coverage %** of the import's files, not
+  a binary matches/doesn't — "412 of 460" surfaces near-miss templates worth
+  tweaking.
+- Unmatched files are not an error: they fall through to the destination's
+  unsorted bucket and the existing manual carve. Renders/PDFs/`.lys` routinely
+  won't match an `.stl` pattern; sidecar handling can come later.
+- Preset patterns should prefer `([^_]+)`/`([^/]+)` over greedy `.+` (a model
+  named `Elf_32mm_Archer` splits wrong under `(.+)_(\d+mm)_`); the live
+  preview makes this self-correcting.
+
+### API — server is the single source of truth
+
+`POST /api/imports/{id}/plan` takes `{pattern, roles, value_map}` and dry-runs
+the carve, returning the grouped tree (model → tag sets → file counts +
+example paths). Commit takes the same layout params plus optional per-file
+overrides for stragglers and executes atomically in the existing one-transaction
+commit. One internal `plan()` feeds both handlers, so preview == result, and
+recomputing server-side keeps commit payloads tiny. The `fancy-regex` crate is
+the **only** dialect (lookaround and backreferences allowed; backtracking is
+fine at path-matching scale) — the frontend treats the pattern as an opaque
+string and never replicates matching in JS.
+
+Because the frontend never runs the regex, per-file display data must ride in
+the plan response too. Alongside the tree, `plan` returns an annotation per
+staged file:
+
+- **`parts`** — the path split into segments `{text, group?}` (built from the
+  engine's capture offsets), so the UI renders matched groups as highlighted
+  spans, colored by assigned role; an unmatched file is one plain segment.
+- **resolution** — `{model_name?, model_tags[], variant_tags[]}` *after*
+  vocabulary mapping, rendered as trailing chips on each file row
+  (`→ Gold · heroes · 32mm supported lychee`). A capture whose value has no
+  mapping yet renders as a raw, visually "unmapped" chip — the prompt to fill
+  the mapping table in.
+
+Annotations are keyed by file id; if archives get huge the endpoint can take
+`file_ids` to annotate only the visible page while still returning the full
+tree.
+
+### Storage
+
+```mermaid
+erDiagram
+    creators ||--o{ import_layouts : "auto-suggests for"
+    import_layouts {
+        uuid id PK
+        text name
+        text pattern "Rust regex, matched full-path"
+        jsonb roles "capture group -> role"
+        jsonb value_map "raw capture -> tag names"
+        uuid creator_id FK "nullable"
+    }
+```
+
+Seeded with publisher presets (Loot Studios, …); users save layouts organically
+from the import page. Preset patterns may use named groups (`(?<model>…)`) as
+*default* role assignments the UI can still override. An optional `creator_id`
+lets the next archive from the same creator auto-suggest its layout — and its
+value mappings, which repeat month to month.
 
 ## Verification
 
@@ -450,12 +594,12 @@ Schema above already accommodates these; flagged for the user:
   building) + `cargo clippy`; `npm run build` clean.
 - End-to-end via /verify: `docker compose up -d postgres`; run backend `--dev
   --anonymous` + Vite; then through the real UI/API: register/login (non-anonymous
-  run), create creator + model + a variant assigned 32mm/unsupported from the
-  seeded axes (and declare a new axis+option inline to prove extensibility),
-  edit the markdown description twice and name a revision "v1", upload a zip,
-  watch import job complete, confirm folder structure and file download
-  round-trips byte-identical (hash check), tag it, search by text + tag + axis
-  options (verifying same-variant AND semantics), upload an
+  run), create creator + model + a variant tagged 32mm/unsupported from the
+  seeded vocabulary (and declare a new variant tag inline to prove
+  extensibility), edit the markdown description twice and name a revision "v1",
+  drop a zip, commit the import, confirm folder structure and file download
+  round-trips byte-identical (hash check), tag it, search by text + tag + variant
+  tags (verifying same-variant AND semantics), upload an
   image; if `f3d` is installed locally, confirm a preview renders and lands in the
   gallery, then change renderer args and use re-render(replace) on the stale image.
 - Duplicate check: upload the same STL twice → one blob on disk, two file rows.

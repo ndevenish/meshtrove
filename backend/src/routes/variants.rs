@@ -115,7 +115,7 @@ async fn resolve_tags(
 
 /// The variant of `model_id` carrying exactly `tag_ids`, if one exists. An empty
 /// `tag_ids` looks up the model's anonymous variant.
-async fn variant_with_tag_set(
+pub async fn variant_with_tag_set(
     tx: &mut sqlx::PgConnection,
     model_id: Uuid,
     tag_ids: &[Uuid],
@@ -132,7 +132,7 @@ async fn variant_with_tag_set(
 }
 
 /// Replace a variant's tag set. The `tag_key` trigger keeps identity in step.
-async fn set_variant_tags(
+pub async fn set_variant_tags(
     tx: &mut sqlx::PgConnection,
     variant_id: Uuid,
     tag_ids: &[Uuid],

@@ -185,11 +185,99 @@ export interface ImportSummary {
   unpacking: boolean
 }
 
+// --- Import layout templates (regex-driven carve; see docs/plan.md) ---------
+
+/// What a capture group means. No "variant" role: a variant IS its tag set,
+/// so the union of a file's variant-tag captures is its variant.
+export type GroupRole = 'model_name' | 'model_tag' | 'variant_tag' | 'ignore'
+
+/// The user-editable layout definition. The pattern is a backend (fancy-regex)
+/// pattern — an opaque string here; the frontend never runs it.
+export interface LayoutSpec {
+  pattern: string
+  /** capture group number (as a string key) -> role */
+  roles: Record<string, GroupRole>
+  /** lowercased raw capture -> variant tag names ([] = maps to nothing) */
+  value_map: Record<string, string[]>
+}
+
+export interface ImportLayout extends LayoutSpec {
+  id: string
+  name: string
+  creator_id: string | null
+}
+
+/// A slice of a file's path; `group` set = highlight it by that group's role.
+export interface PathPart {
+  text: string
+  group?: number
+}
+
+export interface FileAnnotation {
+  id: string
+  matched: boolean
+  parts: PathPart[]
+  model_name?: string
+  model_tags: string[]
+  variant_tags: string[]
+  /** raw variant-tag captures with no resolution — fill the value map in */
+  unmapped: string[]
+}
+
+export interface PlanVariant {
+  /** empty = the model's unsorted bucket */
+  tags: string[]
+  file_count: number
+  example: string
+}
+
+export interface PlanModel {
+  name: string
+  tags: string[]
+  file_count: number
+  variants: PlanVariant[]
+}
+
+export interface GroupInfo {
+  index: number
+  examples: string[]
+}
+
+export interface CapturedValue {
+  raw: string
+  /** resolved variant tag names; null = unmapped */
+  tags: string[] | null
+}
+
+/// The dry run of a layout over an import's staged files. Commit executes the
+/// same computation, so this preview is the result.
+export interface LayoutPlan {
+  total: number
+  matched: number
+  carved: number
+  groups: GroupInfo[]
+  models: PlanModel[]
+  values: CapturedValue[]
+  model_names: string[]
+  annotations: FileAnnotation[]
+}
+
+/// One-model imports pool everything into variants; bundle imports split
+/// member models by the model-name capture.
+export type PlanTarget = 'model' | 'bundle'
+
 /// The single decision an import exists to defer: what is this archive?
+/// An attached `layout` carves the files into models/variants as it commits.
 export type CommitTarget =
-  | { target: 'new_model'; name?: string; creator_id?: string | null }
-  | { target: 'new_bundle'; name?: string; creator_id?: string | null; kind?: string }
-  | { target: 'bundle'; bundle_id: string }
+  | { target: 'new_model'; name?: string; creator_id?: string | null; layout?: LayoutSpec }
+  | {
+      target: 'new_bundle'
+      name?: string
+      creator_id?: string | null
+      kind?: string
+      layout?: LayoutSpec
+    }
+  | { target: 'bundle'; bundle_id: string; layout?: LayoutSpec }
 
 export interface CommitResult {
   type: 'model' | 'bundle'
@@ -323,6 +411,13 @@ export const api = {
   importFiles: (id: string) => request<FileRecord[]>(`/api/imports/${id}/files`),
   commitImport: (id: string, target: CommitTarget) =>
     request<CommitResult>(`/api/imports/${id}/commit`, json(target)),
+  planImport: (id: string, spec: LayoutSpec, target: PlanTarget) =>
+    request<LayoutPlan>(`/api/imports/${id}/plan`, json({ ...spec, target })),
+  importLayouts: () => request<ImportLayout[]>('/api/import-layouts'),
+  createImportLayout: (body: { name: string; creator_id?: string | null } & LayoutSpec) =>
+    request<ImportLayout>('/api/import-layouts', json(body)),
+  deleteImportLayout: (id: string) =>
+    request<void>(`/api/import-layouts/${id}`, { method: 'DELETE' }),
 
   createVariant: (modelId: string, body: unknown) =>
     request<VariantDetail>(`/api/models/${modelId}/variants`, json(body)),

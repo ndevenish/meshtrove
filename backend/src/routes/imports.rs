@@ -7,6 +7,8 @@
 //! file onto exactly one destination — a new model, a new bundle, or an existing
 //! bundle — and drops the import row.
 
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -22,12 +24,18 @@ use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::bundles::{self, parse_kind as parse_bundle_kind};
 use crate::routes::models;
+use crate::routes::tags::upsert_tag;
+use crate::routes::variant_tags::upsert_variant_tag;
+use crate::routes::variants::{set_variant_tags, variant_with_tag_set};
+use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan, PlanVariant};
 use crate::state::AppState;
+use crate::util::slugify;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/imports", get(list).post(create))
         .route("/api/imports/{id}", get(detail).put(update).delete(remove))
+        .route("/api/imports/{id}/plan", post(plan))
         .route("/api/imports/{id}/commit", post(commit))
 }
 
@@ -179,6 +187,73 @@ pub async fn import_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiEr
 }
 
 // ---------------------------------------------------------------------------
+// plan: dry-run a layout over the staged files
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, ToSchema)]
+pub struct PlanRequest {
+    #[serde(flatten)]
+    pub spec: LayoutSpec,
+    /// Grouping shape: "model" pools everything into one model's variants,
+    /// "bundle" (default) splits member models by model-name capture.
+    #[serde(default)]
+    pub target: CarveTarget,
+}
+
+/// Everything the layout panel shows — coverage, the grouped tree, per-file
+/// highlight spans and resolution chips — comes from this one dry run. Commit
+/// executes the same `analyze`, so the preview is the result.
+async fn plan(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(request): Json<PlanRequest>,
+) -> Result<Json<Plan>, ApiError> {
+    let staged = fetch_import(&state, id).await?;
+    user.require_can_edit(staged.created_by)?;
+    let files = plan_files(&state.db, id).await?;
+    let vocab = variant_vocab(&state.db).await?;
+    Ok(Json(layout::analyze(
+        &request.spec,
+        request.target,
+        &files,
+        &vocab,
+    )?))
+}
+
+async fn plan_files(
+    db: impl sqlx::PgExecutor<'_>,
+    import_id: Uuid,
+) -> Result<Vec<layout::PlanFile>, ApiError> {
+    let rows = sqlx::query!(
+        "SELECT id, path, filename FROM files WHERE import_id = $1 ORDER BY path, filename",
+        import_id,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| layout::PlanFile {
+            id: r.id,
+            path: r.path,
+            filename: r.filename,
+        })
+        .collect())
+}
+
+/// The variant-tag vocabulary, lowercased: a raw capture equal to an existing
+/// tag name resolves without an explicit value-map entry.
+async fn variant_vocab(db: impl sqlx::PgExecutor<'_>) -> Result<HashSet<String>, ApiError> {
+    Ok(
+        sqlx::query_scalar!(r#"SELECT lower(name::text) as "name!" FROM variant_tags"#)
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // commit: the one decision point — what is this archive?
 // ---------------------------------------------------------------------------
 
@@ -186,21 +261,30 @@ pub async fn import_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiEr
 #[serde(tag = "target", rename_all = "snake_case")]
 pub enum CommitInput {
     /// One model. Files land in the model's "unsorted" bucket, to be sorted
-    /// into variants on the model page.
+    /// into variants on the model page — or carved into variants by `layout`.
     NewModel {
         name: Option<String>,
         creator_id: Option<Uuid>,
+        #[serde(default)]
+        layout: Option<LayoutSpec>,
     },
     /// A collection. Files land in the new bundle's "unsorted" bucket, to be
-    /// carved into member models on the bundle page.
+    /// carved into member models on the bundle page — or by `layout`.
     NewBundle {
         name: Option<String>,
         creator_id: Option<Uuid>,
         kind: Option<String>,
+        #[serde(default)]
+        layout: Option<LayoutSpec>,
     },
     /// More files for a bundle that already exists (e.g. the 75mm pack joining
-    /// the 32mm one). Same carving flow as a new bundle.
-    Bundle { bundle_id: Uuid },
+    /// the 32mm one). A `layout` carve reuses matching member models, which is
+    /// how the 75mm files land on the models the 32mm drop created.
+    Bundle {
+        bundle_id: Uuid,
+        #[serde(default)]
+        layout: Option<LayoutSpec>,
+    },
 }
 
 #[derive(Serialize, ToSchema)]
@@ -241,8 +325,40 @@ async fn commit(
     };
 
     let mut tx = state.db.begin().await?;
+
+    // Dry-run the layout carve first: a bad pattern or an unmapped value must
+    // fail the commit before anything is created. Same `analyze` as the plan
+    // endpoint, so the preview the user confirmed is exactly what happens.
+    let (carve_target, layout_spec) = match &input {
+        CommitInput::NewModel { layout, .. } => (CarveTarget::Model, layout),
+        CommitInput::NewBundle { layout, .. } | CommitInput::Bundle { layout, .. } => {
+            (CarveTarget::Bundle, layout)
+        }
+    };
+    let carve = match layout_spec {
+        Some(spec) => {
+            let files = plan_files(&mut *tx, id).await?;
+            let vocab = variant_vocab(&mut *tx).await?;
+            let plan = layout::analyze(spec, carve_target, &files, &vocab)?;
+            let unmapped = plan.unmapped_values();
+            if !unmapped.is_empty() {
+                return Err(ApiError::BadRequest(format!(
+                    "unmapped variant tag values: {} — map them (or ignore their group) first",
+                    unmapped.join(", ")
+                )));
+            }
+            Some(plan)
+        }
+        None => None,
+    };
+
+    // Models whose browse thumbnail should render once the commit lands.
+    let mut render_models: Vec<Uuid> = Vec::new();
+
     let result = match &input {
-        CommitInput::NewModel { name, creator_id } => {
+        CommitInput::NewModel {
+            name, creator_id, ..
+        } => {
             let name = named(name);
             let slug = models::unique_slug(&state, &name).await?;
             let model_id: Uuid = sqlx::query_scalar!(
@@ -255,6 +371,14 @@ async fn commit(
             )
             .fetch_one(&mut *tx)
             .await?;
+            if let Some(plan) = &carve
+                && let Some(planned) = plan.models.first()
+            {
+                add_model_tags(&mut tx, &state, model_id, &planned.tags).await?;
+                carve_variants(&mut tx, model_id, &planned.variants, user.id).await?;
+            }
+            // Whatever the carve didn't claim (or all of it, with no layout)
+            // lands in the model's unsorted bucket.
             sqlx::query!(
                 "UPDATE files SET model_id = $2, import_id = NULL WHERE import_id = $1",
                 id,
@@ -262,6 +386,7 @@ async fn commit(
             )
             .execute(&mut *tx)
             .await?;
+            render_models.push(model_id);
             CommitResult {
                 kind: "model".into(),
                 id: model_id,
@@ -272,6 +397,7 @@ async fn commit(
             name,
             creator_id,
             kind,
+            ..
         } => {
             let name = named(name);
             let bundle_kind = parse_bundle_kind(kind.as_deref())?;
@@ -287,6 +413,12 @@ async fn commit(
             )
             .fetch_one(&mut *tx)
             .await?;
+            if let Some(plan) = &carve {
+                let created =
+                    carve_into_bundle(&mut tx, &state, bundle_id, *creator_id, plan, user.id)
+                        .await?;
+                render_models.extend(created);
+            }
             sqlx::query!(
                 "UPDATE files SET bundle_id = $2, import_id = NULL WHERE import_id = $1",
                 id,
@@ -300,15 +432,27 @@ async fn commit(
                 slug,
             }
         }
-        CommitInput::Bundle { bundle_id } => {
+        CommitInput::Bundle { bundle_id, .. } => {
             let target = sqlx::query!(
-                "SELECT created_by, slug FROM bundles WHERE id = $1",
+                "SELECT created_by, slug, creator_id FROM bundles WHERE id = $1",
                 bundle_id,
             )
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| ApiError::BadRequest("no such bundle".into()))?;
             user.require_can_edit(target.created_by)?;
+            if let Some(plan) = &carve {
+                let created = carve_into_bundle(
+                    &mut tx,
+                    &state,
+                    *bundle_id,
+                    target.creator_id,
+                    plan,
+                    user.id,
+                )
+                .await?;
+                render_models.extend(created);
+            }
             sqlx::query!(
                 "UPDATE files SET bundle_id = $2, import_id = NULL WHERE import_id = $1",
                 id,
@@ -335,15 +479,16 @@ async fn commit(
         .await?;
     tx.commit().await?;
 
-    // A fresh model gets a browse thumbnail from its first STL. (Bundles don't:
-    // their files are a staging bucket to be carved into members, which is where
-    // the renders belong.)
-    if result.kind == "model" {
+    // A fresh model gets a browse thumbnail from its first STL — whether that
+    // file sits unsorted on the model or was carved onto one of its variants.
+    // (Bundle unsorted files don't render: they are a staging bucket.)
+    for model_id in render_models {
         let stl = sqlx::query_scalar!(
-            "SELECT id FROM files
-             WHERE model_id = $1 AND filename ILIKE '%.stl'
-             ORDER BY path, filename LIMIT 1",
-            result.id,
+            r#"SELECT f.id FROM files f
+               LEFT JOIN model_variants v ON v.id = f.variant_id
+               WHERE (f.model_id = $1 OR v.model_id = $1) AND f.filename ILIKE '%.stl'
+               ORDER BY f.path, f.filename LIMIT 1"#,
+            model_id,
         )
         .fetch_optional(&state.db)
         .await?;
@@ -359,4 +504,167 @@ async fn commit(
 
     tracing::info!(import = %id, into = %result.kind, id = %result.id, "import committed");
     Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// the carve: execute a plan inside the commit transaction
+// ---------------------------------------------------------------------------
+
+/// Assign carved files: each non-empty tag set get-or-creates that variant of
+/// the model (the existing merge-by-tag-set semantics), an empty set is the
+/// model's unsorted bucket.
+async fn carve_variants(
+    tx: &mut sqlx::PgConnection,
+    model_id: Uuid,
+    variants: &[PlanVariant],
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    for planned in variants {
+        if planned.tags.is_empty() {
+            sqlx::query!(
+                "UPDATE files SET model_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
+                model_id,
+                &planned.files[..],
+            )
+            .execute(&mut *tx)
+            .await?;
+            continue;
+        }
+        let mut tag_ids: Vec<Uuid> = Vec::new();
+        for name in &planned.tags {
+            let tag_id = upsert_variant_tag(&mut *tx, name).await?;
+            if !tag_ids.contains(&tag_id) {
+                tag_ids.push(tag_id);
+            }
+        }
+        let variant_id = match variant_with_tag_set(&mut *tx, model_id, &tag_ids).await? {
+            Some(existing) => existing,
+            None => {
+                let new_id: Uuid = sqlx::query_scalar!(
+                    "INSERT INTO model_variants (model_id, created_by) VALUES ($1, $2) RETURNING id",
+                    model_id,
+                    user_id,
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                set_variant_tags(&mut *tx, new_id, &tag_ids).await?;
+                new_id
+            }
+        };
+        sqlx::query!(
+            "UPDATE files SET variant_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
+            variant_id,
+            &planned.files[..],
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Additive model tagging — a carve never removes tags a model already has.
+async fn add_model_tags(
+    tx: &mut sqlx::PgConnection,
+    state: &AppState,
+    model_id: Uuid,
+    tags: &[String],
+) -> Result<(), ApiError> {
+    for name in tags {
+        let tag = upsert_tag(state, name).await?;
+        sqlx::query!(
+            "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            model_id,
+            tag.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Carve a bundle-target plan: each planned (name + model-tag set) reuses a
+/// member model whose name matches and whose tags cover the group's, else
+/// creates one — which is how a later DownloadAll_75mm drop lands its files on
+/// the models the 32mm drop created. Returns newly created model ids.
+async fn carve_into_bundle(
+    tx: &mut sqlx::PgConnection,
+    state: &AppState,
+    bundle_id: Uuid,
+    bundle_creator: Option<Uuid>,
+    plan: &Plan,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, ApiError> {
+    let members = sqlx::query!(
+        r#"SELECT m.id, m.name,
+                  coalesce((SELECT array_agg(lower(t.name::text)) FROM model_tags mt
+                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}')
+                      as "tags!: Vec<String>"
+           FROM models m JOIN bundle_models bm ON bm.model_id = m.id
+           WHERE bm.bundle_id = $1"#,
+        bundle_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut reserved_slugs: HashSet<String> = HashSet::new();
+    let mut created = Vec::new();
+    for planned in &plan.models {
+        let wanted: Vec<String> = planned.tags.iter().map(|t| t.to_lowercase()).collect();
+        let existing = members.iter().find(|m| {
+            m.name.to_lowercase() == planned.name.to_lowercase()
+                && wanted.iter().all(|t| m.tags.contains(t))
+        });
+        let model_id = match existing {
+            Some(member) => member.id,
+            None => {
+                let slug = unique_member_slug(&mut *tx, &planned.name, &mut reserved_slugs).await?;
+                let model_id: Uuid = sqlx::query_scalar!(
+                    "INSERT INTO models (name, slug, creator_id, created_by)
+                     VALUES ($1, $2, $3, $4) RETURNING id",
+                    planned.name,
+                    slug,
+                    bundle_creator,
+                    user_id,
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                sqlx::query!(
+                    "INSERT INTO bundle_models (bundle_id, model_id) VALUES ($1, $2)",
+                    bundle_id,
+                    model_id,
+                )
+                .execute(&mut *tx)
+                .await?;
+                created.push(model_id);
+                model_id
+            }
+        };
+        add_model_tags(&mut *tx, state, model_id, &planned.tags).await?;
+        carve_variants(&mut *tx, model_id, &planned.variants, user_id).await?;
+    }
+    Ok(created)
+}
+
+/// Like `models::unique_slug`, but reading through the commit transaction and
+/// aware of slugs this same carve has claimed but not yet made visible.
+async fn unique_member_slug(
+    tx: &mut sqlx::PgConnection,
+    name: &str,
+    reserved: &mut HashSet<String>,
+) -> Result<String, ApiError> {
+    let base = slugify(name);
+    let taken: Vec<String> = sqlx::query_scalar!(
+        "SELECT slug FROM models WHERE slug = $1 OR slug LIKE $1 || '-%'",
+        base,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while taken.contains(&candidate) || reserved.contains(&candidate) {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    reserved.insert(candidate.clone());
+    Ok(candidate)
 }

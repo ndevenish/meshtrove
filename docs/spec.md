@@ -1,5 +1,9 @@
 # MySTL
 
+> **Historical** — the original project prompt, kept for provenance. The
+> current design lives in `docs/plan.md`; decisions and status in
+> `docs/decisions.md`. (The project became **MeshTrove**.)
+
 A printables/Thingiverse like webapp to archive both downloaded/printed free
 models, but also models that I have bought that I want to keep track of in one
 central place, including notes on my printing settings and variants of models
