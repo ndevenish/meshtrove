@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/imports/{id}/files", get(list_import_files))
         .route("/api/files/{id}", patch(update_file).delete(delete_file))
         .route("/api/files/{id}/download", get(download_file))
+        .route("/api/files/{id}/render", post(render_file))
         // Uploads are multi-GB; the store streams to disk, so no body cap.
         .layer(DefaultBodyLimit::disable())
 }
@@ -740,6 +741,49 @@ async fn delete_file(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Render this file, now, whatever the automatic pass decided. The carve renders
+/// one picture per variant and picks the file itself; this is the escape hatch
+/// for when it picked the base plate and you want the knight. The image lands on
+/// whatever owns the file — a variant, usually — and the model's gallery shows
+/// every variant's image, so it turns up there without being moved.
+///
+/// Additive: `mode: add` never replaces an existing image, so pressing it twice
+/// gives you two pictures, not an argument.
+async fn render_file(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (_ctx, created_by) = file_context(&state, id).await?;
+    user.require_can_edit(created_by)?;
+
+    let file = sqlx::query!(
+        r#"SELECT filename, kind as "kind: FileKind" FROM files WHERE id = $1"#,
+        id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    // The renderer reads geometry. A project (.3mf) still holds some, so it is
+    // fair game; a PDF is not, and enqueuing a job that can only fail helps
+    // nobody.
+    if !matches!(file.kind, FileKind::Model | FileKind::Project) {
+        return Err(ApiError::BadRequest(format!(
+            "{} is a {:?} file — only models and projects can be rendered",
+            file.filename, file.kind
+        )));
+    }
+
+    crate::services::jobs::enqueue(
+        &state.db,
+        "render_preview",
+        serde_json::json!({ "file_id": id, "mode": "add" }),
+    )
+    .await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn download_file(

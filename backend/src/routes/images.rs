@@ -30,6 +30,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/bundles/{id}/images", post(upload_bundle_image))
         .route("/api/images/{id}", get(serve_image).delete(remove_image))
         .route("/api/images/{id}/primary", put(mark_primary))
+        .route(
+            "/api/models/{id}/images/{image_id}/promote",
+            put(promote_to_model),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
 }
 
@@ -262,6 +266,90 @@ async fn image_owner(state: &AppState, id: Uuid) -> Result<(Owner, Uuid), ApiErr
     };
     let created_by = owner_created_by(state, owner).await?;
     Ok((owner, created_by))
+}
+
+/// Favourite a variant's picture *for the model*: the image belongs to the
+/// variant that rendered it, but saying "this is the one" is a statement about
+/// the model, so the model gets a copy of its own — same blob, so not a byte of
+/// new storage — marked primary, and the variant keeps its thumbnail.
+///
+/// The gallery hides the variant's copy once the model holds the same blob, so
+/// promoting does not leave the same picture on the page twice. Re-promoting an
+/// image the model already carries just re-marks it, rather than piling up rows.
+async fn promote_to_model(
+    State(state): State<AppState>,
+    user: User,
+    Path((model_id, image_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let created_by = owner_created_by(&state, Owner::Model(model_id)).await?;
+    user.require_can_edit(created_by)?;
+
+    // The image has to be this model's to promote: its own, or one of its
+    // variants'. Anything else is a different model's picture.
+    let image = sqlx::query!(
+        r#"SELECT i.blob_sha256, i.mime, i.kind::text as "kind!", i.source_file_id,
+                  i.renderer, i.renderer_config, i.width, i.height,
+                  (i.model_id = $2) as "own_already?"
+           FROM images i
+           LEFT JOIN model_variants v ON v.id = i.variant_id
+           WHERE i.id = $1 AND (i.model_id = $2 OR v.model_id = $2)"#,
+        image_id,
+        model_id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query!(
+        "UPDATE images SET is_primary = false WHERE model_id = $1 AND is_primary",
+        model_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    if image.own_already.unwrap_or(false) {
+        sqlx::query!(
+            "UPDATE images SET is_primary = true WHERE id = $1",
+            image_id
+        )
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        // Idempotent: the model may already hold this exact picture from an
+        // earlier promotion.
+        sqlx::query!(
+            r#"INSERT INTO images (blob_sha256, model_id, kind, mime, source_file_id,
+                                   renderer, renderer_config, width, height,
+                                   is_primary, created_by)
+               VALUES ($1, $2, $3::image_kind, $4, $5, $6, $7, $8, $9, true, $10)
+               ON CONFLICT DO NOTHING"#,
+            image.blob_sha256,
+            model_id,
+            image.kind as _,
+            image.mime,
+            image.source_file_id,
+            image.renderer,
+            image.renderer_config,
+            image.width,
+            image.height,
+            user.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        // Whether the insert landed or a row was already there, make sure the one
+        // carrying this blob is the primary.
+        sqlx::query!(
+            "UPDATE images SET is_primary = true
+             WHERE model_id = $1 AND blob_sha256 = $2",
+            model_id,
+            image.blob_sha256,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Make this image the owner's preview, atomically demoting the previous one.

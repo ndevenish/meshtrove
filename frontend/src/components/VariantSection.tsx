@@ -28,6 +28,7 @@ import DownloadIcon from '@mui/icons-material/Download'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import FolderIcon from '@mui/icons-material/Folder'
 import DeleteIcon from '@mui/icons-material/Delete'
+import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -156,7 +157,21 @@ function VariantRow({
           </Alert>
         )}
         {uploading && <LinearProgress sx={{ mb: 1 }} />}
-        {expanded && files && <FileTree files={files} />}
+        {expanded && files && (
+          <FileTree
+            files={files}
+            onRender={
+              canEdit
+                ? async (fileId) => {
+                    await api.renderFile(fileId)
+                    // The job is queued, not done: the model page watches the job
+                    // queue and picks the picture up when it lands.
+                    await queryClient.invalidateQueries({ queryKey: ['jobs', 'all'] })
+                  }
+                : undefined
+            }
+          />
+        )}
         {canEdit && (
           <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
             <Button component="label" size="small" startIcon={<UploadFileIcon />}>
@@ -212,6 +227,7 @@ export function FileTree({
   onToggle,
   onKindChange,
   onDelete,
+  onRender,
 }: {
   files: FileRecord[]
   selectable?: boolean
@@ -219,6 +235,8 @@ export function FileTree({
   onToggle?: (id: string) => void
   onKindChange?: (id: string, kind: FileRecord['kind']) => void
   onDelete?: (id: string) => void
+  /** Force a preview render from this file; it joins the model's images. */
+  onRender?: (id: string) => void
 }) {
   const groups = useMemo(() => {
     const byDir = new Map<string, FileRecord[]>()
@@ -292,6 +310,16 @@ export function FileTree({
                   <DownloadIcon sx={{ fontSize: 18 }} />
                 </IconButton>
               </Tooltip>
+              {/* The carve renders one picture per variant and picks the file
+                  itself. This is the override for when it picked the base plate:
+                  render *this* one, and it joins the model's images. */}
+              {onRender && (file.kind === 'model' || file.kind === 'project') && (
+                <Tooltip title="Render a preview from this file">
+                  <IconButton size="small" onClick={() => onRender(file.id)}>
+                    <PhotoCameraIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
               {onDelete && (
                 <Tooltip title="Delete file">
                   <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>

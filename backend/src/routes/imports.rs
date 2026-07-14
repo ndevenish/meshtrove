@@ -577,20 +577,37 @@ async fn commit(
         tracing::info!(import = %id, freed, archives = archives.len(), "dropped source archives");
     }
 
-    // A fresh model gets a browse thumbnail from its first STL — whether that
-    // file sits unsorted on the model or was carved onto one of its variants.
+    // Every variant gets its own picture: they are all pictures of the model, and
+    // a gallery with one thumbnail for a model that ships in four scales is a
+    // gallery that hides three quarters of what you bought. One render each, from
+    // the STL with the shortest filename — `knight.stl` is the knight,
+    // `knight_base_v2_hollow.stl` is a detail of it. A model with no variants
+    // (nothing carved) renders once from its unsorted files, on the same rule.
     // (Bundle unsorted files don't render: they are a staging bucket.)
     for model_id in render_models {
-        let stl = sqlx::query_scalar!(
-            r#"SELECT f.id FROM files f
-               LEFT JOIN model_variants v ON v.id = f.variant_id
-               WHERE (f.model_id = $1 OR v.model_id = $1) AND f.filename ILIKE '%.stl'
-               ORDER BY f.path, f.filename LIMIT 1"#,
+        let mut stls = sqlx::query_scalar!(
+            r#"SELECT DISTINCT ON (f.variant_id) f.id
+               FROM files f
+               JOIN model_variants v ON v.id = f.variant_id
+               WHERE v.model_id = $1 AND f.filename ILIKE '%.stl'
+               ORDER BY f.variant_id, length(f.filename), f.filename"#,
             model_id,
         )
-        .fetch_optional(&state.db)
+        .fetch_all(&state.db)
         .await?;
-        if let Some(file_id) = stl {
+
+        if stls.is_empty() {
+            stls = sqlx::query_scalar!(
+                r#"SELECT f.id FROM files f
+                   WHERE f.model_id = $1 AND f.filename ILIKE '%.stl'
+                   ORDER BY length(f.filename), f.filename LIMIT 1"#,
+                model_id,
+            )
+            .fetch_all(&state.db)
+            .await?;
+        }
+
+        for file_id in stls {
             crate::services::jobs::enqueue(
                 &state.db,
                 "render_preview",

@@ -390,14 +390,30 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
     // "No images yet". The model's own images come first (an uploaded shot of the
     // whole thing beats a render of one variant of it), then the variants' in
     // variant order.
+    // Every variant's thumbnail belongs in the model's gallery — a carve renders
+    // one picture per variant, and they are all pictures of this model. The
+    // model's own images lead (an uploaded shot, or one promoted from a variant);
+    // the variants follow plainest-first, matching `model_preview_image` exactly
+    // so the card and the top of the gallery are never two different pictures.
     let images = sqlx::query!(
         r#"SELECT i.id, i.kind::text as "kind!", i.is_primary, i.width, i.height,
                   i.variant_id,
-                  (i.model_id IS NULL) as "from_variant!"
+                  (i.model_id IS NULL) as "from_variant!",
+                  coalesce(
+                      (SELECT count(*) FROM variant_tag_assignments a
+                       WHERE a.variant_id = i.variant_id), 0) as "tag_count!",
+                  coalesce(length(f.filename), 0) as "name_len!"
            FROM images i
            LEFT JOIN model_variants v ON v.id = i.variant_id
-           WHERE i.model_id = $1 OR v.model_id = $1
-           ORDER BY "from_variant!", i.is_primary DESC, i.sort_order, i.created_at"#,
+           LEFT JOIN files f ON f.id = i.source_file_id
+           WHERE (i.model_id = $1 OR v.model_id = $1)
+             -- A promoted picture is the model's now; don't also show the
+             -- variant's copy of the identical blob back at the user.
+             AND NOT (i.model_id IS NULL AND EXISTS (
+                 SELECT 1 FROM images own
+                 WHERE own.model_id = $1 AND own.blob_sha256 = i.blob_sha256))
+           ORDER BY "from_variant!", i.is_primary DESC, "tag_count!", "name_len!",
+                    i.sort_order, i.created_at"#,
         id,
     )
     .fetch_all(&state.db)

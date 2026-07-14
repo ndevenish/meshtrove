@@ -452,7 +452,13 @@ export const api = {
     request<ImageRecord>(`/api/${owner}/${id}/images`, { method: 'POST', body: form }),
   markPrimary: (imageId: string) =>
     request<void>(`/api/images/${imageId}/primary`, { method: 'PUT' }),
+  /// Favourite a variant's picture *for the model*: the model takes a copy of the
+  /// same blob as its own primary, and the variant keeps its thumbnail.
+  promoteImage: (modelId: string, imageId: string) =>
+    request<void>(`/api/models/${modelId}/images/${imageId}/promote`, { method: 'PUT' }),
   deleteImage: (imageId: string) => request<void>(`/api/images/${imageId}`, { method: 'DELETE' }),
+  /// Force a render of this file, whatever the automatic pass chose.
+  renderFile: (fileId: string) => request<void>(`/api/files/${fileId}/render`, { method: 'POST' }),
 
   creators: (q = '') => request<Creator[]>(`/api/creators?q=${encodeURIComponent(q)}`),
   creator: (id: string) => request<Creator>(`/api/creators/${id}`),

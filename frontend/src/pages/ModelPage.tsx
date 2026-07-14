@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   Container,
@@ -45,6 +45,34 @@ export default function ModelPage() {
     queryFn: () => api.model(id!),
     enabled: !!id,
   })
+
+  // A render finishing adds a picture to this page — but the page has no way to
+  // know that, because the job writes the image straight to the database. So
+  // watch the queue while any render is in flight, and refetch the model when the
+  // last one lands. (Any render, not just this model's: a job's payload names a
+  // file, and the page would have to fetch every variant's file list to know
+  // whether that file is one of ours. A refetch of one model is cheaper than that
+  // bookkeeping, and if nothing changed the page simply redraws itself.)
+  const { data: jobs } = useQuery({
+    queryKey: ['jobs', 'all'],
+    queryFn: () => api.jobs(''),
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some(
+        (j) => j.kind === 'render_preview' && (j.status === 'queued' || j.status === 'running'),
+      )
+        ? 1500
+        : false,
+  })
+  const rendering = (jobs ?? []).some(
+    (j) => j.kind === 'render_preview' && (j.status === 'queued' || j.status === 'running'),
+  )
+  const wasRendering = useRef(false)
+  useEffect(() => {
+    if (wasRendering.current && !rendering) {
+      void queryClient.invalidateQueries({ queryKey: ['model', id] })
+    }
+    wasRendering.current = rendering
+  }, [rendering, id, queryClient])
 
   const canEditModel =
     !!model &&
@@ -106,59 +134,77 @@ export default function ModelPage() {
             )}
           </Paper>
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}>
-            {model.images.map((image) => (
-              <Box key={image.id} sx={{ position: 'relative' }}>
-                <Box
-                  component="img"
-                  src={imageUrl(image.id)}
-                  onClick={() => setSelectedImage(image.id)}
-                  sx={{
-                    width: 72,
-                    height: 72,
-                    objectFit: 'cover',
-                    borderRadius: 1,
-                    cursor: 'pointer',
-                    border: (theme) =>
-                      `2px solid ${shownImage === image.id ? theme.palette.primary.main : 'transparent'}`,
-                  }}
-                />
-                {canEdit && (
-                  <Stack direction="row" sx={{ position: 'absolute', top: -6, right: -6 }}>
-                    <Tooltip title={image.is_primary ? 'Primary image' : 'Make primary'}>
-                      <IconButton
-                        size="small"
-                        sx={{ p: 0.25, bgcolor: 'background.paper' }}
-                        onClick={async () => {
-                          if (!image.is_primary) {
-                            await api.markPrimary(image.id)
+            {model.images.map((image) => {
+              // "Primary" on a variant's image means primary *of that variant* —
+              // it says nothing about the model. Only the model's own image can
+              // be the model's favourite, so that is what the star reflects.
+              const isModelPrimary = !image.variant_id && image.is_primary
+              return (
+                <Box key={image.id} sx={{ position: 'relative' }}>
+                  <Box
+                    component="img"
+                    src={imageUrl(image.id)}
+                    onClick={() => setSelectedImage(image.id)}
+                    sx={{
+                      width: 72,
+                      height: 72,
+                      objectFit: 'cover',
+                      borderRadius: 1,
+                      cursor: 'pointer',
+                      border: (theme) =>
+                        `2px solid ${shownImage === image.id ? theme.palette.primary.main : 'transparent'}`,
+                    }}
+                  />
+                  {canEdit && (
+                    <Stack direction="row" sx={{ position: 'absolute', top: -6, right: -6 }}>
+                      <Tooltip
+                        title={
+                          isModelPrimary
+                            ? 'Primary image'
+                            : image.variant_id
+                              ? 'Make primary (promotes this variant’s picture to the model)'
+                              : 'Make primary'
+                        }
+                      >
+                        <IconButton
+                          size="small"
+                          sx={{ p: 0.25, bgcolor: 'background.paper' }}
+                          onClick={async () => {
+                            if (isModelPrimary) return
+                            // A variant's picture can't just be flagged: "primary"
+                            // on a variant image means primary *of that variant*.
+                            // Favouriting it here is a statement about the model, so
+                            // the model takes a copy of the blob as its own.
+                            if (image.variant_id) await api.promoteImage(model.id, image.id)
+                            else await api.markPrimary(image.id)
                             refresh()
-                          }
-                        }}
-                      >
-                        {image.is_primary ? (
-                          <StarIcon sx={{ fontSize: 16, color: 'primary.main' }} />
-                        ) : (
-                          <StarBorderIcon sx={{ fontSize: 16 }} />
-                        )}
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Delete image">
-                      <IconButton
-                        size="small"
-                        sx={{ p: 0.25, bgcolor: 'background.paper' }}
-                        onClick={async () => {
-                          await api.deleteImage(image.id)
-                          setSelectedImage(null)
-                          refresh()
-                        }}
-                      >
-                        <DeleteIcon sx={{ fontSize: 16 }} />
-                      </IconButton>
-                    </Tooltip>
-                  </Stack>
-                )}
-              </Box>
-            ))}
+                          }}
+                        >
+                          {isModelPrimary ? (
+                            <StarIcon sx={{ fontSize: 16, color: 'primary.main' }} />
+                          ) : (
+                            <StarBorderIcon sx={{ fontSize: 16 }} />
+                          )}
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Delete image">
+                        <IconButton
+                          size="small"
+                          sx={{ p: 0.25, bgcolor: 'background.paper' }}
+                          onClick={async () => {
+                            await api.deleteImage(image.id)
+                            setSelectedImage(null)
+                            refresh()
+                          }}
+                        >
+                          <DeleteIcon sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </Tooltip>
+                    </Stack>
+                  )}
+                </Box>
+              )
+            })}
             {canEdit && (
               <Button
                 component="label"
