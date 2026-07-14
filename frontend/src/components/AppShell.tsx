@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Outlet, Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Outlet, Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   AppBar,
   Toolbar,
@@ -41,6 +41,12 @@ export default function AppShell() {
   const [progress, setProgress] = useState(0)
   const [uploadName, setUploadName] = useState('')
   const [dropError, setDropError] = useState('')
+
+  // The window-level drop listener is registered once; a ref keeps it reading the
+  // *current* page rather than the one that was open when it was installed.
+  const { pathname } = useLocation()
+  const pathRef = useRef(pathname)
+  pathRef.current = pathname
 
   // Global file-first drop: dropping a file anywhere stages it as an import and
   // takes you to its page, where you say what it is once it has unpacked.
@@ -92,7 +98,13 @@ export default function AppShell() {
           return startImport(drop, setProgress)
             .then(async (staged) => {
               await queryClient.invalidateQueries()
-              navigate(`/imports/${staged.id}`)
+              // Dropped while standing on a bundle? Then that is where it is
+              // going, and the import page opens preset to "add to this bundle" —
+              // which is why the bundle page needs no drop target of its own.
+              const onBundle = pathRef.current.match(/^\/bundles\/([0-9a-fA-F-]{36})/)
+              navigate(
+                onBundle ? `/imports/${staged.id}?bundle=${onBundle[1]}` : `/imports/${staged.id}`,
+              )
             })
             .finally(() => setImporting(false))
         })

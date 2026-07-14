@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import {
   Container,
   Box,
@@ -26,24 +26,19 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
-import { startImport } from '../upload'
 import ModelCard from '../components/ModelCard'
 import BundleEditDialog from '../components/BundleEditDialog'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
-import Dropzone from '../components/Dropzone'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ImportErrorDialog from '../components/ImportErrorDialog'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
   const { user } = useAuth()
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
-  const [uploading, setUploading] = useState(false)
-  const [uploadPct, setUploadPct] = useState(0)
   const [uploadError, setUploadError] = useState('')
   const [toast, setToast] = useState('')
 
@@ -241,38 +236,6 @@ export default function BundlePage() {
           </Box>
 
           <Divider sx={{ mb: 2 }} />
-          {canEdit && (
-            <Box sx={{ mb: 2 }}>
-              <Dropzone
-                label={
-                  uploading
-                    ? uploadPct < 100
-                      ? `Uploading ${uploadPct}%…`
-                      : 'Staging…'
-                    : 'Drop an archive or folder to add its contents'
-                }
-                hint="Stages as an import, preset to add to this bundle"
-                busy={uploading}
-                progress={uploading && uploadPct < 100 ? uploadPct : undefined}
-                onDrop={async (drop) => {
-                  setUploading(true)
-                  setUploadPct(0)
-                  try {
-                    // Same staging path as every other drop — just preselecting
-                    // this bundle as the destination, so the contents can still be
-                    // reviewed (or sent somewhere else) before they land.
-                    const staged = await startImport(drop, (f) => setUploadPct(Math.round(f * 100)))
-                    await queryClient.invalidateQueries({ queryKey: ['imports'] })
-                    navigate(`/imports/${staged.id}?bundle=${bundle.id}`)
-                  } catch (err) {
-                    setUploadError(err instanceof Error ? err.message : String(err))
-                  } finally {
-                    setUploading(false)
-                  }
-                }}
-              />
-            </Box>
-          )}
           <BundleUnsortedSection bundle={bundle} canEdit={!!canEdit} onChange={refresh} />
           <MembersSection
             bundleId={bundle.id}
