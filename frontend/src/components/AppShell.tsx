@@ -27,7 +27,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile'
 
 import { useAuth, useColorMode } from '../main'
 import { api } from '../api'
-import { startImport } from '../upload'
+import { readDrop, startImport } from '../upload'
 
 export default function AppShell() {
   const { user, refresh } = useAuth()
@@ -74,22 +74,30 @@ export default function AppShell() {
       if (hasFiles(e)) e.preventDefault()
     }
     const onDrop = (e: DragEvent) => {
-      if (!hasFiles(e)) return
+      if (!hasFiles(e) || !e.dataTransfer) return
       e.preventDefault()
       depth = 0
       setDragging(false)
-      const file = e.dataTransfer?.files?.[0]
-      if (!file) return
-      setImporting(true)
-      setProgress(0)
-      setUploadName(file.name)
-      startImport(file, setProgress)
-        .then(async (staged) => {
-          await queryClient.invalidateQueries()
-          navigate(`/imports/${staged.id}`)
+      // A folder has to be walked into its files before anything can upload it,
+      // and that read must start while the DataTransfer is still alive.
+      readDrop(e.dataTransfer)
+        .then((drop) => {
+          if (!drop.files.length) return
+          setImporting(true)
+          setProgress(0)
+          setUploadName(
+            drop.files.length === 1
+              ? drop.files[0].file.name
+              : `${drop.name} — ${drop.files.length} files`,
+          )
+          return startImport(drop, setProgress)
+            .then(async (staged) => {
+              await queryClient.invalidateQueries()
+              navigate(`/imports/${staged.id}`)
+            })
+            .finally(() => setImporting(false))
         })
         .catch((err) => setDropError(err instanceof Error ? err.message : String(err)))
-        .finally(() => setImporting(false))
     }
     window.addEventListener('dragenter', onEnter)
     window.addEventListener('dragleave', onLeave)

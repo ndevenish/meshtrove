@@ -2,7 +2,12 @@ import { useState } from 'react'
 import { Box, Typography, LinearProgress, alpha } from '@mui/material'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 
+import { readDrop, readFileList, type Drop } from '../upload'
+
 /// A dashed drop target with a hidden file-input fallback (click to browse).
+/// Accepts a folder as readily as a file: the drop is resolved through
+/// `readDrop`, which walks a directory into its files rather than handing the
+/// directory itself on as if it were one.
 export default function Dropzone({
   label,
   hint,
@@ -10,7 +15,7 @@ export default function Dropzone({
   multiple = false,
   busy = false,
   progress,
-  onFiles,
+  onDrop,
 }: {
   label: string
   hint?: string
@@ -19,13 +24,9 @@ export default function Dropzone({
   busy?: boolean
   /** 0-100 for a determinate bar; omit for indeterminate */
   progress?: number
-  onFiles: (files: File[]) => void
+  onDrop: (drop: Drop) => void
 }) {
   const [over, setOver] = useState(false)
-
-  const take = (list: FileList | null) => {
-    if (list && list.length) onFiles(Array.from(list))
-  }
 
   return (
     <Box
@@ -38,7 +39,9 @@ export default function Dropzone({
       onDrop={(e) => {
         e.preventDefault()
         setOver(false)
-        take(e.dataTransfer.files)
+        void readDrop(e.dataTransfer).then((drop) => {
+          if (drop.files.length) onDrop(drop)
+        })
       }}
       sx={(theme) => ({
         display: 'block',
@@ -59,7 +62,7 @@ export default function Dropzone({
         accept={accept}
         multiple={multiple}
         onChange={(e) => {
-          take(e.target.files)
+          if (e.target.files?.length) onDrop(readFileList(e.target.files))
           e.target.value = ''
         }}
       />

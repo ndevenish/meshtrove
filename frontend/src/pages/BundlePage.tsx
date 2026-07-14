@@ -249,22 +249,19 @@ export default function BundlePage() {
                     ? uploadPct < 100
                       ? `Uploading ${uploadPct}%…`
                       : 'Staging…'
-                    : 'Drop an archive to add its contents'
+                    : 'Drop an archive or folder to add its contents'
                 }
-                hint=".zip stages as an import, preset to add to this bundle"
-                accept=".zip"
+                hint="Stages as an import, preset to add to this bundle"
                 busy={uploading}
                 progress={uploading && uploadPct < 100 ? uploadPct : undefined}
-                onFiles={async (droppedFiles) => {
+                onDrop={async (drop) => {
                   setUploading(true)
                   setUploadPct(0)
                   try {
                     // Same staging path as every other drop — just preselecting
-                    // this bundle as the destination, so the archive can still be
-                    // reviewed (or sent somewhere else) before it lands.
-                    const staged = await startImport(droppedFiles[0], (f) =>
-                      setUploadPct(Math.round(f * 100)),
-                    )
+                    // this bundle as the destination, so the contents can still be
+                    // reviewed (or sent somewhere else) before they land.
+                    const staged = await startImport(drop, (f) => setUploadPct(Math.round(f * 100)))
                     await queryClient.invalidateQueries({ queryKey: ['imports'] })
                     navigate(`/imports/${staged.id}?bundle=${bundle.id}`)
                   } finally {

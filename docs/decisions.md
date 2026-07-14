@@ -97,16 +97,44 @@ Real archive shapes driving it: `docs/import-layouts.md`.
   transaction and drops the import row; it refuses while an unpack is in flight,
   so files can't be stranded.
 
+  **Folders drop too.** A dropped directory arrives in `dataTransfer.files`
+  disguised as a file — a name, a size — and only fails when something reads its
+  bytes (Firefox `NS_ERROR_FILE_IS_DIRECTORY`; Chrome/Safari silently upload zero
+  bytes). `webkitGetAsEntry()` is the only way to tell, and only inside the drop
+  handler, so `readDrop` (`frontend/src/upload.ts`) walks the tree there and
+  stages each file with its folder in `path` — an unzipped folder imports
+  identically to the same folder zipped. No backend change: the multipart
+  contract already applies a `path` field to every `file` part that follows it,
+  so one `path`/`file` pair per file carries the whole tree in one request.
+
   *Why:* the model-vs-bundle question can't be answered at drop time — the
   contents aren't known yet, and the archive filename doesn't say. Deferring it
   by one step removes the guess entirely, and with it the need for "Promote to
   bundle" / "Flatten to model" conversions (both now gone). A dedicated table,
   rather than a `status` flag on `bundles`, means a staged import cannot leak
   into the library through a query that forgot to filter it out.
-- **Phase 3 (todo):** layout detectors (Loot) + model-vs-bundle *suggestion*
-  from folder depth/naming — now a **default on the import page's chooser**
-  rather than a decision made behind the user's back. Hooks: `deriveModelName`,
-  `ImportPage`'s destination toggle, `MoveToVariantDialog`, `MoveToModelDialog`.
+- **Phase 3 (todo) — suggestions, once the contents are known:** every choice on
+  the import page is currently a blank form. The name is `deriveModelName(file)`
+  (the archive's filename, de-slugged), the destination toggle defaults to *One
+  model* (or the bundle you dropped on), and the carve into variants/member
+  models is entirely by hand afterwards. Phase 3 reads the **staged file tree**
+  — which imports made available *before* anything is committed — and turns each
+  of those into a pre-filled default:
+  - **Destination:** shallow + few files + no support-suffix folders ⇒ *One
+    model*; deep nesting, many leaf folders, `DownloadAll_<scale>` naming ⇒ *A
+    new bundle*. Preselects the toggle in `ImportPage`; the user still confirms.
+  - **Name:** from the wrapper folder inside the archive rather than the
+    filename, when they disagree.
+  - **The carve:** map the Loot layout (`docs/import-layouts.md` B) onto the
+    axes we already seed — leaf folders → member models, `_NoSupports` /
+    `_Supported_LYCHEE` suffixes → the `support` axis, the `32mm` wrapper →
+    `scale`, top-level `1 - Heroes` → a tag, *not* a variant. Feeds the
+    unsorted-file sections (`UnsortedSection`, `BundleUnsortedSection`) as
+    a proposed grouping to accept or edit.
+
+  *Why it stayed a suggestion:* imports removed the need to guess at drop time,
+  so a detector that is wrong now costs an edit, not a migration between kinds.
+  That is the only reason it is safe to add heuristics at all.
 
 ## Deferred (schema already accommodates)
 

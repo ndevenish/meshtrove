@@ -15,7 +15,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { api, uploadWithProgress, type FileRecord, type ModelDetail } from '../api'
 import Dropzone from './Dropzone'
-import { deriveModelName } from '../upload'
+import type { Drop } from '../upload'
 
 /// Create (no `model`) or edit (with `model`) a model's metadata and tags.
 export default function ModelEditDialog({
@@ -38,7 +38,7 @@ export default function ModelEditDialog({
   const [description, setDescription] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [archive, setArchive] = useState<File | null>(null)
+  const [drop, setDrop] = useState<Drop | null>(null)
   const [uploadPct, setUploadPct] = useState(0)
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
@@ -54,7 +54,7 @@ export default function ModelEditDialog({
       setTags(model?.tags ?? [])
       setDescription(model?.description_md ?? '')
       setError('')
-      setArchive(null)
+      setDrop(null)
     }
   }, [open, model])
 
@@ -89,11 +89,15 @@ export default function ModelEditDialog({
         }
       } else {
         saved = await api.createModel(body)
-        // File-first: a dropped archive unpacks into the model's unsorted
-        // bucket in the background; the model page shows unpack progress.
-        if (archive) {
+        // File-first: dropped files land in the model's unsorted bucket, keeping
+        // their folders; an archive among them unpacks in the background, and the
+        // model page shows that progress.
+        if (drop) {
           const form = new FormData()
-          form.append('file', archive)
+          for (const { file, path } of drop.files) {
+            form.append('path', path) // applies to the file part that follows
+            form.append('file', file)
+          }
           await uploadWithProgress<FileRecord[]>(`/api/models/${saved.id}/files`, form, (f) =>
             setUploadPct(Math.round(f * 100)),
           )
@@ -118,22 +122,22 @@ export default function ModelEditDialog({
           {!model && (
             <Dropzone
               label={
-                busy && archive
+                busy && drop
                   ? uploadPct < 100
                     ? `Uploading ${uploadPct}%…`
                     : 'Unpacking…'
-                  : archive
-                    ? archive.name
-                    : 'Drop an archive to import'
+                  : drop
+                    ? drop.files.length === 1
+                      ? drop.files[0].file.name
+                      : `${drop.name} — ${drop.files.length} files`
+                    : 'Drop an archive or folder to import'
               }
-              hint={archive ? 'Will unpack after Create' : '.zip auto-unpacks · or click to browse'}
-              accept=".zip"
-              busy={busy && !!archive}
-              progress={busy && archive && uploadPct < 100 ? uploadPct : undefined}
-              onFiles={(files) => {
-                const file = files[0]
-                setArchive(file)
-                if (!name.trim()) setName(deriveModelName(file.name))
+              hint={drop ? 'Uploads after Create' : '.zip auto-unpacks · or click to browse'}
+              busy={busy && !!drop}
+              progress={busy && drop && uploadPct < 100 ? uploadPct : undefined}
+              onDrop={(dropped) => {
+                setDrop(dropped)
+                if (!name.trim()) setName(dropped.name)
               }}
             />
           )}

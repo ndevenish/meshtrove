@@ -2,9 +2,11 @@
 
 Reference for the file-first import + recategorisation feature. These are the
 real archive layouts the import flow must cope with. One dropped archive can be
-anything from a single model to a whole collection, and **you usually can't tell
-at drop time** — which is why the flow is *import flat, then recategorise*, with
-layout-specific detectors added later (Phase 3) rather than guessed up front.
+anything from a single model to a whole collection, and **you can't tell at drop
+time** — the filename doesn't say and the contents aren't unpacked yet. So a
+drop stages an **import**: the archive unpacks into a holding area that is
+neither a model nor a bundle, and you place it only once you can see what's in
+it. Layout detectors (Phase 3) then pre-fill that choice rather than making it.
 
 See `docs/decisions.md` (status) and the phased plan for how this maps to code.
 
@@ -56,21 +58,34 @@ Sanjay, Gynosphinx, …), each with **support-type variants**, all classified
 **scale=32mm**. Dropping `DownloadAll_75mm.zip` later must **add into the same
 bundle** (a model can span bundles — `bundle_models` is a true many-to-many).
 
-## Heuristic for the model-vs-bundle guess (Phase 3)
+## What the import flow does with these today
+
+Both layouts already import and can be shaped by hand, because the destination
+is chosen *after* the unpack:
+
+- **A** — drop → the import page shows 3 files, one folder deep → commit as
+  **one model** → move the `.3mf`s and the STL into variants on the model page.
+- **B** — drop → commit as **a new bundle** (or *add to an existing bundle*, so
+  `DownloadAll_75mm.zip` joins the same bundle later) → carve the bundle's
+  unsorted files into member models, then each model's files into
+  support-type variants.
+
+What's missing is only that every step of B is manual: nothing reads
+`_Supported_LYCHEE` or `32mm` out of the paths, and the destination toggle
+always starts on *One model*.
+
+## Heuristic for the model-vs-bundle suggestion (Phase 3)
+
+Run over the **staged file tree** (the import is committed to nothing, so a
+wrong guess costs an edit, never a conversion):
 
 - **Looks like one model (A):** few files, shallow (≤1 folder deep), no
-  support-suffix folders.
+  support-suffix folders → preselect *One model*.
 - **Looks like a bundle (B):** deep nesting, many leaf folders,
-  `DownloadAll_<scale>` naming, support-type suffix folders.
+  `DownloadAll_<scale>` naming, support-type suffix folders → preselect *A new
+  bundle*, and propose the carve: leaf folders → member models, support suffixes
+  → the `support` axis, the wrapper's `32mm` → `scale`, top-level `1 - Heroes`
+  → a tag rather than a variant.
 
-The guess is only ever an editable default; the recategorisation UI can always
-re-shape model↔bundle by hand.
-
-## What Phase 1 actually does with these
-
-Phase 1 imports **flat into one model's "unsorted" bucket** and provides the
-recategorisation UI (set kind, move files into variants, delete, rename).
-- **A** is handled fully: drop → model → move the `.3mf`s and STL into variants.
-- **B** works manually: everything lands in one model you can tidy; proper
-  bundle-of-models splitting is Phase 2, and auto-detection of the layout above
-  is Phase 3.
+Every one of these is an editable default on the import page; nothing commits
+without the user pressing *Import*.
