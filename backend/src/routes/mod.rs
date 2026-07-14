@@ -8,6 +8,7 @@ pub mod creators;
 pub mod files;
 pub mod frontend;
 pub mod images;
+pub mod imports;
 pub mod jobs;
 pub mod models;
 pub mod tags;

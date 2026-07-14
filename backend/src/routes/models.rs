@@ -280,7 +280,7 @@ pub struct ImageSummary {
     pub height: Option<i32>,
 }
 
-async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiError> {
+pub async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiError> {
     let base = slugify(name);
     let taken: Vec<String> = sqlx::query_scalar!(
         "SELECT slug FROM models WHERE slug = $1 OR slug LIKE $1 || '-%'",

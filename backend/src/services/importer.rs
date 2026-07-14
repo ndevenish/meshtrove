@@ -22,8 +22,8 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         serde_json::from_value(payload.clone()).context("bad import_archive payload")?;
 
     let archive = sqlx::query!(
-        r#"SELECT f.blob_sha256, f.model_id, f.variant_id, f.bundle_id, f.path, f.filename FROM files f
-           WHERE f.id = $1"#,
+        r#"SELECT f.blob_sha256, f.model_id, f.variant_id, f.bundle_id, f.import_id, f.path, f.filename
+           FROM files f WHERE f.id = $1"#,
         payload.archive_file_id,
     )
     .fetch_optional(&state.db)
@@ -33,15 +33,24 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     // Extracted files inherit the archive's owner: a variant archive unpacks
     // onto that variant; a model archive unpacks into the model's "unsorted"
     // bucket (files.model_id); a bundle archive unpacks into the bundle's
-    // "unsorted" bucket (files.bundle_id) for carving into member models. Exactly
-    // one owner column is set, satisfying the files CHECK.
-    let (model_id, variant_id, bundle_id) =
-        match (archive.model_id, archive.variant_id, archive.bundle_id) {
-            (_, Some(v), _) => (None, Some(v), None),
-            (Some(m), None, _) => (Some(m), None, None),
-            (None, None, Some(b)) => (None, None, Some(b)),
-            (None, None, None) => return Err(anyhow!("import_archive requires an owned archive")),
-        };
+    // "unsorted" bucket (files.bundle_id) for carving into member models; an
+    // import archive unpacks into the import's staging bucket (files.import_id),
+    // where it waits to be committed to a model or a bundle. Exactly one owner
+    // column is set, satisfying the files CHECK.
+    let (model_id, variant_id, bundle_id, import_id) = match (
+        archive.model_id,
+        archive.variant_id,
+        archive.bundle_id,
+        archive.import_id,
+    ) {
+        (_, Some(v), _, _) => (None, Some(v), None, None),
+        (Some(m), None, _, _) => (Some(m), None, None, None),
+        (None, None, Some(b), _) => (None, None, Some(b), None),
+        (None, None, None, Some(i)) => (None, None, None, Some(i)),
+        (None, None, None, None) => {
+            return Err(anyhow!("import_archive requires an owned archive"));
+        }
+    };
 
     let archive_path = state.store.path_for(&archive.blob_sha256);
     let base_path = archive.path.clone();
@@ -120,8 +129,8 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         .execute(&mut *tx)
         .await?;
         let file_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, path, filename, mime, kind)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"#,
+            r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)
+               VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8) RETURNING id"#,
             blob.sha256,
             model_id,
             variant_id,
@@ -130,6 +139,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
             filename,
             mime,
             kind as crate::routes::files::FileKind,
+            import_id,
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -151,10 +161,11 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
 
     // Queue a preview render for the owner's first STL if it has no image yet.
     // The renderer stamps the image onto whichever owner the source file
-    // carries (model or variant), so a fresh model still gets a browse thumbnail.
-    // Bundle-owned imports are a staging bucket to be carved into members, so
-    // they don't get a bundle-level thumbnail here.
+    // carries (model or variant). Bundle- and import-owned files are staging
+    // buckets, to be carved into members or committed to an owner, so their
+    // thumbnails are queued at that point instead (see routes/imports.rs).
     if bundle_id.is_none()
+        && import_id.is_none()
         && let Some(file_id) = model_file_ids.first()
     {
         let has_image = sqlx::query_scalar!(

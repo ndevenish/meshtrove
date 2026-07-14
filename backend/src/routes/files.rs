@@ -30,9 +30,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/variants/{id}/files", post(upload_variant_files))
         .route("/api/models/{id}/files", post(upload_model_files))
         .route("/api/bundles/{id}/files", post(upload_bundle_files))
+        .route("/api/imports/{id}/files", post(upload_import_files))
         .route("/api/variants/{id}/files", get(list_variant_files))
         .route("/api/models/{id}/files", get(list_model_files))
         .route("/api/bundles/{id}/files", get(list_bundle_files))
+        .route("/api/imports/{id}/files", get(list_import_files))
         .route("/api/files/{id}", patch(update_file).delete(delete_file))
         .route("/api/files/{id}/download", get(download_file))
         // Uploads are multi-GB; the store streams to disk, so no body cap.
@@ -44,6 +46,9 @@ enum Owner {
     Model(Uuid),
     Variant(Uuid),
     Bundle(Uuid),
+    /// The staging area a dropped archive lands in, before it is committed to a
+    /// model or a bundle (see `routes/imports.rs`).
+    Import(Uuid),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, ToSchema, sqlx::Type)]
@@ -124,6 +129,11 @@ async fn check_upload_permission(
                 .fetch_optional(&state.db)
                 .await?
         }
+        Owner::Import(id) => {
+            sqlx::query_scalar!("SELECT created_by FROM imports WHERE id = $1", id)
+                .fetch_optional(&state.db)
+                .await?
+        }
     };
     let created_by = created_by.ok_or(ApiError::NotFound)?;
     user.require_can_edit(created_by)?;
@@ -155,6 +165,15 @@ async fn upload_bundle_files(
     multipart: Multipart,
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
     upload_files(state, user, Owner::Bundle(id), multipart).await
+}
+
+async fn upload_import_files(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    multipart: Multipart,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    upload_files(state, user, Owner::Import(id), multipart).await
 }
 
 /// Multipart contract: optional text fields `path` and `kind` apply to every
@@ -221,15 +240,11 @@ async fn upload_files(
                 )
                 .await?;
 
-                // Zips uploaded to a variant, model, or bundle unpack in the
-                // background into that owner's files (variant → onto the variant,
-                // model/bundle → into that owner's "unsorted" bucket); the
-                // original archive row is kept for provenance.
+                // A zip unpacks in the background into its owner's files: onto a
+                // variant, into a model's or bundle's "unsorted" bucket, or into
+                // an import's staging bucket. The original archive row is kept
+                // for provenance and travels with the rest on commit.
                 if matches!(record.kind, FileKind::Archive)
-                    && matches!(
-                        owner,
-                        Owner::Variant(_) | Owner::Model(_) | Owner::Bundle(_)
-                    )
                     && filename.to_lowercase().ends_with(".zip")
                 {
                     crate::services::jobs::enqueue(
@@ -271,14 +286,15 @@ async fn insert_file(
     .execute(&mut *tx)
     .await?;
 
-    let (model_id, variant_id, bundle_id) = match owner {
-        Owner::Model(id) => (Some(id), None, None),
-        Owner::Variant(id) => (None, Some(id), None),
-        Owner::Bundle(id) => (None, None, Some(id)),
+    let (model_id, variant_id, bundle_id, import_id) = match owner {
+        Owner::Model(id) => (Some(id), None, None, None),
+        Owner::Variant(id) => (None, Some(id), None, None),
+        Owner::Bundle(id) => (None, None, Some(id), None),
+        Owner::Import(id) => (None, None, None, Some(id)),
     };
     let record = sqlx::query!(
-        r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, path, filename, mime, kind)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)
+           VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8)
            RETURNING id, path, filename, mime, kind as "kind: FileKind", created_at"#,
         sha256,
         model_id,
@@ -288,6 +304,7 @@ async fn insert_file(
         filename,
         mime,
         kind as FileKind,
+        import_id,
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -403,11 +420,45 @@ async fn list_bundle_files(
     ))
 }
 
+/// The staging bucket of an import: everything unpacked from the dropped
+/// archive, shown on the import page before it is committed to a model/bundle.
+async fn list_import_files(
+    State(state): State<AppState>,
+    _user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
+                  f.kind as "kind: FileKind", f.created_at, b.size
+           FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256
+           WHERE f.import_id = $1
+           ORDER BY f.path, f.filename"#,
+        id
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| FileRecord {
+                id: r.id,
+                blob_sha256: r.blob_sha256,
+                path: r.path,
+                filename: r.filename,
+                mime: r.mime,
+                kind: r.kind,
+                size: r.size,
+                created_at: r.created_at,
+            })
+            .collect(),
+    ))
+}
+
 /// The container a file is sorted within: a model (directly or via a variant),
-/// or a bundle (its unsorted bucket).
+/// a bundle (its unsorted bucket), or an import (staged, not yet committed).
 enum FileContext {
     Model(Uuid),
     Bundle(Uuid),
+    Import,
 }
 
 /// Resolve a file to its editing context and the container's `created_by`.
@@ -416,13 +467,16 @@ async fn file_context(state: &AppState, file_id: Uuid) -> Result<(FileContext, U
         r#"SELECT
              coalesce(f.model_id, v.model_id) as "model_id?",
              f.bundle_id,
+             f.import_id,
              coalesce(mm.created_by, vm.created_by) as "model_created_by?",
-             bb.created_by as "bundle_created_by?"
+             bb.created_by as "bundle_created_by?",
+             ii.created_by as "import_created_by?"
            FROM files f
            LEFT JOIN models mm ON mm.id = f.model_id
            LEFT JOIN model_variants v ON v.id = f.variant_id
            LEFT JOIN models vm ON vm.id = v.model_id
            LEFT JOIN bundles bb ON bb.id = f.bundle_id
+           LEFT JOIN imports ii ON ii.id = f.import_id
            WHERE f.id = $1"#,
         file_id
     )
@@ -435,11 +489,15 @@ async fn file_context(state: &AppState, file_id: Uuid) -> Result<(FileContext, U
         row.model_created_by,
         row.bundle_id,
         row.bundle_created_by,
+        row.import_created_by,
     ) {
-        (Some(model_id), Some(created_by), _, _) => Ok((FileContext::Model(model_id), created_by)),
-        (_, _, Some(bundle_id), Some(created_by)) => {
+        (Some(model_id), Some(created_by), _, _, _) => {
+            Ok((FileContext::Model(model_id), created_by))
+        }
+        (_, _, Some(bundle_id), Some(created_by), _) => {
             Ok((FileContext::Bundle(bundle_id), created_by))
         }
+        (_, _, _, _, Some(created_by)) => Ok((FileContext::Import, created_by)),
         _ => Err(ApiError::NotFound),
     }
 }
@@ -559,6 +617,13 @@ async fn update_file(
         }
         // Bundle file "unsorted" is a no-op (already bundle-owned).
         (FileContext::Bundle(_), Some(true), None, None, None) => None,
+        // Staged files don't move: an import is committed as a whole, which is
+        // what gives them an owner (see routes/imports.rs).
+        (FileContext::Import, _, _, _, _) => {
+            return Err(ApiError::BadRequest(
+                "staged files can't be moved — commit the import first".into(),
+            ));
+        }
         _ => return Err(ApiError::BadRequest("invalid move for this file".into())),
     };
 
