@@ -56,8 +56,6 @@ export default function ImportPage() {
   const [creatorName, setCreatorName] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [sourceUrl, setSourceUrl] = useState('')
-  const [license, setLicense] = useState('')
-  const [price, setPrice] = useState('')
   const [description, setDescription] = useState('')
 
   const { data: staged, isLoading } = useQuery({
@@ -134,8 +132,6 @@ export default function ImportPage() {
         creator_id,
         tags,
         source_url: sourceUrl.trim() || null,
-        license: license.trim() || null,
-        purchase_price: price ? Number(price) : null,
         description_md: description.trim() || null,
       }
       const spec = layout?.spec
@@ -260,23 +256,6 @@ export default function ImportPage() {
             value={sourceUrl}
             onChange={(e) => setSourceUrl(e.target.value)}
           />
-          <Stack direction="row" spacing={2}>
-            <TextField
-              size="small"
-              label="License"
-              value={license}
-              onChange={(e) => setLicense(e.target.value)}
-              fullWidth
-            />
-            <TextField
-              size="small"
-              label="Purchase price"
-              type="number"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-              fullWidth
-            />
-          </Stack>
           <TextField
             size="small"
             label="Description (markdown)"

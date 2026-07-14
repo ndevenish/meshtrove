@@ -32,8 +32,6 @@ export default function ModelEditDialog({
   const [name, setName] = useState('')
   const [creatorName, setCreatorName] = useState('')
   const [sourceUrl, setSourceUrl] = useState('')
-  const [license, setLicense] = useState('')
-  const [price, setPrice] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [description, setDescription] = useState('')
   const [error, setError] = useState('')
@@ -49,8 +47,6 @@ export default function ModelEditDialog({
       setName(model?.name ?? '')
       setCreatorName(model?.creator_name ?? '')
       setSourceUrl(model?.source_url ?? '')
-      setLicense(model?.license ?? '')
-      setPrice(model?.purchase_price != null ? String(model.purchase_price) : '')
       setTags(model?.tags ?? [])
       setDescription(model?.description_md ?? '')
       setError('')
@@ -76,8 +72,6 @@ export default function ModelEditDialog({
         name,
         creator_id,
         source_url: sourceUrl || null,
-        license: license || null,
-        purchase_price: price ? Number(price) : null,
         tags,
         description_md: model ? undefined : description || null,
       }
@@ -170,21 +164,6 @@ export default function ModelEditDialog({
             value={sourceUrl}
             onChange={(e) => setSourceUrl(e.target.value)}
           />
-          <Stack direction="row" spacing={2}>
-            <TextField
-              label="License"
-              value={license}
-              onChange={(e) => setLicense(e.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Purchase price"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-              type="number"
-              fullWidth
-            />
-          </Stack>
           <TextField
             label="Description (markdown)"
             value={description}
