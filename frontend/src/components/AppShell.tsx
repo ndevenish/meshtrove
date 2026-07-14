@@ -66,8 +66,13 @@ export default function AppShell() {
     if (!canCreate) return
     let depth = 0
     const hasFiles = (e: DragEvent) => e.dataTransfer?.types.includes('Files')
+    // Stand down while a dialog is open: it has its own drop target (e.g. the
+    // bundle-patch importer), and the whole-page overlay would otherwise swallow
+    // the drop before the dialog ever saw it. MUI keeps a `.MuiDialog-root` in the
+    // DOM only while a dialog is mounted; menus and selects use other classes.
+    const dialogOpen = () => !!document.querySelector('.MuiDialog-root')
     const onEnter = (e: DragEvent) => {
-      if (!hasFiles(e)) return
+      if (!hasFiles(e) || dialogOpen()) return
       depth += 1
       setDragging(true)
     }
@@ -76,10 +81,10 @@ export default function AppShell() {
       if (depth === 0) setDragging(false)
     }
     const onOver = (e: DragEvent) => {
-      if (hasFiles(e)) e.preventDefault()
+      if (hasFiles(e) && !dialogOpen()) e.preventDefault()
     }
     const onDrop = (e: DragEvent) => {
-      if (!hasFiles(e) || !e.dataTransfer) return
+      if (!hasFiles(e) || !e.dataTransfer || dialogOpen()) return
       e.preventDefault()
       depth = 0
       setDragging(false)
