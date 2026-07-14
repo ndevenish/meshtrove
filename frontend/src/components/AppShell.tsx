@@ -12,8 +12,6 @@ import {
   Button,
   Badge,
   Tooltip,
-  Snackbar,
-  Alert,
   LinearProgress,
   alpha,
 } from '@mui/material'
@@ -28,6 +26,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useAuth, useColorMode } from '../main'
 import { api } from '../api'
 import { readDrop, startImport } from '../upload'
+import ImportErrorDialog from './ImportErrorDialog'
 
 export default function AppShell() {
   const { user, refresh } = useAuth()
@@ -286,16 +285,7 @@ export default function AppShell() {
         </Box>
       )}
 
-      <Snackbar
-        open={!!dropError}
-        autoHideDuration={8000}
-        onClose={() => setDropError('')}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-      >
-        <Alert severity="error" onClose={() => setDropError('')}>
-          Import failed: {dropError}
-        </Alert>
-      </Snackbar>
+      <ImportErrorDialog error={dropError} onClose={() => setDropError('')} />
     </Box>
   )
 }

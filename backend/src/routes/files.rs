@@ -178,6 +178,14 @@ async fn upload_import_files(
 
 /// Multipart contract: optional text fields `path` and `kind` apply to every
 /// `file` field that follows them.
+///
+/// A failure part-way through a multi-GB upload has to be *reported*, and over
+/// HTTP/1.1 that means reading the request body to the end first: respond early
+/// and hyper closes a socket the browser is still writing into, the kernel
+/// answers the in-flight bytes with an RST, and the RST discards the response
+/// the browser had not read yet. All it sees is a reset connection — so it
+/// retries the whole upload from zero, forever, never showing the error. Draining
+/// costs the upload's remaining bandwidth; it buys an error the user can see.
 async fn upload_files(
     state: AppState,
     user: User,
@@ -186,6 +194,26 @@ async fn upload_files(
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
     check_upload_permission(&state, &user, owner).await?;
 
+    let result = consume_fields(&state, owner, &mut multipart).await;
+    if result.is_err() {
+        // next_field() drains whatever is left of the current field, so advancing
+        // to exhaustion is enough to read the body out.
+        while let Ok(Some(_)) = multipart.next_field().await {}
+    }
+    let records = result?;
+
+    if records.is_empty() {
+        return Err(ApiError::BadRequest("no file fields in upload".into()));
+    }
+    Ok(Json(records))
+}
+
+/// The field loop itself: everything up to the first failure.
+async fn consume_fields(
+    state: &AppState,
+    owner: Owner,
+    multipart: &mut Multipart,
+) -> Result<Vec<FileRecord>, ApiError> {
     let mut path = String::new();
     let mut kind_override: Option<String> = None;
     let mut records = Vec::new();
@@ -229,7 +257,7 @@ async fn upload_files(
                 let blob = state.store.put(stream).await?;
 
                 let record = insert_file(
-                    &state,
+                    state,
                     owner,
                     &blob.sha256,
                     blob.size,
@@ -260,10 +288,7 @@ async fn upload_files(
         }
     }
 
-    if records.is_empty() {
-        return Err(ApiError::BadRequest("no file fields in upload".into()));
-    }
-    Ok(Json(records))
+    Ok(records)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -34,6 +34,7 @@ import BundleEditDialog from '../components/BundleEditDialog'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
 import Dropzone from '../components/Dropzone'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
+import ImportErrorDialog from '../components/ImportErrorDialog'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -45,6 +46,7 @@ export default function BundlePage() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
   const [uploadPct, setUploadPct] = useState(0)
+  const [uploadError, setUploadError] = useState('')
   const [toast, setToast] = useState('')
 
   const { data: bundle } = useQuery({
@@ -264,6 +266,8 @@ export default function BundlePage() {
                     const staged = await startImport(drop, (f) => setUploadPct(Math.round(f * 100)))
                     await queryClient.invalidateQueries({ queryKey: ['imports'] })
                     navigate(`/imports/${staged.id}?bundle=${bundle.id}`)
+                  } catch (err) {
+                    setUploadError(err instanceof Error ? err.message : String(err))
                   } finally {
                     setUploading(false)
                   }
@@ -290,6 +294,7 @@ export default function BundlePage() {
         canEdit={!!canEdit}
         onChange={refresh}
       />
+      <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
       <Snackbar
         open={!!toast}
         autoHideDuration={4000}
