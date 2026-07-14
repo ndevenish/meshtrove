@@ -144,7 +144,7 @@ async fn search(
 
     let mut qb = QueryBuilder::new(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, m.updated_at, c.name AS creator_name,
-              (SELECT i.id FROM images i WHERE i.model_id = m.id AND i.is_primary) AS primary_image_id,
+              model_preview_image(m.id) AS primary_image_id,
               (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
               (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS variant_count,
               coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt

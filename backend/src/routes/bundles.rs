@@ -89,7 +89,7 @@ pub fn push_bundle_filters(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str, tags:
 /// The shared SELECT list producing a `BundleSummary` (alias `b` for bundles).
 const BUNDLE_SUMMARY_COLS: &str = r#"b.id, b.name, b.slug, b.kind::text AS kind, b.creator_id,
     b.updated_at, c.name AS creator_name,
-    (SELECT i.id FROM images i WHERE i.bundle_id = b.id AND i.is_primary) AS primary_image_id,
+    bundle_preview_image(b.id) AS primary_image_id,
     (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS model_count,
     coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
               JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags"#;
@@ -304,7 +304,7 @@ async fn create(
 async fn fetch_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<ModelSummary>, ApiError> {
     let rows = sqlx::query!(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?", m.updated_at,
-                  (SELECT i.id FROM images i WHERE i.model_id = m.id AND i.is_primary) as primary_image_id,
+                  model_preview_image(m.id) as primary_image_id,
                   (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as "like_count!",
                   (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as "variant_count!",
                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt

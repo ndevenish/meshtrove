@@ -114,7 +114,7 @@ async fn browse(
     let mut qb = QueryBuilder::new(
         r#"SELECT * FROM (
             SELECT 'model' AS item_type, m.id, m.name, m.slug, m.creator_id, c.name AS creator_name,
-                   (SELECT i.id FROM images i WHERE i.model_id = m.id AND i.is_primary) AS primary_image_id,
+                   model_preview_image(m.id) AS primary_image_id,
                    (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
                    (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS count,
                    coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
@@ -134,7 +134,7 @@ async fn browse(
     qb.push(
         r#" UNION ALL
             SELECT 'bundle' AS item_type, b.id, b.name, b.slug, b.creator_id, c.name AS creator_name,
-                   (SELECT i.id FROM images i WHERE i.bundle_id = b.id AND i.is_primary) AS primary_image_id,
+                   bundle_preview_image(b.id) AS primary_image_id,
                    NULL::bigint AS like_count,
                    (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS count,
                    coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
