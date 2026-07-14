@@ -15,17 +15,12 @@ export interface Creator {
   model_count: number
 }
 
-export interface AxisOption {
-  id: string
-  value: string
-  sort_order: number
-}
-
-export interface Axis {
+/** A tag from the flat variant vocabulary ("32mm", "supported"). */
+export interface VariantTag {
   id: string
   name: string
   description: string | null
-  options: AxisOption[]
+  variant_count: number
 }
 
 export interface Tag {
@@ -69,8 +64,10 @@ export interface FileRecord {
 export interface VariantDetail {
   id: string
   model_id: string
-  name: string
-  options: Record<string, string>
+  /** Optional display label; null for the anonymous variant */
+  name: string | null
+  /** The tag set that identifies this variant; empty = anonymous */
+  tags: string[]
   print_notes: string | null
   derived_from_variant_id: string | null
   file_count: number
@@ -355,7 +352,7 @@ export const api = {
     request<Creator>(`/api/creators/${id}`, { ...json(body), method: 'PUT' }),
 
   tags: (q = '') => request<Tag[]>(`/api/tags?q=${encodeURIComponent(q)}`),
-  axes: () => request<Axis[]>('/api/variant-axes'),
+  variantTags: (q = '') => request<VariantTag[]>(`/api/variant-tags?q=${encodeURIComponent(q)}`),
 
   jobs: (status = '') => request<Job[]>(`/api/jobs?status=${status}`),
   retryJob: (id: number) => request<void>(`/api/jobs/${id}/retry`, { method: 'POST' }),
@@ -369,6 +366,14 @@ export const api = {
 
 export const imageUrl = (id: string) => `/api/images/${id}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
+
+/// How to refer to a variant in prose: its label if it has one, else its tags,
+/// else the fact that it is the model's untagged bucket of files.
+export function variantLabel(variant: VariantDetail): string {
+  if (variant.name) return variant.name
+  if (variant.tags.length) return variant.tags.join(' + ')
+  return 'Untagged'
+}
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`

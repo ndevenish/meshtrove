@@ -46,9 +46,13 @@ every request a synthetic admin; unset it to exercise real auth
   import_id) = 1`). A dropped archive stages in an **import** — not a model, not
   a bundle, invisible to browse — until `POST /api/imports/{id}/commit` moves its
   files onto one owner. Models and bundles never convert into each other.
-- Variant attributes (scale, support, …) are data-driven rows in
-  `variant_axes` / `variant_axis_options` — never add hard-coded enums/columns
-  for them.
+- A variant **is its set of variant tags**. `variant_tags` is a flat, data-driven
+  vocabulary (32mm, supported, …) — never add hard-coded enums/columns for them,
+  and never reuse the model `tags` table, which says what a model *is*. `name` is
+  an optional label. Identity lives in the trigger-maintained `tag_key`, unique
+  per model: so a model has at most **one anonymous variant** (no name, no tags —
+  its plain bucket of files), and retagging a variant onto a tag set the model
+  already has **merges** the two rather than erroring.
 - Descriptions are immutable revisions (newest = current); edits insert.
 - Big uploads stream end-to-end; don't buffer whole files in memory.
 

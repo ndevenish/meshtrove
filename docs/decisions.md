@@ -36,11 +36,30 @@ Implementation quirks worth knowing (found the hard way):
   blob, verified: same STL uploaded twice → 1 blob, 2 file rows). S3 was
   rejected for now: a second stateful service with no payoff at single-box
   scale; the trait keeps the door open.
-- **Tags vs variants (spec issue b)**: separate systems, unified at the search
-  API (`?q=&tags=&opts=axis:value,…`). Variant attributes are declarable data
-  (`variant_axes` + `variant_axis_options`), not enums — the spec's
-  32mm/75mm/unsupported/… examples are seed rows only. Option filters require
-  a single variant to satisfy all pairs.
+- **Tags vs variants (spec issue b)**: separate systems with separate
+  vocabularies, unified at the search API (`?q=&tags=&vtags=…`). `tags` say what
+  a model *is* (dragon, terrain); `variant_tags` say which *edition* of it a file
+  belongs to (32mm, supported). Keeping them apart stops "supported" turning up
+  in the subject tag cloud. Variant tag filters require a **single variant** to
+  carry all of them, so 32mm + unsupported does not match a model whose 32mm and
+  unsupported tags sit on different variants.
+- **A variant IS its tag set**: `model_variants.name` is an optional display
+  label; identity is the set of variant tags, canonicalised into `tag_key` by
+  trigger and made unique per model. Three things follow, and all three were the
+  point:
+  - **Tags are flat, not axis/value.** A variant can carry two tags that would
+    have shared an axis (an `stl` *and* `obj` edition). `variant_axes` /
+    `variant_axis_options` / `variant_options` are gone; their option values
+    survive as flat tags.
+  - **An anonymous variant is legal.** No name, no tags: the plain bucket of
+    files a model separates out without asserting a tag for them. `UNIQUE
+    (model_id, tag_key)` allows exactly one per model, since its key is `''`.
+  - **Collisions merge, they never conflict.** Creating or retagging a variant
+    onto a tag set the model already has returns *that* variant and folds the
+    files and images across (`merge_duplicate_variants()`, plus the app-level
+    path in `routes/variants.rs`). Two variants with the same tags were never
+    two variants. Duplicate *names* are still rejected — that is a mistake, not
+    a merge.
 - **Rendering**: external tool via background job, f3d first. Admin-global
   `renderer` setting ({input}/{output} substitution); each rendered image
   records renderer+config, so "re-render stale" (add or replace) is a bulk
@@ -126,9 +145,9 @@ Real archive shapes driving it: `docs/import-layouts.md`.
   - **Name:** from the wrapper folder inside the archive rather than the
     filename, when they disagree.
   - **The carve:** map the Loot layout (`docs/import-layouts.md` B) onto the
-    axes we already seed — leaf folders → member models, `_NoSupports` /
-    `_Supported_LYCHEE` suffixes → the `support` axis, the `32mm` wrapper →
-    `scale`, top-level `1 - Heroes` → a tag, *not* a variant. Feeds the
+    variant tags we already seed — leaf folders → member models, `_NoSupports` /
+    `_Supported_LYCHEE` suffixes and the `32mm` wrapper → variant tags on one
+    variant, top-level `1 - Heroes` → a model tag, *not* a variant tag. Feeds the
     unsorted-file sections (`UnsortedSection`, `BundleUnsortedSection`) as
     a proposed grouping to accept or edit.
 

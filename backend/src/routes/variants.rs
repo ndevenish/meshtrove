@@ -1,9 +1,12 @@
-//! Variants: structured editions of a model (32mm/supported, a personal
-//! merged remix, …). Attributes are assignments from the declarable
-//! axis/option tables; axes and options are get-or-created inline so the
-//! vocabulary grows organically during import.
-
-use std::collections::BTreeMap;
+//! Variants: the editions a model's files are separated into (32mm+supported, a
+//! merged personal remix, …).
+//!
+//! A variant IS its set of tags. Two variants of one model can therefore never
+//! carry the same tags — an attempt to make that happen merges them instead of
+//! failing, because they were already the same variant by definition. A variant
+//! with no tags at all is the model's single ANONYMOUS variant: the plain bucket
+//! of files it separates out without asserting a tag for them. `name` is only a
+//! display label and may be null.
 
 use axum::{
     Json, Router,
@@ -19,6 +22,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::models::model_created_by;
+use crate::routes::variant_tags::upsert_variant_tag;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -31,9 +35,10 @@ pub fn router() -> Router<AppState> {
 pub struct VariantDetail {
     pub id: Uuid,
     pub model_id: Uuid,
-    pub name: String,
-    /// axis name → option value
-    pub options: BTreeMap<String, String>,
+    /// Optional display label; null for an anonymous variant
+    pub name: Option<String>,
+    /// The tag set that identifies this variant; empty = the anonymous variant
+    pub tags: Vec<String>,
     pub print_notes: Option<String>,
     pub derived_from_variant_id: Option<Uuid>,
     pub file_count: i64,
@@ -43,10 +48,11 @@ pub struct VariantDetail {
 
 #[derive(Deserialize, ToSchema)]
 pub struct VariantInput {
-    pub name: String,
-    /// axis name → option value; unknown axes/options are created on the fly
+    /// Optional display label; omit for an anonymous variant
+    pub name: Option<String>,
+    /// Tag names; unknown ones are created on the fly
     #[serde(default)]
-    pub options: BTreeMap<String, String>,
+    pub tags: Vec<String>,
     pub print_notes: Option<String>,
     pub derived_from_variant_id: Option<Uuid>,
 }
@@ -55,23 +61,18 @@ pub async fn fetch_variants(
     state: &AppState,
     model_id: Uuid,
 ) -> Result<Vec<VariantDetail>, ApiError> {
+    // The anonymous variant leads: it is the model's default bucket of files.
     let rows = sqlx::query!(
         r#"SELECT v.id, v.model_id, v.name, v.print_notes, v.derived_from_variant_id, v.created_at,
                   (SELECT count(*) FROM files f WHERE f.variant_id = v.id) as "file_count!",
                   coalesce((SELECT sum(b.size) FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256
-                            WHERE f.variant_id = v.id), 0)::bigint as "total_size!"
-           FROM model_variants v WHERE v.model_id = $1 ORDER BY v.created_at"#,
-        model_id,
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    let options = sqlx::query!(
-        r#"SELECT vo.variant_id, a.name as "axis!: String", o.value as "value!: String"
-           FROM variant_options vo
-           JOIN variant_axes a ON a.id = vo.axis_id
-           JOIN variant_axis_options o ON o.axis_id = vo.axis_id AND o.id = vo.option_id
-           WHERE vo.variant_id IN (SELECT id FROM model_variants WHERE model_id = $1)"#,
+                            WHERE f.variant_id = v.id), 0)::bigint as "total_size!",
+                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name)
+                              FROM variant_tag_assignments a
+                              JOIN variant_tags t ON t.id = a.tag_id
+                             WHERE a.variant_id = v.id), '{}') as "tags!: Vec<String>"
+           FROM model_variants v WHERE v.model_id = $1
+           ORDER BY (v.tag_key <> '') , v.created_at"#,
         model_id,
     )
     .fetch_all(&state.db)
@@ -80,14 +81,10 @@ pub async fn fetch_variants(
     Ok(rows
         .into_iter()
         .map(|v| VariantDetail {
-            options: options
-                .iter()
-                .filter(|o| o.variant_id == v.id)
-                .map(|o| (o.axis.clone(), o.value.clone()))
-                .collect(),
             id: v.id,
             model_id: v.model_id,
             name: v.name,
+            tags: v.tags,
             print_notes: v.print_notes,
             derived_from_variant_id: v.derived_from_variant_id,
             file_count: v.file_count,
@@ -97,60 +94,119 @@ pub async fn fetch_variants(
         .collect())
 }
 
-/// Replace a variant's axis assignments, creating axes/options as needed.
-async fn set_variant_options(
+/// Get-or-create every named tag, deduplicated. Order is irrelevant: the set is
+/// what matters, and `variant_tag_key` sorts it.
+async fn resolve_tags(
+    tx: &mut sqlx::PgConnection,
+    names: &[String],
+) -> Result<Vec<Uuid>, ApiError> {
+    let mut ids: Vec<Uuid> = Vec::new();
+    for name in names {
+        if name.trim().is_empty() {
+            continue;
+        }
+        let id = upsert_variant_tag(&mut *tx, name).await?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// The variant of `model_id` carrying exactly `tag_ids`, if one exists. An empty
+/// `tag_ids` looks up the model's anonymous variant.
+async fn variant_with_tag_set(
+    tx: &mut sqlx::PgConnection,
+    model_id: Uuid,
+    tag_ids: &[Uuid],
+) -> Result<Option<Uuid>, ApiError> {
+    let id = sqlx::query_scalar!(
+        "SELECT id FROM model_variants
+          WHERE model_id = $1 AND tag_key = variant_tag_key($2)",
+        model_id,
+        tag_ids,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    Ok(id)
+}
+
+/// Replace a variant's tag set. The `tag_key` trigger keeps identity in step.
+async fn set_variant_tags(
     tx: &mut sqlx::PgConnection,
     variant_id: Uuid,
-    options: &BTreeMap<String, String>,
+    tag_ids: &[Uuid],
 ) -> Result<(), ApiError> {
     sqlx::query!(
-        "DELETE FROM variant_options WHERE variant_id = $1",
-        variant_id
+        "DELETE FROM variant_tag_assignments WHERE variant_id = $1",
+        variant_id,
     )
     .execute(&mut *tx)
     .await?;
-    for (axis_name, value) in options {
-        let axis_name = axis_name.trim();
-        let value = value.trim();
-        if axis_name.is_empty() || value.is_empty() {
-            return Err(ApiError::BadRequest("empty axis or option value".into()));
-        }
-        let axis_id: Uuid = sqlx::query_scalar!(
-            r#"WITH ins AS (
-                   INSERT INTO variant_axes (name) VALUES ($1)
-                   ON CONFLICT (name) DO NOTHING RETURNING id
-               )
-               SELECT id as "id!" FROM ins
-               UNION ALL SELECT id FROM variant_axes WHERE name = $1 LIMIT 1"#,
-            axis_name,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        let option_id: Uuid = sqlx::query_scalar!(
-            r#"WITH ins AS (
-                   INSERT INTO variant_axis_options (axis_id, value) VALUES ($1, $2)
-                   ON CONFLICT (axis_id, value) DO NOTHING RETURNING id
-               )
-               SELECT id as "id!" FROM ins
-               UNION ALL SELECT id FROM variant_axis_options WHERE axis_id = $1 AND value = $2
-               LIMIT 1"#,
-            axis_id,
-            value,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        sqlx::query!(
-            "INSERT INTO variant_options (variant_id, axis_id, option_id) VALUES ($1, $2, $3)",
-            variant_id,
-            axis_id,
-            option_id,
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
+    sqlx::query!(
+        "INSERT INTO variant_tag_assignments (variant_id, tag_id)
+         SELECT $1, unnest($2::uuid[])",
+        variant_id,
+        tag_ids,
+    )
+    .execute(&mut *tx)
+    .await?;
     Ok(())
 }
 
+/// Fold `from` into `into`: same tag set means they were always one variant.
+/// The survivor keeps its own name, notes and primary image.
+async fn merge_variants(
+    tx: &mut sqlx::PgConnection,
+    from: Uuid,
+    into: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query!(
+        "UPDATE files SET variant_id = $2 WHERE variant_id = $1",
+        from,
+        into
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE images SET variant_id = $2, is_primary = false WHERE variant_id = $1",
+        from,
+        into,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE model_variants SET derived_from_variant_id = $2
+          WHERE derived_from_variant_id = $1",
+        from,
+        into,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!("DELETE FROM model_variants WHERE id = $1", from)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
+fn label(name: Option<&String>) -> Option<&str> {
+    name.map(|n| n.trim()).filter(|n| !n.is_empty())
+}
+
+/// Duplicate names are still rejected — the tag set is the identity, but two
+/// variants of one model labelled the same is a mistake, not a merge.
+fn name_conflict(e: sqlx::Error) -> ApiError {
+    match e {
+        sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+            ApiError::Conflict("a variant with that name already exists on this model".into())
+        }
+        e => e.into(),
+    }
+}
+
+/// Creating a variant whose tag set already exists on the model returns that
+/// variant (with any supplied name/notes applied) instead of a conflict: files
+/// meant for those tags belong on the variant those tags already identify.
 async fn create(
     State(state): State<AppState>,
     user: User,
@@ -158,33 +214,44 @@ async fn create(
     Json(input): Json<VariantInput>,
 ) -> Result<Json<VariantDetail>, ApiError> {
     user.require_can_edit(model_created_by(&state, model_id).await?)?;
-    let name = input.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::BadRequest("variant name is required".into()));
-    }
+    let name = label(input.name.as_ref());
 
     let mut tx = state.db.begin().await?;
-    let variant_id: Uuid = match sqlx::query_scalar!(
-        r#"INSERT INTO model_variants (model_id, name, print_notes, derived_from_variant_id, created_by)
-           VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
-        model_id,
-        name,
-        input.print_notes,
-        input.derived_from_variant_id,
-        user.id,
-    )
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(id) => id,
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            return Err(ApiError::Conflict(format!(
-                "variant {name:?} already exists on this model"
-            )))
+    let tag_ids = resolve_tags(&mut tx, &input.tags).await?;
+
+    let variant_id = match variant_with_tag_set(&mut tx, model_id, &tag_ids).await? {
+        Some(existing) => {
+            sqlx::query!(
+                "UPDATE model_variants
+                    SET name = coalesce($2, name), print_notes = coalesce($3, print_notes)
+                  WHERE id = $1",
+                existing,
+                name,
+                input.print_notes,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(name_conflict)?;
+            existing
         }
-        Err(e) => return Err(e.into()),
+        None => {
+            let id: Uuid = sqlx::query_scalar!(
+                r#"INSERT INTO model_variants
+                       (model_id, name, print_notes, derived_from_variant_id, created_by)
+                   VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
+                model_id,
+                name,
+                input.print_notes,
+                input.derived_from_variant_id,
+                user.id,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(name_conflict)?;
+            set_variant_tags(&mut tx, id, &tag_ids).await?;
+            id
+        }
     };
-    set_variant_options(&mut tx, variant_id, &input.options).await?;
     tx.commit().await?;
 
     let variants = fetch_variants(&state, model_id).await?;
@@ -207,6 +274,8 @@ async fn variant_model(state: &AppState, id: Uuid) -> Result<(Uuid, Uuid), ApiEr
     Ok((row.model_id, row.created_by))
 }
 
+/// Retagging a variant onto a tag set another variant already holds merges the
+/// two: the response is the survivor, which may not be the variant addressed.
 async fn update(
     State(state): State<AppState>,
     user: User,
@@ -217,23 +286,36 @@ async fn update(
     user.require_can_edit(created_by)?;
 
     let mut tx = state.db.begin().await?;
-    sqlx::query!(
-        "UPDATE model_variants SET name = $2, print_notes = $3, derived_from_variant_id = $4
-         WHERE id = $1",
-        id,
-        input.name.trim(),
-        input.print_notes,
-        input.derived_from_variant_id,
-    )
-    .execute(&mut *tx)
-    .await?;
-    set_variant_options(&mut tx, id, &input.options).await?;
+    let tag_ids = resolve_tags(&mut tx, &input.tags).await?;
+
+    let surviving = match variant_with_tag_set(&mut tx, model_id, &tag_ids).await? {
+        Some(other) if other != id => {
+            merge_variants(&mut tx, id, other).await?;
+            other
+        }
+        _ => {
+            sqlx::query!(
+                "UPDATE model_variants
+                    SET name = $2, print_notes = $3, derived_from_variant_id = $4
+                  WHERE id = $1",
+                id,
+                label(input.name.as_ref()),
+                input.print_notes,
+                input.derived_from_variant_id,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(name_conflict)?;
+            set_variant_tags(&mut tx, id, &tag_ids).await?;
+            id
+        }
+    };
     tx.commit().await?;
 
     let variants = fetch_variants(&state, model_id).await?;
     variants
         .into_iter()
-        .find(|v| v.id == id)
+        .find(|v| v.id == surviving)
         .map(Json)
         .ok_or(ApiError::NotFound)
 }

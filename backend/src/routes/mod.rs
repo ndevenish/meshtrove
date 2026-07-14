@@ -1,7 +1,6 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
-pub mod axes;
 pub mod browse;
 pub mod bundles;
 pub mod creators;
@@ -12,4 +11,5 @@ pub mod imports;
 pub mod jobs;
 pub mod models;
 pub mod tags;
+pub mod variant_tags;
 pub mod variants;

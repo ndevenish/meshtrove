@@ -35,6 +35,7 @@ import {
   api,
   downloadUrl,
   formatBytes,
+  variantLabel,
   type FileRecord,
   type ModelDetail,
   type VariantDetail,
@@ -79,7 +80,7 @@ export default function VariantSection({
       <VariantEditDialog
         open={editing !== null}
         variant={editing === 'new' ? undefined : (editing ?? undefined)}
-        modelId={model.id}
+        model={model}
         onClose={() => setEditing(null)}
         onChange={onChange}
       />
@@ -129,9 +130,17 @@ function VariantRow({
     >
       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
         <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', width: '100%', pr: 1 }}>
-          <Typography sx={{ fontWeight: 600 }}>{variant.name}</Typography>
-          {Object.entries(variant.options).map(([axis, value]) => (
-            <Chip key={axis} label={`${axis}: ${value}`} size="small" variant="outlined" />
+          {variant.name ? (
+            <Typography sx={{ fontWeight: 600 }}>{variant.name}</Typography>
+          ) : (
+            variant.tags.length === 0 && (
+              <Typography sx={{ fontWeight: 600, fontStyle: 'italic' }} color="text.secondary">
+                Untagged
+              </Typography>
+            )
+          )}
+          {variant.tags.map((tag) => (
+            <Chip key={tag} label={tag} size="small" variant="outlined" />
           ))}
           <Box sx={{ flexGrow: 1 }} />
           <Typography variant="body2" color="text.secondary">
@@ -169,7 +178,7 @@ function VariantRow({
               size="small"
               color="error"
               onClick={async () => {
-                if (confirm(`Delete variant "${variant.name}" and its files?`)) {
+                if (confirm(`Delete variant "${variantLabel(variant)}" and its files?`)) {
                   await api.deleteVariant(variant.id)
                   onChange()
                 }
@@ -291,24 +300,29 @@ export function FileTree({
   )
 }
 
+/// A variant is its tag set, so the tags are the substantive field here and the
+/// name is just a label. Leaving the tags empty is legitimate — it addresses the
+/// model's one anonymous variant.
 function VariantEditDialog({
   open,
   variant,
-  modelId,
+  model,
   onClose,
   onChange,
 }: {
   open: boolean
   variant?: VariantDetail
-  modelId: string
+  model: ModelDetail
   onClose: () => void
   onChange: () => void
 }) {
-  const { data: axes } = useQuery({ queryKey: ['axes'], queryFn: () => api.axes() })
+  const { data: vocabulary } = useQuery({
+    queryKey: ['variant-tags'],
+    queryFn: () => api.variantTags(),
+  })
   const [name, setName] = useState(variant?.name ?? '')
-  const [options, setOptions] = useState<Record<string, string>>(variant?.options ?? {})
+  const [tags, setTags] = useState<string[]>(variant?.tags ?? [])
   const [notes, setNotes] = useState(variant?.print_notes ?? '')
-  const [newAxis, setNewAxis] = useState('')
   const [error, setError] = useState('')
 
   // Reset when target changes (dialog reused between add/edit)
@@ -317,18 +331,22 @@ function VariantEditDialog({
   if (open && key !== lastKey) {
     setLastKey(key)
     setName(variant?.name ?? '')
-    setOptions(variant?.options ?? {})
+    setTags(variant?.tags ?? [])
     setNotes(variant?.print_notes ?? '')
     setError('')
   }
 
-  const axisNames = new Set([...(axes ?? []).map((a) => a.name), ...Object.keys(options)])
+  // Same tags = same variant, so saving onto another variant's tag set folds
+  // this one into it. Say so before it happens rather than after.
+  const sameSet = (a: string[], b: string[]) =>
+    a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+  const collision = model.variants.find((v) => v.id !== variant?.id && sameSet(v.tags, tags))
 
   const submit = async () => {
     try {
-      const body = { name, options, print_notes: notes || null }
+      const body = { name: name.trim() || null, tags, print_notes: notes || null }
       if (variant) await api.updateVariant(variant.id, body)
-      else await api.createVariant(modelId, body)
+      else await api.createVariant(model.id, body)
       onChange()
       onClose()
     } catch (e) {
@@ -342,62 +360,43 @@ function VariantEditDialog({
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           {error && <Alert severity="error">{error}</Alert>}
+          {collision && (
+            <Alert severity="warning">
+              {`These tags already identify "${variantLabel(collision)}"`}
+              {variant
+                ? '. Saving merges this variant into it, moving its files across.'
+                : '. Its files will be added to that variant.'}
+            </Alert>
+          )}
+          <Autocomplete
+            multiple
+            freeSolo
+            autoFocus
+            options={(vocabulary ?? []).map((t) => t.name)}
+            value={tags}
+            onChange={(_, value) =>
+              setTags([...new Set(value.map((t) => t.trim()).filter(Boolean))])
+            }
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Variant tags"
+                placeholder="32mm, supported, lychee…"
+                helperText={
+                  tags.length
+                    ? 'These tags identify the variant. New ones are created as you type.'
+                    : "No tags — this is the model's single untagged variant."
+                }
+              />
+            )}
+          />
           <TextField
-            label="Name"
+            label="Name (optional)"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. 32mm Supported, My merged remix"
-            autoFocus
+            placeholder="e.g. My merged remix"
+            helperText="A display label only; the tags above are what separate variants."
           />
-          {[...axisNames].map((axis) => {
-            const axisOptions = axes?.find((a) => a.name === axis)?.options ?? []
-            return (
-              <Stack sx={{ alignItems: 'center' }} key={axis} direction="row" spacing={1}>
-                <Autocomplete
-                  freeSolo
-                  fullWidth
-                  options={axisOptions.map((o) => o.value)}
-                  value={options[axis] ?? ''}
-                  onInputChange={(_, value) =>
-                    setOptions((previous) => ({ ...previous, [axis]: value }))
-                  }
-                  renderInput={(params) => <TextField {...params} label={axis} size="small" />}
-                />
-                <IconButton
-                  size="small"
-                  onClick={() =>
-                    setOptions((previous) => {
-                      const next = { ...previous }
-                      delete next[axis]
-                      return next
-                    })
-                  }
-                >
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
-              </Stack>
-            )
-          })}
-          <Stack direction="row" spacing={1}>
-            <TextField
-              label="Add category (axis)"
-              size="small"
-              value={newAxis}
-              onChange={(e) => setNewAxis(e.target.value)}
-              placeholder="e.g. base, pose, material"
-            />
-            <Button
-              onClick={() => {
-                const axis = newAxis.trim()
-                if (axis && !(axis in options)) {
-                  setOptions((previous) => ({ ...previous, [axis]: '' }))
-                }
-                setNewAxis('')
-              }}
-            >
-              Add
-            </Button>
-          </Stack>
           <TextField
             label="Print notes"
             value={notes}
@@ -410,12 +409,8 @@ function VariantEditDialog({
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
-        <Button
-          variant="contained"
-          onClick={submit}
-          disabled={!name.trim() || Object.values(options).some((v) => !v.trim())}
-        >
-          {variant ? 'Save' : 'Add'}
+        <Button variant="contained" onClick={submit}>
+          {collision ? 'Merge' : variant ? 'Save' : 'Add'}
         </Button>
       </DialogActions>
     </Dialog>

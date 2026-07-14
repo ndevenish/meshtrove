@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         .merge(routes::admin::router())
         .merge(routes::api::router())
         .merge(routes::auth::router())
-        .merge(routes::axes::router())
+        .merge(routes::variant_tags::router())
         .merge(routes::browse::router())
         .merge(routes::bundles::router())
         .merge(routes::jobs::router())

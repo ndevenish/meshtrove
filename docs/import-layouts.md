@@ -51,7 +51,7 @@ Structure, decoded:
 
 The support-type suffixes seen in the wild: `_NoSupports`, `_Supported`,
 `_Supported_LYCHEE`, `_Supported_Solid`, `_Supported_Hollow` — these map onto the
-seeded `support` axis (`unsupported`, `supported`, `lychee_project`, …).
+seeded variant tags (`unsupported`, `supported`, `lychee_project`, …).
 
 **Target:** a **bundle** ("Buried Tomb"), containing many **models** (Gold,
 Sanjay, Gynosphinx, …), each with **support-type variants**, all classified
@@ -84,8 +84,8 @@ wrong guess costs an edit, never a conversion):
 - **Looks like a bundle (B):** deep nesting, many leaf folders,
   `DownloadAll_<scale>` naming, support-type suffix folders → preselect *A new
   bundle*, and propose the carve: leaf folders → member models, support suffixes
-  → the `support` axis, the wrapper's `32mm` → `scale`, top-level `1 - Heroes`
-  → a tag rather than a variant.
+  and the wrapper's `32mm` → variant tags on one variant, top-level `1 - Heroes`
+  → a model tag rather than a variant tag.
 
 Every one of these is an editable default on the import page; nothing commits
 without the user pressing *Import*.

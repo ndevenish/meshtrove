@@ -1,33 +1,23 @@
-import {
-  Box,
-  Typography,
-  Chip,
-  Stack,
-  FormControl,
-  Select,
-  MenuItem,
-  InputLabel,
-  Divider,
-} from '@mui/material'
+import { Box, Typography, Chip, Divider } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 
 import { api } from '../api'
 
-/// Sidebar filters: tag chips plus one dropdown per declared variant axis —
-/// entirely data-driven from the axis/option tables.
+/// Sidebar filters: two chip clouds over two vocabularies — what a model IS
+/// (tags) and which edition of it you want (variant tags). Selecting several
+/// variant tags requires ONE variant to carry them all, so 32mm + unsupported
+/// will not match a model that has those tags on different variants.
 export default function FilterSidebar() {
   const [params, setParams] = useSearchParams()
   const { data: tags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
-  const { data: axes } = useQuery({ queryKey: ['axes'], queryFn: () => api.axes() })
+  const { data: variantTags } = useQuery({
+    queryKey: ['variant-tags'],
+    queryFn: () => api.variantTags(),
+  })
 
   const activeTags = (params.get('tags') ?? '').split(',').filter(Boolean)
-  const activeOpts = new Map(
-    (params.get('opts') ?? '')
-      .split(',')
-      .filter(Boolean)
-      .map((pair) => pair.split(':') as [string, string]),
-  )
+  const activeVariantTags = (params.get('vtags') ?? '').split(',').filter(Boolean)
 
   const update = (mutate: (next: URLSearchParams) => void) => {
     const next = new URLSearchParams(params)
@@ -36,27 +26,18 @@ export default function FilterSidebar() {
     setParams(next)
   }
 
-  const toggleTag = (tag: string) =>
+  const toggle = (key: 'tags' | 'vtags', active: string[], tag: string) =>
     update((next) => {
-      const set = new Set(activeTags)
+      const set = new Set(active)
       if (set.has(tag)) set.delete(tag)
       else set.add(tag)
-      if (set.size) next.set('tags', [...set].join(','))
-      else next.delete('tags')
-    })
-
-  const setOpt = (axis: string, value: string) =>
-    update((next) => {
-      const opts = new Map(activeOpts)
-      if (value) opts.set(axis, value)
-      else opts.delete(axis)
-      if (opts.size) next.set('opts', [...opts.entries()].map(([a, v]) => `${a}:${v}`).join(','))
-      else next.delete('opts')
+      if (set.size) next.set(key, [...set].join(','))
+      else next.delete(key)
     })
 
   return (
     <Box sx={{ width: 240, flexShrink: 0, pr: 3 }}>
-      {axes && axes.length > 0 && (
+      {variantTags && variantTags.length > 0 && (
         <>
           <Typography
             variant="subtitle2"
@@ -64,27 +45,18 @@ export default function FilterSidebar() {
           >
             Variants
           </Typography>
-          <Stack spacing={2}>
-            {axes.map((axis) => (
-              <FormControl key={axis.id} size="small" fullWidth>
-                <InputLabel>{axis.name}</InputLabel>
-                <Select
-                  label={axis.name}
-                  value={activeOpts.get(axis.name) ?? ''}
-                  onChange={(e) => setOpt(axis.name, e.target.value)}
-                >
-                  <MenuItem value="">
-                    <em>any</em>
-                  </MenuItem>
-                  {axis.options.map((option) => (
-                    <MenuItem key={option.id} value={option.value}>
-                      {option.value}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+            {variantTags.map((tag) => (
+              <Chip
+                key={tag.id}
+                label={`${tag.name} (${tag.variant_count})`}
+                size="small"
+                color={activeVariantTags.includes(tag.name) ? 'primary' : 'default'}
+                variant={activeVariantTags.includes(tag.name) ? 'filled' : 'outlined'}
+                onClick={() => toggle('vtags', activeVariantTags, tag.name)}
+              />
             ))}
-          </Stack>
+          </Box>
           <Divider sx={{ my: 2 }} />
         </>
       )}
@@ -99,7 +71,7 @@ export default function FilterSidebar() {
             size="small"
             color={activeTags.includes(tag.name) ? 'primary' : 'default'}
             variant={activeTags.includes(tag.name) ? 'filled' : 'outlined'}
-            onClick={() => toggleTag(tag.name)}
+            onClick={() => toggle('tags', activeTags, tag.name)}
           />
         ))}
         {tags?.length === 0 && (

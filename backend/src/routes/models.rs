@@ -1,5 +1,5 @@
-//! Models: CRUD, unified search (text + tags + variant axis options), and
-//! markdown description revisions.
+//! Models: CRUD, unified search (text + tags + variant tags), and markdown
+//! description revisions.
 
 use anyhow::Context;
 use axum::{
@@ -46,8 +46,8 @@ pub struct SearchQuery {
     pub q: Option<String>,
     /// Comma-separated tag names, all required
     pub tags: Option<String>,
-    /// Comma-separated `axis:value` pairs; a single variant must satisfy all
-    pub opts: Option<String>,
+    /// Comma-separated variant tag names; a single variant must carry all of them
+    pub vtags: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
 }
@@ -63,7 +63,7 @@ pub struct ModelSummary {
     pub tags: Vec<String>,
     pub like_count: i64,
     pub variant_count: i64,
-    /// Variants satisfying the `opts` filter (when one was given)
+    /// Variants satisfying the `vtags` filter (when one was given)
     pub matched_variant_ids: Option<Vec<Uuid>>,
     pub updated_at: DateTime<Utc>,
 }
@@ -76,17 +76,29 @@ pub struct SearchResults {
     pub per_page: u32,
 }
 
-pub fn parse_opts(opts: &str) -> Result<Vec<(String, String)>, ApiError> {
-    opts.split(',')
-        .filter(|s| !s.trim().is_empty())
-        .map(|pair| {
-            pair.split_once(':')
-                .map(|(a, v)| (a.trim().to_string(), v.trim().to_string()))
-                .ok_or_else(|| {
-                    ApiError::BadRequest(format!("opts entry {pair:?} is not axis:value"))
-                })
-        })
+/// Split a comma-separated query parameter into trimmed, non-empty names.
+pub fn parse_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .collect()
+}
+
+/// Require one variant of `v` to carry every named variant tag at once. A model
+/// with a 32mm+supported variant and a 75mm+unsupported one does NOT match
+/// `32mm + unsupported`.
+fn push_variant_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, vtags: &[String]) {
+    for tag in vtags {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM variant_tag_assignments a
+                          JOIN variant_tags t ON t.id = a.tag_id
+                         WHERE a.variant_id = v.id AND t.name = ",
+        )
+        .push_bind(tag.clone())
+        .push(")");
+    }
 }
 
 /// Append the shared WHERE clauses for a search to a query builder (alias `m`).
@@ -94,7 +106,7 @@ pub fn push_filters(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     q: &str,
     tags: &[String],
-    opts: &[(String, String)],
+    vtags: &[String],
 ) {
     if !q.is_empty() {
         qb.push(" AND (m.search @@ websearch_to_tsquery('english', ")
@@ -108,16 +120,9 @@ pub fn push_filters(
             .push_bind(tag.clone())
             .push(")");
     }
-    if !opts.is_empty() {
-        // One variant must satisfy ALL requested axis:value pairs at once.
+    if !vtags.is_empty() {
         qb.push(" AND EXISTS (SELECT 1 FROM model_variants v WHERE v.model_id = m.id");
-        for (axis, value) in opts {
-            qb.push(" AND EXISTS (SELECT 1 FROM variant_options vo JOIN variant_axes a ON a.id = vo.axis_id JOIN variant_axis_options o ON o.axis_id = vo.axis_id AND o.id = vo.option_id WHERE vo.variant_id = v.id AND a.name = ")
-                .push_bind(axis.clone())
-                .push(" AND o.value = ")
-                .push_bind(value.clone())
-                .push(")");
-        }
+        push_variant_tag_filters(qb, vtags);
         qb.push(")");
     }
 }
@@ -128,20 +133,13 @@ async fn search(
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResults>, ApiError> {
     let q = query.q.unwrap_or_default().trim().to_string();
-    let tags: Vec<String> = query
-        .tags
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    let opts = parse_opts(&query.opts.unwrap_or_default())?;
+    let tags = parse_csv(&query.tags.unwrap_or_default());
+    let vtags = parse_csv(&query.vtags.unwrap_or_default());
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(30).clamp(1, 100);
 
     let mut count_qb = QueryBuilder::new("SELECT count(*) FROM models m WHERE TRUE");
-    push_filters(&mut count_qb, &q, &tags, &opts);
+    push_filters(&mut count_qb, &q, &tags, &vtags);
     let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
 
     let mut qb = QueryBuilder::new(
@@ -153,7 +151,7 @@ async fn search(
                         JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags
          FROM models m LEFT JOIN creators c ON c.id = m.creator_id WHERE TRUE"#,
     );
-    push_filters(&mut qb, &q, &tags, &opts);
+    push_filters(&mut qb, &q, &tags, &vtags);
     if q.is_empty() {
         qb.push(" ORDER BY m.updated_at DESC");
     } else {
@@ -189,20 +187,14 @@ async fn search(
         .collect::<Result<_, _>>()
         .context("decoding search row")?;
 
-    // Mark which variants matched the opts filter so the UI can highlight them.
-    if !opts.is_empty() && !models.is_empty() {
+    // Mark which variants matched the vtags filter so the UI can highlight them.
+    if !vtags.is_empty() && !models.is_empty() {
         let model_ids: Vec<Uuid> = models.iter().map(|m| m.id).collect();
         let mut vq = QueryBuilder::new(
             "SELECT v.id, v.model_id FROM model_variants v WHERE v.model_id = ANY(",
         );
         vq.push_bind(model_ids).push(")");
-        for (axis, value) in &opts {
-            vq.push(" AND EXISTS (SELECT 1 FROM variant_options vo JOIN variant_axes a ON a.id = vo.axis_id JOIN variant_axis_options o ON o.axis_id = vo.axis_id AND o.id = vo.option_id WHERE vo.variant_id = v.id AND a.name = ")
-                .push_bind(axis.clone())
-                .push(" AND o.value = ")
-                .push_bind(value.clone())
-                .push(")");
-        }
+        push_variant_tag_filters(&mut vq, &vtags);
         let variant_rows: Vec<sqlx::postgres::PgRow> = vq.build().fetch_all(&state.db).await?;
         for model in &mut models {
             let matched: Vec<Uuid> = variant_rows

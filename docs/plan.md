@@ -20,14 +20,16 @@ to Vite; no CORS; clap config with env/flag duality).
 1. **Storage**: content-addressed filesystem blob store (`store/ab/cd/<sha256>`),
    behind a `BlobStore` trait so S3 can be swapped in later. Postgres owns all
    metadata including logical folder structure. Dedup falls out of hash-keying.
-2. **Tags vs variants**: two separate systems, unified at the search API. Variants
-   are structured children of a model; tags are free-form labels on models/bundles.
-   Variant attributes are **not hard-coded columns or enums**: categories ("axes",
-   e.g. scale, support) and their options (e.g. 32mm, 75mm; unsupported, supported,
-   supported_hollow, lychee_project, merged) are **declarable data** in their own
-   tables — users add new axes and options at will; scale/support are only seed
-   rows. A search like `tags=egypt,undead & opt=scale:32mm & opt=support:unsupported`
-   filters models by tags and variants by their axis options.
+2. **Tags vs variants**: two separate systems with two separate vocabularies,
+   unified at the search API. Tags are free-form labels on models/bundles; a
+   **variant is the set of variant tags its files carry** — a structured child of
+   a model whose identity is that set, not its name. Variant tags are **not
+   hard-coded columns or enums** but a flat declarable vocabulary (32mm, 75mm,
+   unsupported, supported, lychee_project, …, all only seed rows), and a variant
+   may carry any number of them. A variant with none is the model's one
+   **anonymous** variant: files separated out without an explicit variant tag. A
+   search like `tags=egypt,undead & vtags=32mm,unsupported` filters models by
+   tags and variants by their tag sets.
 3. **Scope**: "core archive first" — the **full** schema lands in migration 0001
    (including jobs, bundles, tags, marks, settings, so it reviews as a whole), but
    this milestone implements: scaffold, auth+roles, blob store, model/variant/file
@@ -90,26 +92,19 @@ erDiagram
     model_variants {
         uuid id PK
         uuid model_id FK
-        text name
+        text name "optional label; NULL = anonymous"
+        text tag_key "canonical tag set; UNIQUE per model; '' = anonymous"
         uuid derived_from_variant_id FK
         text print_notes
     }
-    variant_axes {
+    variant_tags {
         uuid id PK
-        citext name UK "scale, support, ... (seed data, user-extendable)"
+        citext name UK "32mm, supported, ... (flat, user-extendable)"
         text description
-        int sort_order
     }
-    variant_axis_options {
-        uuid id PK
-        uuid axis_id FK
-        citext value "32mm, unsupported, ... (user-extendable)"
-        int sort_order
-    }
-    variant_options {
+    variant_tag_assignments {
         uuid variant_id PK_FK
-        uuid axis_id PK_FK "one option per axis per variant"
-        uuid option_id FK
+        uuid tag_id PK_FK "a variant may carry any number"
     }
     blobs {
         char64 sha256 PK
@@ -167,9 +162,8 @@ erDiagram
     bundles ||--o{ bundle_description_revisions : "description history"
     models ||--o{ model_variants : "has"
     model_variants o|--o{ model_variants : "derived_from"
-    variant_axes ||--o{ variant_axis_options : "declares"
-    model_variants ||--o{ variant_options : "assigned"
-    variant_axis_options ||--o{ variant_options : ""
+    model_variants ||--o{ variant_tag_assignments : "identified by"
+    variant_tags ||--o{ variant_tag_assignments : ""
     blobs ||--o{ files : "content"
     blobs ||--o{ images : "content"
     model_variants ||--o{ files : "parts"
@@ -222,25 +216,24 @@ bundle_description_revisions
                  created_by FK users, created_at
                  UNIQUE (bundle_id, label) WHERE label IS NOT NULL
 
-model_variants   id, model_id FK, name,
+-- A variant IS its tag set. `name` is a label; `tag_key` is the identity.
+model_variants   id, model_id FK, name NULL,      -- NULL name = anonymous variant
+                 tag_key text,                    -- canonical tag set, by trigger
                  derived_from_variant_id FK NULL, -- user-made variants point at origin
                  print_notes text NULL,           -- per-variant print settings/notes
                  created_by, created_at
-                 UNIQUE (model_id, name)
+                 UNIQUE (model_id, tag_key) DEFERRABLE,  -- one variant per tag set,
+                                                 -- so one anonymous variant (key '')
+                 UNIQUE (model_id, name) WHERE name IS NOT NULL
 
--- variant attributes: declarable categories with declarable options (no
--- hard-coded enums — the spec's scale/support examples are just seed data)
-variant_axes         id, name citext UNIQUE, description NULL, sort_order,
-                     created_by, created_at
-variant_axis_options id, axis_id FK, value citext, sort_order, created_by,
-                     created_at, UNIQUE (axis_id, value),
-                     UNIQUE (axis_id, id)   -- target for composite FK below
-variant_options      (variant_id, axis_id) PK,   -- one option per axis per variant
-                     option_id,
-                     FK (axis_id, option_id) REFERENCES variant_axis_options (axis_id, id)
-                     -- composite FK guarantees the option belongs to the axis
--- migration seeds: axis 'scale' (32mm, 75mm) and axis 'support' (unsupported,
--- supported, supported_hollow, lychee_project, merged) — editable/extendable data
+-- variant attributes: a FLAT declarable vocabulary (no hard-coded enums, and no
+-- axis/value split — a variant may carry 'stl' AND 'obj')
+variant_tags            id, name citext UNIQUE, description NULL, created_at
+variant_tag_assignments (variant_id, tag_id) PK
+-- variant_tag_key(uuid[])       -- canonical (sorted) rendering of a tag set
+-- merge_duplicate_variants()    -- same tag set = same variant: fold, don't fail
+-- migration seeds (from the retired axes): 32mm, 75mm, unsupported, supported,
+-- supported_hollow, lychee_project, merged — editable/extendable data
 
 -- content-addressed storage
 blobs            sha256 char(64) PK, size bigint, created_at
@@ -299,7 +292,7 @@ settings         key text PK, value jsonb, updated_at, updated_by
                  -- e.g. 'renderer' → {"tool":"f3d","args":[…]}
 ```
 
-## Search design (unified text + tags + variant options)
+## Search design (unified text + tags + variant tags)
 
 One endpoint (`GET /api/models?q=&tags=&opt=axis:value…`) resolved by a single
 SQL query in Postgres — no external search engine.
@@ -317,9 +310,9 @@ SQL query in Postgres — no external search engine.
   powers typeahead for tag and creator comboboxes.
 - **Tags**: AND semantics — each requested tag becomes an `EXISTS` against
   `model_tags` (names resolved case-insensitively via `citext`).
-- **Variant options**: each `opt=axis:value` pair filters via a single `EXISTS`
-  requiring **one variant that satisfies all requested pairs at once** (a model
-  with a 32mm-supported and a 75mm-unsupported variant does NOT match
+- **Variant tags**: each `vtags` name filters via a single `EXISTS` requiring
+  **one variant that carries all requested tags at once** (a model with a
+  32mm+supported variant and a 75mm+unsupported one does NOT match
   `32mm + unsupported`); the response marks which variants matched so the UI can
   highlight them.
 - All filters compose as `AND` in one statement; ordered by `ts_rank` when `q`
@@ -366,14 +359,17 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
 
 - `POST /auth/register|login|logout`; `GET /api/me`
 - `GET/POST/PUT/DELETE /api/creators`
-- `GET/POST/PUT/DELETE /api/models` (+ `?tags=&q=&opt=axis:value&opt=…` unified
-  search — `opt` is repeatable, one per axis, values resolved against the
-  declarable axis/option tables)
-- `GET/POST/PUT/DELETE /api/variant-axes` and `…/variant-axes/{id}/options` —
-  manage declarable categories/options (editor+); variant create/update takes
-  `{axis: option}` assignments, and the UI comboboxes offer "add new option"
-  inline so new axes/options appear organically during import
-- `GET/POST/PUT/DELETE /api/models/{id}/variants`
+- `GET/POST/PUT/DELETE /api/models` (+ `?q=&tags=&vtags=` unified search —
+  `vtags` is a comma-separated list of variant tag names, all of which one
+  variant must carry)
+- `GET/POST/PUT/DELETE /api/variant-tags` — manage the flat variant vocabulary
+  (editor+). Variant create/update takes tag *names* and get-or-creates them, so
+  the vocabulary grows organically during import; deleting a tag merges any
+  variants its removal leaves with identical tag sets
+- `GET/POST/PUT/DELETE /api/models/{id}/variants` — create/update are
+  get-or-create **by tag set**: hitting a tag set the model already has returns
+  that variant and merges into it (files and images move across), rather than
+  conflicting. Omitting name and tags addresses the model's anonymous variant
 - `PUT /api/{models|bundles}/{id}/description` (creates a new revision);
   `GET /api/{models|bundles}/{id}/description/revisions` (history);
   `PUT …/revisions/{rev}/label` (name a revision, e.g. "v1")
@@ -399,11 +395,10 @@ orange primary (~`#FA6831`) on a clean white surface, plus a dark mode variant;
 layout mirrors printables.com: top app bar (logo, big centred search, user menu),
 model browsing as a dense card grid of large square-ish thumbnails with
 name/creator/like-count underneath, and a left filter sidebar on the browse page
-(tags, plus one filter group per declared variant axis, generated dynamically
-from the axis/option tables).
+(two chip clouds: model tags, and the variant tag vocabulary).
 
 - Login/Register
-- Model grid: thumbnail cards, text search, tag chips, dynamic per-axis filters
+- Model grid: thumbnail cards, text search, tag chips, variant tag chips
 - Model detail: image gallery (primary image), rendered-markdown description
   (edit dialog with revision history + "name this version"), variant list with
   per-variant file tree (rebuilt from `path`), download buttons, print notes,

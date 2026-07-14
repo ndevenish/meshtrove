@@ -27,6 +27,7 @@ import { useNavigate } from 'react-router-dom'
 
 import {
   api,
+  variantLabel,
   type BundleRef,
   type FileRecord,
   type Job,
@@ -353,8 +354,9 @@ function matchesArchive(job: Job, archiveIds: Set<string>): boolean {
   return !!payload?.archive_file_id && archiveIds.has(payload.archive_file_id)
 }
 
-/// Move the selected files onto a variant: either an existing one or a new
-/// variant created inline with its scale/support axis options.
+/// Move the selected files onto a variant: either an existing one or a new one
+/// created inline from its tags. Tagging the new variant with a set that already
+/// exists lands the files on that variant, which is the intent anyway.
 function MoveToVariantDialog({
   open,
   model,
@@ -368,11 +370,15 @@ function MoveToVariantDialog({
   onClose: () => void
   onConfirm: (variantId: string) => Promise<void>
 }) {
-  const { data: axes } = useQuery({ queryKey: ['axes'], queryFn: () => api.axes(), enabled: open })
+  const { data: vocabulary } = useQuery({
+    queryKey: ['variant-tags'],
+    queryFn: () => api.variantTags(),
+    enabled: open,
+  })
   const [mode, setMode] = useState<'existing' | 'new'>(model.variants.length ? 'existing' : 'new')
   const [existingId, setExistingId] = useState('')
   const [name, setName] = useState('')
-  const [options, setOptions] = useState<Record<string, string>>({})
+  const [tags, setTags] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -383,7 +389,7 @@ function MoveToVariantDialog({
     setMode(model.variants.length ? 'existing' : 'new')
     setExistingId(model.variants[0]?.id ?? '')
     setName('')
-    setOptions({})
+    setTags([])
     setError('')
   }
   if (!open && wasOpen) setWasOpen(false)
@@ -394,10 +400,10 @@ function MoveToVariantDialog({
     try {
       let variantId = existingId
       if (mode === 'new') {
-        const cleaned = Object.fromEntries(Object.entries(options).filter(([, v]) => v.trim()))
+        // Get-or-create: an existing variant with these tags is returned as-is.
         const variant: VariantDetail = await api.createVariant(model.id, {
-          name: name.trim(),
-          options: cleaned,
+          name: name.trim() || null,
+          tags,
         })
         variantId = variant.id
       }
@@ -409,7 +415,8 @@ function MoveToVariantDialog({
     }
   }
 
-  const canSubmit = mode === 'existing' ? !!existingId : name.trim().length > 0
+  // A new variant needs neither name nor tags: untagged is a valid variant.
+  const canSubmit = mode === 'existing' ? !!existingId : true
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
@@ -438,32 +445,42 @@ function MoveToVariantDialog({
             >
               {model.variants.map((v) => (
                 <MenuItem key={v.id} value={v.id}>
-                  {v.name}
+                  {variantLabel(v)}
                 </MenuItem>
               ))}
             </Select>
           ) : (
             <>
+              <Autocomplete
+                multiple
+                freeSolo
+                autoFocus
+                size="small"
+                options={(vocabulary ?? []).map((t) => t.name)}
+                value={tags}
+                onChange={(_, value) =>
+                  setTags([...new Set(value.map((t) => t.trim()).filter(Boolean))])
+                }
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Variant tags"
+                    placeholder="32mm, supported…"
+                    helperText={
+                      tags.length
+                        ? 'These tags identify the variant.'
+                        : "No tags — the model's untagged variant."
+                    }
+                  />
+                )}
+              />
               <TextField
-                label="Variant name"
+                label="Name (optional)"
                 size="small"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Supported, 32mm Lychee"
-                autoFocus
+                placeholder="e.g. My merged remix"
               />
-              {(axes ?? []).map((axis) => (
-                <Autocomplete
-                  key={axis.id}
-                  freeSolo
-                  options={axis.options.map((o) => o.value)}
-                  value={options[axis.name] ?? ''}
-                  onInputChange={(_, value) =>
-                    setOptions((prev) => ({ ...prev, [axis.name]: value }))
-                  }
-                  renderInput={(params) => <TextField {...params} label={axis.name} size="small" />}
-                />
-              ))}
             </>
           )}
         </Stack>
