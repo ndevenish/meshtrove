@@ -57,10 +57,15 @@ export default function ImportPage() {
     // While the archive is unpacking, the file list is still growing.
     refetchInterval: (query) => (query.state.data?.unpacking ? 1500 : false),
   })
+  // Poll the *same* query while the archive unpacks, so arriving files are added
+  // to a list that stays mounted. Keying it on `file_count` made every tick a
+  // different query with an empty cache: `files` blanked to undefined and
+  // everything drawn from it tore down and rebuilt — the page-wide flicker.
   const { data: files } = useQuery({
-    queryKey: ['import-files', id, staged?.file_count],
+    queryKey: ['import-files', id],
     queryFn: () => api.importFiles(id!),
     enabled: !!id,
+    refetchInterval: staged?.unpacking ? 1500 : false,
   })
   const { data: bundles } = useQuery({
     queryKey: ['bundles-all'],
@@ -187,6 +192,7 @@ export default function ImportPage() {
         <ImportLayoutPanel
           importId={staged.id}
           fileCount={staged.file_count}
+          unpacking={staged.unpacking}
           target={dest === 'new_model' ? 'model' : 'bundle'}
           onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
         />

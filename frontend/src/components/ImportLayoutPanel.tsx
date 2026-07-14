@@ -49,12 +49,16 @@ const ROLE_ORDER: GroupRole[] = ['model_name', 'model_tag', 'variant_tag', 'igno
 export default function ImportLayoutPanel({
   importId,
   fileCount,
+  unpacking,
   target,
   onPlan,
 }: {
   importId: string
-  /** re-plan when this grows (the archive may still be unpacking) */
+  /** re-plan when this grows */
   fileCount: number
+  /** the archive is still extracting: plan against the finished tree, not a
+      half-unpacked one that changes under us every second */
+  unpacking: boolean
   target: PlanTarget
   onPlan: (spec: LayoutSpec | null, plan: LayoutPlan | null) => void
 }) {
@@ -77,12 +81,14 @@ export default function ImportLayoutPanel({
     queryFn: () => api.variantTags(),
   })
 
-  // Coverage ranking for the picker: dry-run every saved layout once per file
-  // count. A layout that errors (or matches nothing) still lists — it just
-  // can't recommend itself.
+  // Coverage ranking for the picker: dry-run every saved layout once the file
+  // tree stops moving. A layout that errors (or matches nothing) still lists —
+  // it just can't recommend itself. Waiting for the unpack costs a few seconds
+  // of an empty column and saves a full dry-run of every layout, every second,
+  // against numbers that are stale before they render.
   const { data: coverage } = useQuery({
     queryKey: ['layout-coverage', importId, fileCount, layouts?.map((l) => l.id).join()],
-    enabled: !!layouts && fileCount > 0,
+    enabled: !!layouts && fileCount > 0 && !unpacking,
     queryFn: async () => {
       const entries = await Promise.all(
         layouts!.map(async (layout) => {
@@ -122,6 +128,9 @@ export default function ImportLayoutPanel({
       onPlanRef.current(null, null)
       return
     }
+    // Nothing to plan against yet: the tree is still arriving, and each arrival
+    // would otherwise fire another dry run whose answer is obsolete on landing.
+    if (unpacking) return
     const spec: LayoutSpec = { pattern, roles, value_map: valueMap }
     const timer = setTimeout(async () => {
       try {
@@ -136,7 +145,7 @@ export default function ImportLayoutPanel({
       }
     }, 400)
     return () => clearTimeout(timer)
-  }, [importId, pattern, roles, valueMap, target, fileCount])
+  }, [importId, pattern, roles, valueMap, target, fileCount, unpacking])
 
   const roleOf = (group: number): GroupRole => roles[String(group)] ?? 'ignore'
 
