@@ -169,7 +169,14 @@ Real archive shapes driving it: `docs/import-layouts.md`.
 
 ## Deferred (schema already accommodates)
 
-- Likes/printed/wanted UI (`user_model_marks` exists).
+- **Tests beyond the 17 unit tests** — backend HTTP tests (`#[sqlx::test]` +
+  `oneshot`), then Vitest/RTL, then Playwright, then CI. Order and rationale in
+  `docs/plan.md`, "Test strategy": every bug that escaped so far was a backend
+  *route* bug, which is the layer with no tests at all.
+- Likes/printed/wanted UI (`user_model_marks` exists) — note nothing can *set* a
+  like today (no endpoint, no button), so every `like_count` is 0; the card hides
+  the heart until it is non-zero. The anonymous dev user is `Uuid::nil()` with no
+  `users` row, which the `user_model_marks` FK would reject.
 - Orphan-blob GC + store integrity re-hash as maintenance jobs.
 - Print logs richer than a mark (`print_logs` table later).
 - Browser-import helper (needs token auth, not cookies).

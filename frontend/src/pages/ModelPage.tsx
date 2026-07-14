@@ -55,13 +55,21 @@ export default function ModelPage() {
     enabled: !!id,
   })
 
-  // A render finishing adds a picture to this page — but the page has no way to
-  // know that, because the job writes the image straight to the database. So
-  // watch the queue while any render is in flight, and refetch the model when the
-  // last one lands. (Any render, not just this model's: a job's payload names a
-  // file, and the page would have to fetch every variant's file list to know
-  // whether that file is one of ours. A refetch of one model is cheaper than that
-  // bookkeeping, and if nothing changed the page simply redraws itself.)
+  // A render finishing adds a picture to this page, and the page has no way to
+  // know: the job writes the image straight to the database. So watch the queue.
+  //
+  // Watch for renders that *have finished*, not for the queue going idle. A single
+  // f3d render takes about a second — usually less than one poll — so waiting for
+  // a "was rendering, now isn't" edge misses it entirely: the job is already
+  // `succeeded` the first time we look, the edge never happens, and the picture
+  // sits in the database until you reload. Instead, remember which finished jobs
+  // have been accounted for; any id that shows up finished and unaccounted means a
+  // new image may exist, so refetch.
+  //
+  // (Any render, not just this model's: a job's payload names a file, and knowing
+  // whether that file is ours would mean fetching every variant's file list. One
+  // model refetch is cheaper than that bookkeeping, and if nothing changed the
+  // page simply redraws itself.)
   const { data: jobs } = useQuery({
     queryKey: ['jobs', 'all'],
     queryFn: () => api.jobs(''),
@@ -72,16 +80,27 @@ export default function ModelPage() {
         ? 1500
         : false,
   })
-  const rendering = (jobs ?? []).some(
-    (j) => j.kind === 'render_preview' && (j.status === 'queued' || j.status === 'running'),
-  )
-  const wasRendering = useRef(false)
+  const settledRenders = useRef<Set<number> | null>(null)
   useEffect(() => {
-    if (wasRendering.current && !rendering) {
+    if (!jobs) return
+    const finished = jobs
+      .filter(
+        (j) => j.kind === 'render_preview' && (j.status === 'succeeded' || j.status === 'failed'),
+      )
+      .map((j) => j.id)
+    // The first payload is the baseline: everything already finished when the page
+    // opened is old news, and refetching for it would be a pointless round trip.
+    if (settledRenders.current === null) {
+      settledRenders.current = new Set(finished)
+      return
+    }
+    const seen = settledRenders.current
+    const fresh = finished.filter((jobId) => !seen.has(jobId))
+    if (fresh.length > 0) {
+      for (const jobId of fresh) seen.add(jobId)
       void queryClient.invalidateQueries({ queryKey: ['model', id] })
     }
-    wasRendering.current = rendering
-  }, [rendering, id, queryClient])
+  }, [jobs, id, queryClient])
 
   const canEditModel =
     !!model &&

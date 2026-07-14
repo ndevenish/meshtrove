@@ -588,6 +588,42 @@ from the import page. Preset patterns may use named groups (`(?<model>…)`) as
 lets the next archive from the same creator auto-suggest its layout — and its
 value mappings, which repeat month to month.
 
+## Test strategy — a later phase (2026-07-14)
+
+Today there are **17 Rust unit tests and nothing else**: `services/layout.rs` (8,
+the carve), `services/blobstore.rs` (3), `util.rs` (2), `routes/files.rs` (2),
+`error.rs` (2). All pure functions — no database, no HTTP. The frontend has no
+tests and no test dependencies; `tsc -b` and `oxlint` are the whole net. No CI.
+
+The order below is not the usual pyramid, and the reason is evidence. Every bug
+that actually escaped into the running app — an ENOSPC 500 the browser never saw,
+render jobs writing images where no query looked, a rename silently nulling an
+imported model's licence and price, the archive kept beside everything it
+unpacked — was a **backend route** bug. Exactly one was a frontend bug (a poll
+that stopped one fetch early and left the tail of an archive off the page). A
+browser harness would have caught almost none of them, and it is the most
+expensive thing to own. So:
+
+1. **Backend HTTP tests (`#[sqlx::test]` + `oneshot`).** The big one. `sqlx::test`
+   is already available — it makes a fresh migrated database per test and drops
+   it after — and `axum::Router` can be driven in-process with
+   `tower::ServiceExt::oneshot`, so no port, no server, no fixture teardown.
+   Only new dev-dep is `tower` with `util`. Covers the whole class above:
+   commit-carve semantics, preview-image resolution, PUT/coalesce semantics,
+   permission checks, the 507 path.
+2. **Vitest + React Testing Library (+ `msw`)** in jsdom, for the component logic
+   that keeps biting: destructive controls absent outside edit mode, the import
+   file list polling until the list matches the reported count. Fast, no browser.
+3. **Playwright** last (`npm i -D @playwright/test`; `npx playwright install
+   chromium` fetches its own browser). The only thing that can prove "click Edit,
+   fields appear, Save persists". Known limit: folder drops go through
+   `webkitGetAsEntry()`, which Playwright cannot really exercise — it can drive
+   the click-to-browse `<input type="file">` fallback and a hand-built
+   `DataTransfer`, but the real directory-entry path stays hand-tested.
+
+CI (`cargo test`/`clippy`, `tsc -b`, and whichever of the above exist) belongs
+with step 1 — the tests are worth little if nothing runs them.
+
 ## Verification
 
 - `cargo test` (unit: blobstore hashing/rename, job claim semantics, search query
