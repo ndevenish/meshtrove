@@ -42,6 +42,10 @@ every request a synthetic admin; unset it to exercise real auth
   migrated) to compile. `DATABASE_URL` comes from `.env`.
 - Model/bundle files are immutable blobs in `store/ab/cd/<sha256>`; logical
   paths/filenames live only in the `files` table. Never write to `store/` directly.
+- A `file` has exactly one owner (`num_nonnulls(model_id, variant_id, bundle_id,
+  import_id) = 1`). A dropped archive stages in an **import** — not a model, not
+  a bundle, invisible to browse — until `POST /api/imports/{id}/commit` moves its
+  files onto one owner. Models and bundles never convert into each other.
 - Variant attributes (scale, support, …) are data-driven rows in
   `variant_axes` / `variant_axis_options` — never add hard-coded enums/columns
   for them.

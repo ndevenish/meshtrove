@@ -63,8 +63,9 @@ Phased build of drag-drop import + a classification UI (was under *Deferred*).
 Real archive shapes driving it: `docs/import-layouts.md`.
 
 - **Phase 1 (done):** drop a file anywhere (global overlay) or into the New
-  Model dialog → a model is auto-created + named from the archive filename → a
-  `.zip` unpacks **flat into the model's "unsorted" bucket** (model-owned
+  Model dialog → *(a model was auto-created here; a drop now stages an import
+  instead — see below)* → a `.zip` unpacks **flat into the model's "unsorted"
+  bucket** (model-owned
   `files`, `variant_id` null). The model page's *Unsorted files* section
   reclassifies file kinds, moves a selection into variants (new — with
   scale/support axes — or existing), and deletes files. New API:
@@ -77,15 +78,35 @@ Real archive shapes driving it: `docs/import-layouts.md`.
   `GET /api/browse` (UNION ALL, ranked+paginated together; a variant-axis `opt=`
   filter excludes bundles). `routes/bundles.rs` = CRUD + description revisions +
   `bundle_models` membership. UI: `BundleCard`/`BundlePage`/`BundleEditDialog`,
-  mixed browse grid, "Promote to bundle" on a model. **Drop onto a bundle**
-  unpacks into the bundle's own unsorted bucket (`files.bundle_id`); the bundle
+  mixed browse grid. ("Promote to bundle" lived here; imports removed the need
+  for it.) **Drop onto a bundle** stages an import preset to that bundle, whose
+  files land in the bundle's own unsorted bucket (`files.bundle_id`); the bundle
   page carves those files into new/existing **member models**
   (`PATCH /api/files/{id}` with `model_id`, validated against `bundle_models`) —
   symmetric with Phase 1 (model→variants), one level up (bundle→models→variants).
   Deferred within bundles: `bundle_children` nesting; bundle likes.
-- **Phase 3 (todo):** layout detectors (Loot) + model-vs-bundle guess from
-  folder depth/naming, pre-filling an editable suggested structure. Hooks:
-  `deriveModelName`, `MoveToVariantDialog`, `MoveToModelDialog`.
+- **Imports — the staging area (done, supersedes part of Phases 1–2):** models
+  and bundles are now *fixed* kinds; nothing converts into anything. A dropped
+  archive lands in an **import** (migration 0003: `imports` table +
+  `files.import_id`, the files CHECK widened to four owners), which is neither a
+  model nor a bundle and never appears in browse/search — only on the *Importing*
+  list. Once the unpack job finishes you see the real contents and pick one
+  destination: **new model**, **new bundle**, or **add to an existing bundle**
+  (preselected when the drop happened on a bundle page).
+  `POST /api/imports/{id}/commit` moves every staged file onto that owner in one
+  transaction and drops the import row; it refuses while an unpack is in flight,
+  so files can't be stranded.
+
+  *Why:* the model-vs-bundle question can't be answered at drop time — the
+  contents aren't known yet, and the archive filename doesn't say. Deferring it
+  by one step removes the guess entirely, and with it the need for "Promote to
+  bundle" / "Flatten to model" conversions (both now gone). A dedicated table,
+  rather than a `status` flag on `bundles`, means a staged import cannot leak
+  into the library through a query that forgot to filter it out.
+- **Phase 3 (todo):** layout detectors (Loot) + model-vs-bundle *suggestion*
+  from folder depth/naming — now a **default on the import page's chooser**
+  rather than a decision made behind the user's back. Hooks: `deriveModelName`,
+  `ImportPage`'s destination toggle, `MoveToVariantDialog`, `MoveToModelDialog`.
 
 ## Deferred (schema already accommodates)
 
