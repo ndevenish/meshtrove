@@ -50,6 +50,12 @@ pub struct LayoutSpec {
     /// the same name, else count as unmapped.
     #[serde(default)]
     pub value_map: HashMap<String, Vec<String>>,
+    /// Drop the folders on the way in: the carved files land in the model with
+    /// no `path` at all. Once a tree has been carved, its folders have usually
+    /// *said* everything they had to say — `32mm/supported/` becomes the variant,
+    /// and repeating it as a folder inside that variant only buries the files.
+    #[serde(default)]
+    pub flatten: bool,
 }
 
 /// Whether the carve targets one model (variants only; model-name captures
@@ -443,6 +449,7 @@ mod tests {
                 ),
                 ("nosupports".into(), vec!["unsupported".into()]),
             ]),
+            flatten: false,
         }
     }
 
@@ -617,6 +624,7 @@ mod tests {
             pattern: r"([^/]+)(?=_32mm)_32mm[^/]*/[^/]+\.stl".into(),
             roles: HashMap::from([("1".into(), Role::ModelName)]),
             value_map: HashMap::new(),
+            flatten: false,
         };
         let files = vec![file(1, "Gold_32mm_Supported", "a.stl")];
         let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();

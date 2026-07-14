@@ -341,6 +341,18 @@ async fn commit(
             (CarveTarget::Bundle, layout)
         }
     };
+    // The folders a carve has already read. Collected *before* anything moves,
+    // because the carve matches on `path` — flattening first would pull the tree
+    // out from under the pattern that is reading it — and because a file on its
+    // way to a variant no longer has an `import_id` to find it by afterwards.
+    let flatten_ids: Vec<Uuid> = if layout_spec.as_ref().is_some_and(|spec| spec.flatten) {
+        sqlx::query_scalar!("SELECT id FROM files WHERE import_id = $1", id)
+            .fetch_all(&mut *tx)
+            .await?
+    } else {
+        Vec::new()
+    };
+
     let carve = match layout_spec {
         Some(spec) => {
             let files = plan_files(&mut *tx, id).await?;
@@ -479,6 +491,18 @@ async fn commit(
             }
         }
     };
+
+    // Now that the carve has read the folders, throw them away if asked: the
+    // variant says what `32mm/supported/` said, and saying it twice only buries
+    // the files one level deeper in the model.
+    if !flatten_ids.is_empty() {
+        sqlx::query!(
+            "UPDATE files SET path = '' WHERE id = ANY($1::uuid[])",
+            &flatten_ids[..],
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // Drop the original archive: every byte in it is now also on disk as the
     // files it unpacked into, so keeping it charges the store ~1.3-1.5x forever

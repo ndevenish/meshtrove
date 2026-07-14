@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Autocomplete,
   Box,
+  Checkbox,
   Chip,
   FormControl,
   IconButton,
@@ -69,6 +70,7 @@ export default function ImportLayoutPanel({
   const [valueMap, setValueMap] = useState<Record<string, string[]>>({})
   const [plan, setPlan] = useState<LayoutPlan | null>(null)
   const [planError, setPlanError] = useState('')
+  const [flatten, setFlatten] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [saveError, setSaveError] = useState('')
 
@@ -131,7 +133,7 @@ export default function ImportLayoutPanel({
     // Nothing to plan against yet: the tree is still arriving, and each arrival
     // would otherwise fire another dry run whose answer is obsolete on landing.
     if (unpacking) return
-    const spec: LayoutSpec = { pattern, roles, value_map: valueMap }
+    const spec: LayoutSpec = { pattern, roles, value_map: valueMap, flatten }
     const timer = setTimeout(async () => {
       try {
         const result = await api.planImport(importId, spec, target)
@@ -145,7 +147,7 @@ export default function ImportLayoutPanel({
       }
     }, 400)
     return () => clearTimeout(timer)
-  }, [importId, pattern, roles, valueMap, target, fileCount, unpacking])
+  }, [importId, pattern, roles, valueMap, target, fileCount, unpacking, flatten])
 
   const roleOf = (group: number): GroupRole => roles[String(group)] ?? 'ignore'
 
@@ -242,6 +244,26 @@ export default function ImportLayoutPanel({
             }
             slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: 13 } } }}
             sx={{ mb: 1.5 }}
+          />
+
+          <FormControlLabel
+            sx={{ mb: 1 }}
+            control={
+              <Checkbox
+                size="small"
+                checked={flatten}
+                onChange={(e) => setFlatten(e.target.checked)}
+              />
+            }
+            label={
+              <Box>
+                <Typography variant="body2">Discard folders</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  The carve has already read them — keep the files flat inside the model instead of
+                  nested under the folders they came in.
+                </Typography>
+              </Box>
+            }
           />
 
           {plan && plan.groups.length > 0 && (

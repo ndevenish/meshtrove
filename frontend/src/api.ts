@@ -56,7 +56,7 @@ export interface FileRecord {
   path: string
   filename: string
   mime: string | null
-  kind: 'model' | 'document' | 'archive' | 'other'
+  kind: 'model' | 'project' | 'raw' | 'document' | 'archive' | 'other'
   size: number
   created_at: string
 }
@@ -199,6 +199,8 @@ export interface LayoutSpec {
   roles: Record<string, GroupRole>
   /** lowercased raw capture -> variant tag names ([] = maps to nothing) */
   value_map: Record<string, string[]>
+  /** drop the folders once the carve has read them: files land with no path */
+  flatten?: boolean
 }
 
 export interface ImportLayout extends LayoutSpec {

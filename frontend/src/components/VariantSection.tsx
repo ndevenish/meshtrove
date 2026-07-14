@@ -193,7 +193,14 @@ function VariantRow({
   )
 }
 
-export const FILE_KINDS: FileRecord['kind'][] = ['model', 'document', 'archive', 'other']
+export const FILE_KINDS: FileRecord['kind'][] = [
+  'model',
+  'project',
+  'raw',
+  'document',
+  'archive',
+  'other',
+]
 
 /// Rebuild the kept folder structure from the flat path column. When the
 /// optional editing props are supplied (used by the recategorisation UI), each

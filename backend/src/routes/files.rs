@@ -55,7 +55,13 @@ enum Owner {
 #[sqlx(type_name = "file_kind", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
+    /// Geometry, and nothing else: the mesh or solid you would slice.
     Model,
+    /// The editable source you reopen to *change* something — a slicer or CAD
+    /// project, not a model in its own right.
+    Project,
+    /// Sliced machine output: cooked for one printer and one set of settings.
+    Raw,
     Document,
     Archive,
     Other,
@@ -77,8 +83,11 @@ pub struct FileRecord {
 pub fn guess_kind(filename: &str) -> FileKind {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
-        "stl" | "obj" | "3mf" | "step" | "stp" | "ply" | "gltf" | "glb" => FileKind::Model,
-        "lys" | "lyt" | "chitubox" | "ctb" => FileKind::Model,
+        "stl" | "obj" | "step" | "stp" | "ply" | "gltf" | "glb" => FileKind::Model,
+        // Editable sources, not geometry: a .3mf or .lys is a project you reopen.
+        "3mf" | "blend" | "lys" | "lyt" | "chitubox" => FileKind::Project,
+        // Sliced output: one printer, one set of settings, no going back.
+        "ctb" | "gcode" => FileKind::Raw,
         "pdf" | "txt" | "md" | "html" | "epub" | "doc" | "docx" => FileKind::Document,
         "zip" | "rar" | "7z" => FileKind::Archive,
         _ => FileKind::Other,
@@ -88,6 +97,8 @@ pub fn guess_kind(filename: &str) -> FileKind {
 fn parse_kind(value: &str) -> Result<FileKind, ApiError> {
     match value {
         "model" => Ok(FileKind::Model),
+        "project" => Ok(FileKind::Project),
+        "raw" => Ok(FileKind::Raw),
         "document" => Ok(FileKind::Document),
         "archive" => Ok(FileKind::Archive),
         "other" => Ok(FileKind::Other),
@@ -837,7 +848,24 @@ fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_range;
+    use super::{FileKind, guess_kind, parse_range};
+
+    /// The 'model' kind is geometry, and only geometry. What a slicer or CAD
+    /// tool *works in* is a project; what it spits out for one printer is raw.
+    #[test]
+    fn kinds_split_geometry_from_projects_and_output() {
+        for name in ["a.stl", "a.obj", "a.STEP", "a.ply", "a.glb"] {
+            assert!(matches!(guess_kind(name), FileKind::Model), "{name}");
+        }
+        for name in ["a.3mf", "a.blend", "a.lys", "a.LYT", "a.chitubox"] {
+            assert!(matches!(guess_kind(name), FileKind::Project), "{name}");
+        }
+        for name in ["a.ctb", "a.gcode"] {
+            assert!(matches!(guess_kind(name), FileKind::Raw), "{name}");
+        }
+        assert!(matches!(guess_kind("readme.pdf"), FileKind::Document));
+        assert!(matches!(guess_kind("pack.zip"), FileKind::Archive));
+    }
 
     #[test]
     fn range_parsing() {
