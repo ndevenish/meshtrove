@@ -270,16 +270,26 @@ export type PlanTarget = 'model' | 'bundle'
 
 /// The single decision an import exists to defer: what is this archive?
 /// An attached `layout` carves the files into models/variants as it commits.
-export type CommitTarget =
-  | { target: 'new_model'; name?: string; creator_id?: string | null; layout?: LayoutSpec }
-  | {
-      target: 'new_bundle'
-      name?: string
-      creator_id?: string | null
-      kind?: string
-      layout?: LayoutSpec
-    }
-  | { target: 'bundle'; bundle_id: string; layout?: LayoutSpec }
+/// Metadata typed once on the import page. Flattened into the commit body; on a
+/// bundle commit it lands on the bundle *and* on every member model the carve
+/// creates. A null/absent field says nothing and overwrites nothing.
+export interface ImportMeta {
+  creator_id?: string | null
+  source_url?: string | null
+  license?: string | null
+  purchase_price?: number | null
+  purchase_date?: string | null
+  order_ref?: string | null
+  tags?: string[]
+  description_md?: string | null
+}
+
+export type CommitTarget = ImportMeta &
+  (
+    | { target: 'new_model'; name?: string; layout?: LayoutSpec }
+    | { target: 'new_bundle'; name?: string; kind?: string; layout?: LayoutSpec }
+    | { target: 'bundle'; bundle_id: string; layout?: LayoutSpec }
+  )
 
 export interface CommitResult {
   type: 'model' | 'bundle'

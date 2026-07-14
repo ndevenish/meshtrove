@@ -50,6 +50,16 @@ export default function ImportPage() {
   const [committing, setCommitting] = useState(false)
   const [error, setError] = useState('')
 
+  // The facts about the drop, typed once. A box set is bought once, from one
+  // creator, under one licence — so on a bundle commit these land on every member
+  // model the carve creates, not just the bundle.
+  const [creatorName, setCreatorName] = useState('')
+  const [tags, setTags] = useState<string[]>([])
+  const [sourceUrl, setSourceUrl] = useState('')
+  const [license, setLicense] = useState('')
+  const [price, setPrice] = useState('')
+  const [description, setDescription] = useState('')
+
   const { data: staged, isLoading } = useQuery({
     queryKey: ['import', id],
     queryFn: () => api.import(id!),
@@ -77,6 +87,8 @@ export default function ImportPage() {
       return staged.unpacking || held !== staged.file_count ? 1500 : false
     },
   })
+  const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
+  const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
   const { data: bundles } = useQuery({
     queryKey: ['bundles-all'],
     queryFn: () => api.searchBundles(new URLSearchParams({ per_page: '100' })),
@@ -108,13 +120,31 @@ export default function ImportPage() {
     if (dest === 'bundle' && !target) return setError('Pick a bundle to add to')
     setCommitting(true)
     try {
+      // A creator typed by hand is a creator that may not exist yet — same
+      // get-or-create the model dialog does, so the two agree on one row.
+      const typed = creatorName.trim()
+      let creator_id: string | null = null
+      if (typed) {
+        const existing = (creators ?? []).find((c) => c.name.toLowerCase() === typed.toLowerCase())
+        creator_id = existing ? existing.id : (await api.createCreator({ name: typed })).id
+      }
+      // Blank means "nothing to say": the backend coalesces, so an empty field
+      // never erases what the carve worked out for itself.
+      const meta = {
+        creator_id,
+        tags,
+        source_url: sourceUrl.trim() || null,
+        license: license.trim() || null,
+        purchase_price: price ? Number(price) : null,
+        description_md: description.trim() || null,
+      }
       const spec = layout?.spec
       const body: CommitTarget =
         dest === 'bundle'
-          ? { target: 'bundle', bundle_id: target!.id, layout: spec }
+          ? { target: 'bundle', bundle_id: target!.id, layout: spec, ...meta }
           : dest === 'new_bundle'
-            ? { target: 'new_bundle', name: name.trim(), kind: 'purchased', layout: spec }
-            : { target: 'new_model', name: name.trim(), layout: spec }
+            ? { target: 'new_bundle', name: name.trim(), kind: 'purchased', layout: spec, ...meta }
+            : { target: 'new_model', name: name.trim(), layout: spec, ...meta }
       const result = await api.commitImport(staged.id, body)
       await queryClient.invalidateQueries()
       navigate(result.type === 'model' ? `/models/${result.id}` : `/bundles/${result.id}`)
@@ -195,6 +225,67 @@ export default function ImportPage() {
             sx={{ mb: 2 }}
           />
         )}
+
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+          Details (optional)
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          {dest === 'new_model'
+            ? 'Recorded on the model this becomes.'
+            : 'Recorded on the bundle and on every model carved out of it — a box set is bought once.'}
+        </Typography>
+        <Stack spacing={2} sx={{ mb: 2.5 }}>
+          <Autocomplete
+            freeSolo
+            options={(creators ?? []).map((c) => c.name)}
+            value={creatorName}
+            onInputChange={(_, value) => setCreatorName(value)}
+            renderInput={(props) => (
+              <TextField {...props} size="small" label="Creator (author / company / site)" />
+            )}
+          />
+          <Autocomplete
+            multiple
+            freeSolo
+            options={(allTags ?? []).map((t) => t.name)}
+            value={tags}
+            onChange={(_, value) => setTags(value)}
+            renderInput={(props) => (
+              <TextField {...props} size="small" label="Tags" placeholder="add tag…" />
+            )}
+          />
+          <TextField
+            size="small"
+            label="Source URL"
+            value={sourceUrl}
+            onChange={(e) => setSourceUrl(e.target.value)}
+          />
+          <Stack direction="row" spacing={2}>
+            <TextField
+              size="small"
+              label="License"
+              value={license}
+              onChange={(e) => setLicense(e.target.value)}
+              fullWidth
+            />
+            <TextField
+              size="small"
+              label="Purchase price"
+              type="number"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              fullWidth
+            />
+          </Stack>
+          <TextField
+            size="small"
+            label="Description (markdown)"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            multiline
+            minRows={3}
+          />
+        </Stack>
 
         <Typography variant="subtitle2" sx={{ mb: 1 }}>
           Carve it up? (optional)

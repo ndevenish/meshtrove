@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -258,6 +258,30 @@ async fn variant_vocab(db: impl sqlx::PgExecutor<'_>) -> Result<HashSet<String>,
 // commit: the one decision point — what is this archive?
 // ---------------------------------------------------------------------------
 
+/// What the drop was, told once. A box set is bought once, from one creator,
+/// under one licence, on one order — so the facts are typed once on the import
+/// page and land on *every* model the commit creates, all twenty members of the
+/// bundle included. Anything left blank stays blank; nothing here overwrites a
+/// value the carve worked out for itself (the tags a layout captured, the
+/// creator a bundle already had).
+///
+/// Flattened into the commit body, so the fields sit at the top level of the
+/// JSON exactly as `creator_id` always did.
+#[derive(Clone, Default, Deserialize, ToSchema)]
+pub struct ImportMeta {
+    pub creator_id: Option<Uuid>,
+    pub source_url: Option<String>,
+    pub license: Option<String>,
+    pub purchase_price: Option<f64>,
+    pub purchase_date: Option<NaiveDate>,
+    pub order_ref: Option<String>,
+    /// Model tags (what a model *is*) — added, never replacing what a carve found.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Becomes revision 1 of each model's description.
+    pub description_md: Option<String>,
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(tag = "target", rename_all = "snake_case")]
 pub enum CommitInput {
@@ -265,16 +289,19 @@ pub enum CommitInput {
     /// into variants on the model page — or carved into variants by `layout`.
     NewModel {
         name: Option<String>,
-        creator_id: Option<Uuid>,
+        #[serde(flatten)]
+        meta: ImportMeta,
         #[serde(default)]
         layout: Option<LayoutSpec>,
     },
     /// A collection. Files land in the new bundle's "unsorted" bucket, to be
-    /// carved into member models on the bundle page — or by `layout`.
+    /// carved into member models on the bundle page — or by `layout`. The
+    /// metadata lands on the bundle *and* on every member the carve creates.
     NewBundle {
         name: Option<String>,
-        creator_id: Option<Uuid>,
         kind: Option<String>,
+        #[serde(flatten)]
+        meta: ImportMeta,
         #[serde(default)]
         layout: Option<LayoutSpec>,
     },
@@ -283,6 +310,8 @@ pub enum CommitInput {
     /// how the 75mm files land on the models the 32mm drop created.
     Bundle {
         bundle_id: Uuid,
+        #[serde(flatten)]
+        meta: ImportMeta,
         #[serde(default)]
         layout: Option<LayoutSpec>,
     },
@@ -374,9 +403,7 @@ async fn commit(
     let mut render_models: Vec<Uuid> = Vec::new();
 
     let result = match &input {
-        CommitInput::NewModel {
-            name, creator_id, ..
-        } => {
+        CommitInput::NewModel { name, meta, .. } => {
             let name = named(name);
             let slug = models::unique_slug(&state, &name).await?;
             let model_id: Uuid = sqlx::query_scalar!(
@@ -384,11 +411,12 @@ async fn commit(
                  VALUES ($1, $2, $3, $4) RETURNING id",
                 name,
                 slug,
-                *creator_id,
+                meta.creator_id,
                 user.id,
             )
             .fetch_one(&mut *tx)
             .await?;
+            apply_meta(&mut tx, &state, model_id, meta, user.id).await?;
             if let Some(plan) = &carve
                 && let Some(planned) = plan.models.first()
             {
@@ -412,20 +440,18 @@ async fn commit(
             }
         }
         CommitInput::NewBundle {
-            name,
-            creator_id,
-            kind,
-            ..
+            name, kind, meta, ..
         } => {
             let name = named(name);
             let bundle_kind = parse_bundle_kind(kind.as_deref())?;
             let slug = bundles::unique_slug(&state, &name).await?;
             let bundle_id: Uuid = sqlx::query_scalar!(
-                "INSERT INTO bundles (name, slug, creator_id, kind, created_by)
-                 VALUES ($1, $2, $3, $4::bundle_kind, $5) RETURNING id",
+                "INSERT INTO bundles (name, slug, creator_id, source_url, kind, created_by)
+                 VALUES ($1, $2, $3, $4, $5::bundle_kind, $6) RETURNING id",
                 name,
                 slug,
-                *creator_id,
+                meta.creator_id,
+                meta.source_url,
                 bundle_kind as _,
                 user.id,
             )
@@ -433,8 +459,13 @@ async fn commit(
             .await?;
             if let Some(plan) = &carve {
                 let created =
-                    carve_into_bundle(&mut tx, &state, bundle_id, *creator_id, plan, user.id)
+                    carve_into_bundle(&mut tx, &state, bundle_id, meta.creator_id, plan, user.id)
                         .await?;
+                // The box set was bought once: what was typed on the import page
+                // is true of every model the carve just pulled out of it.
+                for model_id in &created {
+                    apply_meta(&mut tx, &state, *model_id, meta, user.id).await?;
+                }
                 render_models.extend(created);
             }
             sqlx::query!(
@@ -450,7 +481,9 @@ async fn commit(
                 slug,
             }
         }
-        CommitInput::Bundle { bundle_id, .. } => {
+        CommitInput::Bundle {
+            bundle_id, meta, ..
+        } => {
             let target = sqlx::query!(
                 "SELECT created_by, slug, creator_id FROM bundles WHERE id = $1",
                 bundle_id,
@@ -460,15 +493,15 @@ async fn commit(
             .ok_or_else(|| ApiError::BadRequest("no such bundle".into()))?;
             user.require_can_edit(target.created_by)?;
             if let Some(plan) = &carve {
-                let created = carve_into_bundle(
-                    &mut tx,
-                    &state,
-                    *bundle_id,
-                    target.creator_id,
-                    plan,
-                    user.id,
-                )
-                .await?;
+                let creator = meta.creator_id.or(target.creator_id);
+                let created =
+                    carve_into_bundle(&mut tx, &state, *bundle_id, creator, plan, user.id).await?;
+                // Only the models this drop *created*: a member that was already
+                // in the bundle has its own metadata, and a later 75mm pack has no
+                // business rewriting it.
+                for model_id in &created {
+                    apply_meta(&mut tx, &state, *model_id, meta, user.id).await?;
+                }
                 render_models.extend(created);
             }
             sqlx::query!(
@@ -620,6 +653,60 @@ async fn carve_variants(
             "UPDATE files SET variant_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
             variant_id,
             &planned.files[..],
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Stamp the import's metadata onto one model. `coalesce` throughout: a blank
+/// field on the import page means "nothing to say", not "erase what the carve
+/// worked out" — so a member model keeps the creator its bundle gave it unless
+/// the import names a different one.
+async fn apply_meta(
+    tx: &mut sqlx::PgConnection,
+    state: &AppState,
+    model_id: Uuid,
+    meta: &ImportMeta,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query!(
+        r#"UPDATE models SET
+             creator_id     = coalesce($2, creator_id),
+             source_url     = coalesce($3, source_url),
+             license        = coalesce($4, license),
+             purchase_price = coalesce($5::float8::numeric(10,2), purchase_price),
+             purchase_date  = coalesce($6, purchase_date),
+             order_ref      = coalesce($7, order_ref)
+           WHERE id = $1"#,
+        model_id,
+        meta.creator_id,
+        meta.source_url,
+        meta.license,
+        meta.purchase_price,
+        meta.purchase_date,
+        meta.order_ref,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Additive, like every other tagging path: the layout's captured tags and
+    // the ones typed on the import page both describe the model.
+    add_model_tags(tx, state, model_id, &meta.tags).await?;
+
+    if let Some(body) = meta
+        .description_md
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        sqlx::query!(
+            "INSERT INTO model_description_revisions (model_id, body_md, created_by)
+             VALUES ($1, $2, $3)",
+            model_id,
+            body,
+            user_id,
         )
         .execute(&mut *tx)
         .await?;
