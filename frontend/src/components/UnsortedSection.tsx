@@ -44,10 +44,13 @@ const isActive = (j: Job) => j.status === 'queued' || j.status === 'running'
 export default function UnsortedSection({
   model,
   canEdit,
+  editing = false,
   onChange,
 }: {
   model: ModelDetail
   canEdit: boolean
+  /** Edit mode: destructive controls (delete a file) only appear here. */
+  editing?: boolean
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
@@ -235,7 +238,7 @@ export default function UnsortedSection({
             selected={selected}
             onToggle={toggle}
             onKindChange={setKind}
-            onDelete={removeFile}
+            onDelete={editing ? removeFile : undefined}
           />
         </>
       )}

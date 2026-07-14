@@ -38,10 +38,13 @@ function matchesArchive(job: Job, archiveIds: Set<string>): boolean {
 export default function BundleUnsortedSection({
   bundle,
   canEdit,
+  editing = false,
   onChange,
 }: {
   bundle: BundleDetail
   canEdit: boolean
+  /** Edit mode: deleting a staged file only offered here. */
+  editing?: boolean
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
@@ -216,7 +219,7 @@ export default function BundleUnsortedSection({
             selected={selected}
             onToggle={toggle}
             onKindChange={setKind}
-            onDelete={removeFile}
+            onDelete={editing ? removeFile : undefined}
           />
         </>
       )}

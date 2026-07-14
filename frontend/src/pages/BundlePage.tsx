@@ -27,7 +27,7 @@ import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import ModelCard from '../components/ModelCard'
-import BundleEditDialog from '../components/BundleEditDialog'
+import BundleDetailsEditor from '../components/BundleDetailsEditor'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ImportErrorDialog from '../components/ImportErrorDialog'
@@ -36,7 +36,10 @@ export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
   const { user } = useAuth()
   const queryClient = useQueryClient()
-  const [editOpen, setEditOpen] = useState(false)
+  // Edit *mode*: the fields become editable in place, and the destructive
+  // controls — remove a model from the bundle, delete a file, delete an image —
+  // appear only here.
+  const [editing, setEditing] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState('')
@@ -144,19 +147,23 @@ export default function BundlePage() {
                         )}
                       </IconButton>
                     </Tooltip>
-                    <Tooltip title="Delete image">
-                      <IconButton
-                        size="small"
-                        sx={{ p: 0.25, bgcolor: 'background.paper' }}
-                        onClick={async () => {
-                          await api.deleteImage(image.id)
-                          setSelectedImage(null)
-                          refresh()
-                        }}
-                      >
-                        <DeleteIcon sx={{ fontSize: 16 }} />
-                      </IconButton>
-                    </Tooltip>
+                    {/* Picking the favourite is safe; deleting the picture waits
+                        for edit mode. */}
+                    {editing && (
+                      <Tooltip title="Delete image">
+                        <IconButton
+                          size="small"
+                          sx={{ p: 0.25, bgcolor: 'background.paper' }}
+                          onClick={async () => {
+                            await api.deleteImage(image.id)
+                            setSelectedImage(null)
+                            refresh()
+                          }}
+                        >
+                          <DeleteIcon sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                   </Stack>
                 )}
               </Box>
@@ -192,21 +199,23 @@ export default function BundlePage() {
               </Typography>
               <Chip label={bundle.kind} size="small" color="primary" variant="outlined" />
             </Stack>
-            {canEdit && (
-              <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
+            {canEdit && !editing && (
+              <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
                 Edit
               </Button>
             )}
           </Stack>
-          {bundle.creator_name && (
+
+          {editing && (
+            <BundleDetailsEditor key={bundle.id} bundle={bundle} onDone={() => setEditing(false)} />
+          )}
+          {!editing && bundle.creator_name && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
               by {bundle.creator_name}
             </Typography>
           )}
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
-            {bundle.tags.map((tag) => (
-              <Chip key={tag} label={tag} size="small" />
-            ))}
+            {!editing && bundle.tags.map((tag) => <Chip key={tag} label={tag} size="small" />)}
           </Stack>
 
           {bundle.source_url && (
@@ -219,34 +228,43 @@ export default function BundlePage() {
             </Paper>
           )}
 
-          <Stack sx={{ alignItems: 'center' }} direction="row" spacing={1}>
-            <Typography variant="h6">Description</Typography>
-            <Button size="small" onClick={() => setHistoryOpen(true)}>
-              history
-            </Button>
-          </Stack>
-          <Box sx={{ '& p': { mt: 0.5 }, mb: 2 }}>
-            {bundle.description_md ? (
-              <ReactMarkdown>{bundle.description_md}</ReactMarkdown>
-            ) : (
-              <Typography color="text.secondary" variant="body2">
-                No description.
-              </Typography>
-            )}
-          </Box>
+          {!editing && (
+            <>
+              <Stack sx={{ alignItems: 'center' }} direction="row" spacing={1}>
+                <Typography variant="h6">Description</Typography>
+                <Button size="small" onClick={() => setHistoryOpen(true)}>
+                  history
+                </Button>
+              </Stack>
+              <Box sx={{ '& p': { mt: 0.5 }, mb: 2 }}>
+                {bundle.description_md ? (
+                  <ReactMarkdown>{bundle.description_md}</ReactMarkdown>
+                ) : (
+                  <Typography color="text.secondary" variant="body2">
+                    No description.
+                  </Typography>
+                )}
+              </Box>
+            </>
+          )}
 
           <Divider sx={{ mb: 2 }} />
-          <BundleUnsortedSection bundle={bundle} canEdit={!!canEdit} onChange={refresh} />
+          <BundleUnsortedSection
+            bundle={bundle}
+            canEdit={!!canEdit}
+            editing={editing}
+            onChange={refresh}
+          />
           <MembersSection
             bundleId={bundle.id}
             models={bundle.models}
             canEdit={!!canEdit}
+            editing={editing}
             onChange={refresh}
           />
         </Box>
       </Stack>
 
-      <BundleEditDialog open={editOpen} onClose={() => setEditOpen(false)} bundle={bundle} />
       <DescriptionHistoryDialog
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
@@ -282,11 +300,14 @@ function MembersSection({
   bundleId,
   models,
   canEdit,
+  editing,
   onChange,
 }: {
   bundleId: string
   models: import('../api').ModelSummary[]
   canEdit: boolean
+  /** Edit mode: only here can a model be pulled out of the bundle. */
+  editing: boolean
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
@@ -321,7 +342,7 @@ function MembersSection({
           {models.map((model) => (
             <Box key={model.id} sx={{ position: 'relative' }}>
               <ModelCard model={model} />
-              {canEdit && (
+              {canEdit && editing && (
                 <Tooltip title="Remove from bundle">
                   <IconButton
                     size="small"

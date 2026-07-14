@@ -487,10 +487,18 @@ async fn update(
     user.require_can_edit(model_created_by(&state, id).await?)?;
 
     let mut tx = state.db.begin().await?;
+    // The purchase fields coalesce; the rest replace. No editor asks for a licence
+    // or a price any more, so an omitted one means "I wasn't told about this",
+    // not "erase it" — and a plain rename would otherwise quietly strip the
+    // licence and the price off an imported model. Name, creator and source_url
+    // are on the form, so a cleared one there is a real instruction to clear.
     sqlx::query!(
-        r#"UPDATE models SET name = $2, creator_id = $3, source_url = $4, license = $5,
-               purchase_price = $6::float8::numeric(10,2), purchase_date = $7,
-               order_ref = $8, updated_at = now()
+        r#"UPDATE models SET name = $2, creator_id = $3, source_url = $4,
+               license = coalesce($5, license),
+               purchase_price = coalesce($6::float8::numeric(10,2), purchase_price),
+               purchase_date = coalesce($7, purchase_date),
+               order_ref = coalesce($8, order_ref),
+               updated_at = now()
            WHERE id = $1"#,
         id,
         input.name.trim(),

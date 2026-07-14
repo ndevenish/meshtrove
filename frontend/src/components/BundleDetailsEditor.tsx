@@ -1,0 +1,112 @@
+import { useState } from 'react'
+import { Alert, Autocomplete, Button, MenuItem, Stack, TextField } from '@mui/material'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+
+import { api, type BundleDetail } from '../api'
+
+/// The bundle's fields, edited in place. Mirrors ModelDetailsEditor — a bundle
+/// has a `kind` and no variants, and is otherwise the same handful of facts.
+export default function BundleDetailsEditor({
+  bundle,
+  onDone,
+}: {
+  bundle: BundleDetail
+  onDone: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [name, setName] = useState(bundle.name)
+  const [kind, setKind] = useState(bundle.kind)
+  const [creatorName, setCreatorName] = useState(bundle.creator_name ?? '')
+  const [tags, setTags] = useState<string[]>(bundle.tags)
+  const [sourceUrl, setSourceUrl] = useState(bundle.source_url ?? '')
+  const [description, setDescription] = useState(bundle.description_md ?? '')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
+  const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
+
+  const save = async () => {
+    if (!name.trim()) return setError('A bundle needs a name')
+    setBusy(true)
+    setError('')
+    try {
+      const typed = creatorName.trim()
+      let creator_id: string | null = null
+      if (typed) {
+        const existing = (creators ?? []).find((c) => c.name.toLowerCase() === typed.toLowerCase())
+        creator_id = existing ? existing.id : (await api.createCreator({ name: typed })).id
+      }
+      await api.updateBundle(bundle.id, {
+        name: name.trim(),
+        creator_id,
+        kind,
+        source_url: sourceUrl.trim() || null,
+        tags,
+      })
+      // A description edit inserts a revision; only write when it changed.
+      if (description !== (bundle.description_md ?? '')) {
+        await api.updateDescription('bundles', bundle.id, description)
+      }
+      await queryClient.invalidateQueries({ queryKey: ['bundle', bundle.id] })
+      await queryClient.invalidateQueries({ queryKey: ['creators'] })
+      await queryClient.invalidateQueries({ queryKey: ['tags'] })
+      onDone()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Stack spacing={2} sx={{ mb: 2 }}>
+      {error && <Alert severity="error">{error}</Alert>}
+      <TextField
+        label="Name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        autoFocus
+        required
+      />
+      <TextField select label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+        <MenuItem value="purchased">Purchased (a bought pack)</MenuItem>
+        <MenuItem value="collection">Collection (models grouped by hand)</MenuItem>
+      </TextField>
+      <Autocomplete
+        freeSolo
+        options={(creators ?? []).map((c) => c.name)}
+        value={creatorName}
+        onInputChange={(_, value) => setCreatorName(value)}
+        renderInput={(props) => <TextField {...props} label="Creator (author / company / site)" />}
+      />
+      <Autocomplete
+        multiple
+        freeSolo
+        options={(allTags ?? []).map((t) => t.name)}
+        value={tags}
+        onChange={(_, value) => setTags(value)}
+        renderInput={(props) => <TextField {...props} label="Tags" placeholder="add tag…" />}
+      />
+      <TextField
+        label="Source URL"
+        value={sourceUrl}
+        onChange={(e) => setSourceUrl(e.target.value)}
+      />
+      <TextField
+        label="Description (markdown)"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        multiline
+        minRows={4}
+      />
+      <Stack direction="row" spacing={1}>
+        <Button variant="contained" onClick={save} disabled={busy}>
+          Save
+        </Button>
+        <Button onClick={onDone} disabled={busy}>
+          Cancel
+        </Button>
+      </Stack>
+    </Stack>
+  )
+}

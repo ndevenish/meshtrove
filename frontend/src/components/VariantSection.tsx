@@ -45,13 +45,16 @@ import {
 export default function VariantSection({
   model,
   canEdit,
+  editing = false,
   onChange,
 }: {
   model: ModelDetail
   canEdit: boolean
+  /** Edit mode: deleting a file or a whole variant only offered here. */
+  editing?: boolean
   onChange: () => void
 }) {
-  const [editing, setEditing] = useState<VariantDetail | 'new' | null>(null)
+  const [editingVariant, setEditingVariant] = useState<VariantDetail | 'new' | null>(null)
 
   return (
     <Box>
@@ -59,7 +62,7 @@ export default function VariantSection({
         <Typography variant="h6">Variants</Typography>
         <Box sx={{ flexGrow: 1 }} />
         {canEdit && (
-          <Button startIcon={<AddIcon />} size="small" onClick={() => setEditing('new')}>
+          <Button startIcon={<AddIcon />} size="small" onClick={() => setEditingVariant('new')}>
             Add variant
           </Button>
         )}
@@ -74,15 +77,16 @@ export default function VariantSection({
           key={variant.id}
           variant={variant}
           canEdit={canEdit}
+          editing={editing}
           onChange={onChange}
-          onEdit={() => setEditing(variant)}
+          onEdit={() => setEditingVariant(variant)}
         />
       ))}
       <VariantEditDialog
-        open={editing !== null}
-        variant={editing === 'new' ? undefined : (editing ?? undefined)}
+        open={editingVariant !== null}
+        variant={editingVariant === 'new' ? undefined : (editingVariant ?? undefined)}
         model={model}
-        onClose={() => setEditing(null)}
+        onClose={() => setEditingVariant(null)}
         onChange={onChange}
       />
     </Box>
@@ -92,11 +96,13 @@ export default function VariantSection({
 function VariantRow({
   variant,
   canEdit,
+  editing,
   onChange,
   onEdit,
 }: {
   variant: VariantDetail
   canEdit: boolean
+  editing: boolean
   onChange: () => void
   onEdit: () => void
 }) {
@@ -160,6 +166,15 @@ function VariantRow({
         {expanded && files && (
           <FileTree
             files={files}
+            onDelete={
+              editing
+                ? async (fileId) => {
+                    await api.deleteFile(fileId)
+                    await queryClient.invalidateQueries({ queryKey: ['variant-files', variant.id] })
+                    onChange()
+                  }
+                : undefined
+            }
             onRender={
               canEdit
                 ? async (fileId) => {
@@ -189,18 +204,21 @@ function VariantRow({
             <Button size="small" onClick={onEdit}>
               Edit
             </Button>
-            <Button
-              size="small"
-              color="error"
-              onClick={async () => {
-                if (confirm(`Delete variant "${variantLabel(variant)}" and its files?`)) {
-                  await api.deleteVariant(variant.id)
-                  onChange()
-                }
-              }}
-            >
-              Delete
-            </Button>
+            {/* Deleting a variant takes its files with it: edit mode only. */}
+            {editing && (
+              <Button
+                size="small"
+                color="error"
+                onClick={async () => {
+                  if (confirm(`Delete variant "${variantLabel(variant)}" and its files?`)) {
+                    await api.deleteVariant(variant.id)
+                    onChange()
+                  }
+                }}
+              >
+                Delete
+              </Button>
+            )}
           </Stack>
         )}
       </AccordionDetails>

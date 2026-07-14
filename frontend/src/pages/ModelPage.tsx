@@ -26,7 +26,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
-import ModelEditDialog from '../components/ModelEditDialog'
+import ModelDetailsEditor from '../components/ModelDetailsEditor'
 import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
@@ -35,7 +35,11 @@ export default function ModelPage() {
   const { id } = useParams<{ id: string }>()
   const { user } = useAuth()
   const queryClient = useQueryClient()
-  const [editOpen, setEditOpen] = useState(false)
+  // Edit *mode*, not an edit dialog: the fields become editable where they sit,
+  // and the destructive buttons — delete file, delete variant, delete image —
+  // appear only here. Browsing a model should not be one stray click away from
+  // deleting a file of it.
+  const [editing, setEditing] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
@@ -187,19 +191,23 @@ export default function ModelPage() {
                           )}
                         </IconButton>
                       </Tooltip>
-                      <Tooltip title="Delete image">
-                        <IconButton
-                          size="small"
-                          sx={{ p: 0.25, bgcolor: 'background.paper' }}
-                          onClick={async () => {
-                            await api.deleteImage(image.id)
-                            setSelectedImage(null)
-                            refresh()
-                          }}
-                        >
-                          <DeleteIcon sx={{ fontSize: 16 }} />
-                        </IconButton>
-                      </Tooltip>
+                      {/* Choosing the favourite is safe and stays; deleting the
+                        picture is not, and waits for edit mode. */}
+                      {editing && (
+                        <Tooltip title="Delete image">
+                          <IconButton
+                            size="small"
+                            sx={{ p: 0.25, bgcolor: 'background.paper' }}
+                            onClick={async () => {
+                              await api.deleteImage(image.id)
+                              setSelectedImage(null)
+                              refresh()
+                            }}
+                          >
+                            <DeleteIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                     </Stack>
                   )}
                 </Box>
@@ -233,13 +241,17 @@ export default function ModelPage() {
             <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>
               {model.name}
             </Typography>
-            {canEdit && (
-              <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
+            {canEdit && !editing && (
+              <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
                 Edit
               </Button>
             )}
           </Stack>
-          {model.creator_name && (
+
+          {editing && (
+            <ModelDetailsEditor key={model.id} model={model} onDone={() => setEditing(false)} />
+          )}
+          {!editing && model.creator_name && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
               by{' '}
               <Link to={`/creators?q=${encodeURIComponent(model.creator_name)}`}>
@@ -272,16 +284,17 @@ export default function ModelPage() {
             </Stack>
           )}
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
-            {model.tags.map((tag) => (
-              <Chip
-                key={tag}
-                label={tag}
-                size="small"
-                component={Link}
-                to={`/?tags=${encodeURIComponent(tag)}`}
-                clickable
-              />
-            ))}
+            {!editing &&
+              model.tags.map((tag) => (
+                <Chip
+                  key={tag}
+                  label={tag}
+                  size="small"
+                  component={Link}
+                  to={`/?tags=${encodeURIComponent(tag)}`}
+                  clickable
+                />
+              ))}
           </Stack>
 
           {(model.license || model.purchase_price != null || model.source_url) && (
@@ -302,29 +315,32 @@ export default function ModelPage() {
             </Paper>
           )}
 
-          <Stack sx={{ alignItems: 'center' }} direction="row" spacing={1}>
-            <Typography variant="h6">Description</Typography>
-            <Button size="small" onClick={() => setHistoryOpen(true)}>
-              history
-            </Button>
-          </Stack>
-          <Box sx={{ '& p': { mt: 0.5 }, mb: 2 }}>
-            {model.description_md ? (
-              <ReactMarkdown>{model.description_md}</ReactMarkdown>
-            ) : (
-              <Typography color="text.secondary" variant="body2">
-                No description.
-              </Typography>
-            )}
-          </Box>
+          {!editing && (
+            <>
+              <Stack sx={{ alignItems: 'center' }} direction="row" spacing={1}>
+                <Typography variant="h6">Description</Typography>
+                <Button size="small" onClick={() => setHistoryOpen(true)}>
+                  history
+                </Button>
+              </Stack>
+              <Box sx={{ '& p': { mt: 0.5 }, mb: 2 }}>
+                {model.description_md ? (
+                  <ReactMarkdown>{model.description_md}</ReactMarkdown>
+                ) : (
+                  <Typography color="text.secondary" variant="body2">
+                    No description.
+                  </Typography>
+                )}
+              </Box>
+            </>
+          )}
 
           <Divider sx={{ mb: 2 }} />
-          <UnsortedSection model={model} canEdit={!!canEdit} onChange={refresh} />
-          <VariantSection model={model} canEdit={!!canEdit} onChange={refresh} />
+          <UnsortedSection model={model} canEdit={!!canEdit} editing={editing} onChange={refresh} />
+          <VariantSection model={model} canEdit={!!canEdit} editing={editing} onChange={refresh} />
         </Box>
       </Stack>
 
-      <ModelEditDialog open={editOpen} onClose={() => setEditOpen(false)} model={model} />
       <DescriptionHistoryDialog
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
