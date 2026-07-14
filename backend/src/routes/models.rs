@@ -257,9 +257,18 @@ pub struct ModelDetail {
     pub description_md: Option<String>,
     pub variants: Vec<VariantDetail>,
     pub images: Vec<ImageSummary>,
+    /// Bundles this model is a member of (so the UI can link, and avoid
+    /// promoting the same model into a duplicate bundle).
+    pub bundles: Vec<BundleRef>,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BundleRef {
+    pub id: Uuid,
+    pub name: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -389,6 +398,16 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
 
     let variants = fetch_variants(state, id).await?;
 
+    let bundles = sqlx::query_as!(
+        BundleRef,
+        r#"SELECT b.id, b.name FROM bundles b
+           JOIN bundle_models bm ON bm.bundle_id = b.id
+           WHERE bm.model_id = $1 ORDER BY b.name"#,
+        id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
     Ok(ModelDetail {
         id: row.id,
         name: row.name,
@@ -403,6 +422,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
         tags: row.tags,
         description_md: row.description_md,
         variants,
+        bundles,
         images: images
             .into_iter()
             .map(|i| ImageSummary {

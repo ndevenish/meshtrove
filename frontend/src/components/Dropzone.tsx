@@ -9,6 +9,7 @@ export default function Dropzone({
   accept,
   multiple = false,
   busy = false,
+  progress,
   onFiles,
 }: {
   label: string
@@ -16,6 +17,8 @@ export default function Dropzone({
   accept?: string
   multiple?: boolean
   busy?: boolean
+  /** 0-100 for a determinate bar; omit for indeterminate */
+  progress?: number
   onFiles: (files: File[]) => void
 }) {
   const [over, setOver] = useState(false)
@@ -67,7 +70,12 @@ export default function Dropzone({
           {hint}
         </Typography>
       )}
-      {busy && <LinearProgress sx={{ mt: 1.5 }} />}
+      {busy &&
+        (progress === undefined ? (
+          <LinearProgress sx={{ mt: 1.5 }} />
+        ) : (
+          <LinearProgress variant="determinate" value={progress} sx={{ mt: 1.5 }} />
+        ))}
     </Box>
   )
 }

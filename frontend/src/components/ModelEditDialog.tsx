@@ -13,7 +13,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 
-import { api, type ModelDetail } from '../api'
+import { api, uploadWithProgress, type FileRecord, type ModelDetail } from '../api'
 import Dropzone from './Dropzone'
 import { deriveModelName } from '../upload'
 
@@ -39,6 +39,7 @@ export default function ModelEditDialog({
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [archive, setArchive] = useState<File | null>(null)
+  const [uploadPct, setUploadPct] = useState(0)
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
@@ -93,7 +94,9 @@ export default function ModelEditDialog({
         if (archive) {
           const form = new FormData()
           form.append('file', archive)
-          await api.uploadModelFiles(saved.id, form)
+          await uploadWithProgress<FileRecord[]>(`/api/models/${saved.id}/files`, form, (f) =>
+            setUploadPct(Math.round(f * 100)),
+          )
         }
       }
       await queryClient.invalidateQueries()
@@ -114,9 +117,19 @@ export default function ModelEditDialog({
           {error && <Alert severity="error">{error}</Alert>}
           {!model && (
             <Dropzone
-              label={archive ? archive.name : 'Drop an archive to import'}
+              label={
+                busy && archive
+                  ? uploadPct < 100
+                    ? `Uploading ${uploadPct}%…`
+                    : 'Unpacking…'
+                  : archive
+                    ? archive.name
+                    : 'Drop an archive to import'
+              }
               hint={archive ? 'Will unpack after Create' : '.zip auto-unpacks · or click to browse'}
               accept=".zip"
+              busy={busy && !!archive}
+              progress={busy && archive && uploadPct < 100 ? uploadPct : undefined}
               onFiles={(files) => {
                 const file = files[0]
                 setArchive(file)

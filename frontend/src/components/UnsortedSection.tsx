@@ -21,9 +21,18 @@ import {
 } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/Delete'
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
+import Inventory2Icon from '@mui/icons-material/Inventory2'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 
-import { api, type FileRecord, type Job, type ModelDetail, type VariantDetail } from '../api'
+import {
+  api,
+  type BundleRef,
+  type FileRecord,
+  type Job,
+  type ModelDetail,
+  type VariantDetail,
+} from '../api'
 import { FileTree } from './VariantSection'
 
 const isActive = (j: Job) => j.status === 'queued' || j.status === 'running'
@@ -44,6 +53,7 @@ export default function UnsortedSection({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [showArchive, setShowArchive] = useState(false)
   const [moveOpen, setMoveOpen] = useState(false)
+  const [toBundleOpen, setToBundleOpen] = useState(false)
 
   const { data: files } = useQuery({
     queryKey: ['model-files', model.id],
@@ -186,6 +196,16 @@ export default function UnsortedSection({
             >
               Move {selected.size || ''} to variant
             </Button>
+            {model.bundles.length > 0 && (
+              <Button
+                size="small"
+                startIcon={<Inventory2Icon />}
+                disabled={selected.size === 0}
+                onClick={() => setToBundleOpen(true)}
+              >
+                Move to bundle
+              </Button>
+            )}
             <Button
               size="small"
               color="error"
@@ -235,7 +255,96 @@ export default function UnsortedSection({
           onChange()
         }}
       />
+
+      <MoveToBundleDialog
+        open={toBundleOpen}
+        bundles={model.bundles}
+        count={selected.size}
+        onClose={() => setToBundleOpen(false)}
+        onConfirm={async (bundleId) => {
+          await Promise.all([...selected].map((id) => api.updateFile(id, { bundle_id: bundleId })))
+          await queryClient.invalidateQueries({ queryKey: ['model-files', model.id] })
+          await queryClient.invalidateQueries({ queryKey: ['bundle-files', bundleId] })
+          setSelected(new Set())
+          setToBundleOpen(false)
+          onChange()
+        }}
+      />
     </Box>
+  )
+}
+
+/// Push the selected files up into a bundle the model belongs to, where they can
+/// be carved into separate member models (splitting a too-big model).
+function MoveToBundleDialog({
+  open,
+  bundles,
+  count,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean
+  bundles: BundleRef[]
+  count: number
+  onClose: () => void
+  onConfirm: (bundleId: string) => Promise<void>
+}) {
+  const navigate = useNavigate()
+  const [bundleId, setBundleId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const [wasOpen, setWasOpen] = useState(false)
+  if (open && !wasOpen) {
+    setWasOpen(true)
+    setBundleId(bundles[0]?.id ?? '')
+    setError('')
+  }
+  if (!open && wasOpen) setWasOpen(false)
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Move {count} file(s) to a bundle</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          {error && <Alert severity="error">{error}</Alert>}
+          {bundles.length > 1 && (
+            <Select size="small" value={bundleId} onChange={(e) => setBundleId(e.target.value)}>
+              {bundles.map((b) => (
+                <MenuItem key={b.id} value={b.id}>
+                  {b.name}
+                </MenuItem>
+              ))}
+            </Select>
+          )}
+          <Typography variant="body2" color="text.secondary">
+            Files move to the bundle's unsorted area, where you can split them into separate member
+            models.
+          </Typography>
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={busy || !bundleId}
+          onClick={async () => {
+            setBusy(true)
+            setError('')
+            try {
+              await onConfirm(bundleId)
+              navigate(`/bundles/${bundleId}`)
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e))
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          Move &amp; open bundle
+        </Button>
+      </DialogActions>
+    </Dialog>
   )
 }
 

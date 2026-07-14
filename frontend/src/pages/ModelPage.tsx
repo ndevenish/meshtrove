@@ -40,6 +40,7 @@ export default function ModelPage() {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
+  const [promoting, setPromoting] = useState(false)
 
   const { data: model } = useQuery({
     queryKey: ['model', id],
@@ -190,21 +191,29 @@ export default function ModelPage() {
             </Typography>
             {canEdit && (
               <Stack direction="row" spacing={1}>
-                <Button
-                  startIcon={<Inventory2Icon />}
-                  onClick={async () => {
-                    const bundle = await api.createBundle({
-                      name: model.name,
-                      kind: 'collection',
-                      creator_id: model.creator_id,
-                    })
-                    await api.addModelToBundle(bundle.id, model.id)
-                    await queryClient.invalidateQueries()
-                    navigate(`/bundles/${bundle.id}`)
-                  }}
-                >
-                  Promote to bundle
-                </Button>
+                {model.bundles.length === 0 && (
+                  <Button
+                    startIcon={<Inventory2Icon />}
+                    disabled={promoting}
+                    onClick={async () => {
+                      setPromoting(true)
+                      try {
+                        const bundle = await api.createBundle({
+                          name: model.name,
+                          kind: 'collection',
+                          creator_id: model.creator_id,
+                        })
+                        await api.addModelToBundle(bundle.id, model.id)
+                        await queryClient.invalidateQueries()
+                        navigate(`/bundles/${bundle.id}`)
+                      } finally {
+                        setPromoting(false)
+                      }
+                    }}
+                  >
+                    Promote to bundle
+                  </Button>
+                )}
                 <Button startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
                   Edit
                 </Button>
@@ -218,6 +227,30 @@ export default function ModelPage() {
                 {model.creator_name}
               </Link>
             </Typography>
+          )}
+          {model.bundles.length > 0 && (
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', gap: 1 }}
+            >
+              <Typography variant="body2" color="text.secondary">
+                In bundle:
+              </Typography>
+              {model.bundles.map((b) => (
+                <Chip
+                  key={b.id}
+                  icon={<Inventory2Icon />}
+                  label={b.name}
+                  size="small"
+                  color="primary"
+                  variant="outlined"
+                  component={Link}
+                  to={`/bundles/${b.id}`}
+                  clickable
+                />
+              ))}
+            </Stack>
           )}
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
             {model.tags.map((tag) => (

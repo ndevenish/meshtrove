@@ -25,7 +25,7 @@ import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, imageUrl } from '../api'
+import { api, imageUrl, uploadWithProgress, type FileRecord } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import ModelCard from '../components/ModelCard'
@@ -42,6 +42,7 @@ export default function BundlePage() {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [uploadPct, setUploadPct] = useState(0)
   const [toast, setToast] = useState('')
 
   const { data: bundle } = useQuery({
@@ -241,16 +242,28 @@ export default function BundlePage() {
           {canEdit && (
             <Box sx={{ mb: 2 }}>
               <Dropzone
-                label="Drop an archive to add its contents"
+                label={
+                  uploading
+                    ? uploadPct < 100
+                      ? `Uploading ${uploadPct}%…`
+                      : 'Unpacking…'
+                    : 'Drop an archive to add its contents'
+                }
                 hint=".zip unpacks into this bundle, then sort into member models"
                 accept=".zip"
                 busy={uploading}
+                progress={uploading && uploadPct < 100 ? uploadPct : undefined}
                 onFiles={async (droppedFiles) => {
                   setUploading(true)
+                  setUploadPct(0)
                   try {
                     const form = new FormData()
                     form.append('file', droppedFiles[0])
-                    await api.uploadBundleFiles(bundle.id, form)
+                    await uploadWithProgress<FileRecord[]>(
+                      `/api/bundles/${bundle.id}/files`,
+                      form,
+                      (f) => setUploadPct(Math.round(f * 100)),
+                    )
                     await queryClient.invalidateQueries({ queryKey: ['bundle-files', bundle.id] })
                   } finally {
                     setUploading(false)

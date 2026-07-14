@@ -13,7 +13,7 @@ import {
   Tooltip,
   Snackbar,
   Alert,
-  CircularProgress,
+  LinearProgress,
   alpha,
 } from '@mui/material'
 import { useQueryClient } from '@tanstack/react-query'
@@ -38,6 +38,8 @@ export default function AppShell() {
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
   const [dragging, setDragging] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [uploadName, setUploadName] = useState('')
   const [dropError, setDropError] = useState('')
 
   // Global file-first drop: dropping a file anywhere creates a new model named
@@ -67,7 +69,9 @@ export default function AppShell() {
       const file = e.dataTransfer?.files?.[0]
       if (!file) return
       setImporting(true)
-      importArchiveAsModel(file)
+      setProgress(0)
+      setUploadName(file.name)
+      importArchiveAsModel(file, setProgress)
         .then(async (model) => {
           await queryClient.invalidateQueries()
           navigate(`/models/${model.id}`)
@@ -221,10 +225,26 @@ export default function AppShell() {
           })}
         >
           {importing ? (
-            <>
-              <CircularProgress />
-              <Typography variant="h6">Importing…</Typography>
-            </>
+            <Box sx={{ width: 360, textAlign: 'center' }}>
+              {progress < 1 ? (
+                <>
+                  <Typography variant="h6" sx={{ mb: 1 }}>
+                    Uploading {Math.round(progress * 100)}%
+                  </Typography>
+                  <LinearProgress variant="determinate" value={progress * 100} />
+                </>
+              ) : (
+                <>
+                  <Typography variant="h6" sx={{ mb: 1 }}>
+                    Unpacking…
+                  </Typography>
+                  <LinearProgress />
+                </>
+              )}
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }} noWrap>
+                {uploadName}
+              </Typography>
+            </Box>
           ) : (
             <>
               <UploadFileIcon sx={{ fontSize: 64, color: 'primary.main' }} />

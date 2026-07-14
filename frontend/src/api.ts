@@ -98,7 +98,14 @@ export interface ModelDetail {
   description_md: string | null
   variants: VariantDetail[]
   images: ImageRecord[]
+  /** bundles this model belongs to */
+  bundles: BundleRef[]
   created_by: string
+}
+
+export interface BundleRef {
+  id: string
+  name: string
 }
 
 export interface Revision {
@@ -184,6 +191,8 @@ export interface FileUpdate {
   variant_id?: string
   /** carve a bundle-owned file into a member model */
   model_id?: string
+  /** push a model-owned file up into a bundle it belongs to */
+  bundle_id?: string
   unsorted?: boolean
   filename?: string
   path?: string
@@ -216,6 +225,32 @@ const json = (body: unknown): RequestInit => ({
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(body),
 })
+
+/// Multipart upload with progress. `fetch` cannot report upload progress, so
+/// big archive uploads go through XHR to drive a real percentage bar.
+export function uploadWithProgress<T>(
+  path: string,
+  form: FormData,
+  onProgress: (fraction: number) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', path)
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) onProgress(e.loaded / e.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(1)
+        resolve(xhr.responseText ? JSON.parse(xhr.responseText) : (undefined as T))
+      } else {
+        reject(new ApiError(xhr.status, xhr.responseText || xhr.statusText))
+      }
+    }
+    xhr.onerror = () => reject(new ApiError(0, 'network error during upload'))
+    xhr.send(form)
+  })
+}
 
 export const api = {
   me: () => request<User>('/api/me'),

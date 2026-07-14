@@ -1,7 +1,7 @@
 // File-first upload helpers: turn a dropped archive into a freshly-created,
 // auto-named model whose contents unpack into the model's "unsorted" bucket.
 
-import { api, type ModelDetail } from './api'
+import { api, uploadWithProgress, type FileRecord, type ModelDetail } from './api'
 
 /// Derive a human model name from an archive filename:
 /// strip the extension and a leading "DownloadAll_" prefix, turn separators
@@ -21,13 +21,19 @@ export function deriveModelName(filename: string): string {
   return titled || 'Untitled model'
 }
 
-/// Create a model named after the file, then upload the file to it. A `.zip`
-/// unpacks in the background (import job); anything else lands as a loose file
-/// in the model's unsorted bucket. Returns the created model.
-export async function importArchiveAsModel(file: File): Promise<ModelDetail> {
+/// Create a model named after the file, then upload the file to it, reporting
+/// upload progress (0..1). A `.zip` unpacks in the background (import job).
+export async function importArchiveAsModel(
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<ModelDetail> {
   const model = await api.createModel({ name: deriveModelName(file.name) })
   const form = new FormData()
   form.append('file', file)
-  await api.uploadModelFiles(model.id, form)
+  await uploadWithProgress<FileRecord[]>(
+    `/api/models/${model.id}/files`,
+    form,
+    onProgress ?? (() => {}),
+  )
   return model
 }

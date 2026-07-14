@@ -453,6 +453,9 @@ struct FileUpdate {
     /// Move a bundle-context file into this member model's unsorted bucket
     /// (the model must be a member of the bundle).
     model_id: Option<Uuid>,
+    /// Move a model-context file up into this bundle's unsorted bucket, to be
+    /// carved into member models (the model must be a member of the bundle).
+    bundle_id: Option<Uuid>,
     /// Move a model-context file back to the model's "unsorted" bucket.
     unsorted: Option<bool>,
     filename: Option<String>,
@@ -481,6 +484,7 @@ async fn update_file(
         body.unsorted == Some(true),
         body.variant_id.is_some(),
         body.model_id.is_some(),
+        body.bundle_id.is_some(),
     ]
     .into_iter()
     .filter(|x| *x)
@@ -491,20 +495,44 @@ async fn update_file(
         ));
     }
 
-    // Determine the target owner (model_id, variant_id), if a move was
+    // Membership check shared by both directions of a model<->bundle move.
+    let require_member = |bundle_id: Uuid, model_id: Uuid| {
+        let db = state.db.clone();
+        async move {
+            let is_member = sqlx::query_scalar!(
+                r#"SELECT EXISTS (SELECT 1 FROM bundle_models WHERE bundle_id = $1 AND model_id = $2) as "e!""#,
+                bundle_id,
+                model_id,
+            )
+            .fetch_one(&db)
+            .await?;
+            if !is_member {
+                return Err(ApiError::BadRequest(
+                    "model is not a member of that bundle".into(),
+                ));
+            }
+            Ok::<(), ApiError>(())
+        }
+    };
+
+    // Determine the target owner (model_id, variant_id, bundle_id) if a move was
     // requested. Valid moves depend on the file's context.
-    let move_target: Option<(Option<Uuid>, Option<Uuid>)> = match (
+    type Target = (Option<Uuid>, Option<Uuid>, Option<Uuid>);
+    let move_target: Option<Target> = match (
         &ctx,
         body.unsorted,
         body.variant_id,
         body.model_id,
+        body.bundle_id,
     ) {
         // No move.
-        (_, None | Some(false), None, None) => None,
+        (_, None | Some(false), None, None, None) => None,
         // Model file → back to the model's unsorted bucket.
-        (FileContext::Model(model_id), Some(true), None, None) => Some((Some(*model_id), None)),
+        (FileContext::Model(model_id), Some(true), None, None, None) => {
+            Some((Some(*model_id), None, None))
+        }
         // Model file → a variant of the same model.
-        (FileContext::Model(model_id), _, Some(variant_id), None) => {
+        (FileContext::Model(model_id), _, Some(variant_id), None, None) => {
             let variant_model = sqlx::query_scalar!(
                 "SELECT model_id FROM model_variants WHERE id = $1",
                 variant_id
@@ -517,34 +545,28 @@ async fn update_file(
                     "variant belongs to a different model".into(),
                 ));
             }
-            Some((None, Some(variant_id)))
+            Some((None, Some(variant_id), None))
+        }
+        // Model file → up into a bundle the model belongs to (for carving).
+        (FileContext::Model(model_id), _, None, None, Some(target_bundle)) => {
+            require_member(target_bundle, *model_id).await?;
+            Some((None, None, Some(target_bundle)))
         }
         // Bundle file → carve into a member model's unsorted bucket.
-        (FileContext::Bundle(bundle_id), _, None, Some(target_model)) => {
-            let is_member = sqlx::query_scalar!(
-                r#"SELECT EXISTS (SELECT 1 FROM bundle_models WHERE bundle_id = $1 AND model_id = $2) as "e!""#,
-                bundle_id,
-                target_model,
-            )
-            .fetch_one(&state.db)
-            .await?;
-            if !is_member {
-                return Err(ApiError::BadRequest(
-                    "target model is not a member of this bundle".into(),
-                ));
-            }
-            Some((Some(target_model), None))
+        (FileContext::Bundle(bundle_id), _, None, Some(target_model), None) => {
+            require_member(*bundle_id, target_model).await?;
+            Some((Some(target_model), None, None))
         }
         // Bundle file "unsorted" is a no-op (already bundle-owned).
-        (FileContext::Bundle(_), Some(true), None, None) => None,
+        (FileContext::Bundle(_), Some(true), None, None, None) => None,
         _ => return Err(ApiError::BadRequest("invalid move for this file".into())),
     };
 
-    // COALESCE keeps unspecified fields; when moving, both owner columns are
-    // written at once (bundle_id forced null) so the CHECK is never violated.
-    let (set_model_id, set_variant_id, do_move) = match move_target {
-        Some((m, v)) => (m, v, true),
-        None => (None, None, false),
+    // COALESCE keeps unspecified fields; when moving, all three owner columns
+    // are written at once so the num_nonnulls CHECK is never violated.
+    let (set_model_id, set_variant_id, set_bundle_id, do_move) = match move_target {
+        Some((m, v, b)) => (m, v, b, true),
+        None => (None, None, None, false),
     };
     let record = sqlx::query!(
         r#"UPDATE files SET
@@ -553,7 +575,7 @@ async fn update_file(
              path = coalesce($4, path),
              model_id = CASE WHEN $5 THEN $6 ELSE model_id END,
              variant_id = CASE WHEN $5 THEN $7 ELSE variant_id END,
-             bundle_id = CASE WHEN $5 THEN NULL ELSE bundle_id END
+             bundle_id = CASE WHEN $5 THEN $8 ELSE bundle_id END
            WHERE id = $1
            RETURNING id, blob_sha256, path, filename, mime,
                      kind as "kind: FileKind", created_at,
@@ -565,6 +587,7 @@ async fn update_file(
         do_move,
         set_model_id,
         set_variant_id,
+        set_bundle_id,
     )
     .fetch_one(&state.db)
     .await?;
