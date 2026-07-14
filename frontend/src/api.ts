@@ -78,6 +78,8 @@ export interface ImageRecord {
   id: string
   kind: string
   is_primary: boolean
+  /** set when the image belongs to a variant of the model, not the model itself */
+  variant_id?: string | null
 }
 
 export interface ModelDetail {

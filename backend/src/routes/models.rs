@@ -270,6 +270,10 @@ pub struct ImageSummary {
     pub is_primary: bool,
     pub width: Option<i32>,
     pub height: Option<i32>,
+    /// Set when the image belongs to one of the model's variants rather than to
+    /// the model itself — the gallery shows both, but "primary" means a different
+    /// thing for each, and the UI has to be able to tell them apart.
+    pub variant_id: Option<Uuid>,
 }
 
 pub async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiError> {
@@ -380,9 +384,20 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
     .await?
     .ok_or(ApiError::NotFound)?;
 
+    // A model's pictures are its variants' pictures too. A carve puts the STLs on
+    // a variant, so every render of a carved model is an image *of a variant* —
+    // ask only for `model_id = $1` and a model with forty rendered previews shows
+    // "No images yet". The model's own images come first (an uploaded shot of the
+    // whole thing beats a render of one variant of it), then the variants' in
+    // variant order.
     let images = sqlx::query!(
-        r#"SELECT id, kind::text as "kind!", is_primary, width, height FROM images
-           WHERE model_id = $1 ORDER BY is_primary DESC, sort_order, created_at"#,
+        r#"SELECT i.id, i.kind::text as "kind!", i.is_primary, i.width, i.height,
+                  i.variant_id,
+                  (i.model_id IS NULL) as "from_variant!"
+           FROM images i
+           LEFT JOIN model_variants v ON v.id = i.variant_id
+           WHERE i.model_id = $1 OR v.model_id = $1
+           ORDER BY "from_variant!", i.is_primary DESC, i.sort_order, i.created_at"#,
         id,
     )
     .fetch_all(&state.db)
@@ -423,6 +438,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
                 is_primary: i.is_primary,
                 width: i.width,
                 height: i.height,
+                variant_id: i.variant_id,
             })
             .collect(),
         created_by: row.created_by,

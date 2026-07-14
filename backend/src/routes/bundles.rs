@@ -379,6 +379,9 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiErr
                 is_primary: i.is_primary,
                 width: i.width,
                 height: i.height,
+                // A bundle's own gallery is its own images; the member models'
+                // pictures belong on the member models.
+                variant_id: None,
             })
             .collect(),
         created_by: row.created_by,
