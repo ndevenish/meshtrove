@@ -102,6 +102,26 @@ export default function ModelPage() {
     }
   }, [jobs, id, queryClient])
 
+  // A picture that just arrived is the one you want to look at — you pressed
+  // Render, or pasted, to see *it*, not to add a thumbnail to a row you then have
+  // to hunt through. So the viewer follows anything new into the gallery.
+  //
+  // Keyed on ids rather than count: a render that replaces an image leaves the
+  // count unchanged, and a delete would otherwise look like an arrival.
+  const knownImages = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    if (!model) return
+    const ids = model.images.map((image) => image.id)
+    const known = knownImages.current
+    knownImages.current = new Set(ids)
+    // First sight of the model is not an arrival: it is just the page loading.
+    if (known === null) return
+    const fresh = ids.filter((imageId) => !known.has(imageId))
+    // Several at once (an import rendering every variant) — any of them is a
+    // better thing to be looking at than the one that was there before.
+    if (fresh.length > 0) setSelectedImage(fresh[0])
+  }, [model])
+
   const canEditModel =
     !!model &&
     !!user &&
