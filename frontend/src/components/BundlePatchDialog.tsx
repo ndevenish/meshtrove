@@ -57,6 +57,13 @@ export default function BundlePatchDialog({
     bundle_description: true,
   })
 
+  // A member is "taken" if a matched row already owns it, or another patch row's
+  // pick points at it. Only a hint — the backend last-write-wins if you insist.
+  const chosenElsewhere = (forName: string, memberId: string) => {
+    if (preview?.matched.some((m) => m.model_id === memberId)) return true
+    return Object.entries(resolved).some(([name, id]) => name !== forName && id === memberId)
+  }
+
   const reset = () => {
     setZip(null)
     setPreview(null)
@@ -205,10 +212,40 @@ export default function BundlePatchDialog({
             )}
 
             {preview.unmatched_patch.length > 0 && (
-              <Alert severity="warning" sx={{ py: 0.5 }}>
-                No member matched: {preview.unmatched_patch.join(', ')}. These are skipped — nothing
-                in the bundle to apply them to.
-              </Alert>
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  No automatic match — pick a model, or leave unset to skip
+                </Typography>
+                {preview.unmatched_patch.map((name) => (
+                  <Stack
+                    key={name}
+                    direction="row"
+                    spacing={1}
+                    sx={{ alignItems: 'center', mb: 0.5 }}
+                  >
+                    <Typography variant="body2" sx={{ minWidth: 160 }}>
+                      {name}
+                    </Typography>
+                    <FormControl size="small" sx={{ minWidth: 220 }}>
+                      <Select
+                        displayEmpty
+                        value={resolved[name] ?? ''}
+                        onChange={(e) => setResolved((r) => ({ ...r, [name]: e.target.value }))}
+                      >
+                        <MenuItem value="">
+                          <em>skip</em>
+                        </MenuItem>
+                        {preview.members.map((m) => (
+                          <MenuItem key={m.id} value={m.id}>
+                            {m.name}
+                            {chosenElsewhere(name, m.id) ? ' — already chosen' : ''}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Stack>
+                ))}
+              </Box>
             )}
 
             <Divider />

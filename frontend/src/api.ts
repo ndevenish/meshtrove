@@ -515,6 +515,7 @@ export interface PatchPreview {
   ambiguous: { patch_name: string; candidates: { id: string; name: string }[] }[]
   unmatched_patch: string[]
   unmatched_members: string[]
+  members: { id: string; name: string }[]
 }
 
 export interface PatchApplyOptions {

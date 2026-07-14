@@ -209,10 +209,14 @@ struct PatchPreview {
     bundle_cover_count: usize,
     matched: Vec<MatchedRow>,
     ambiguous: Vec<AmbiguousRow>,
-    /// Patch models that matched no member (nothing to apply them to).
+    /// Patch models that matched no member automatically — the user can still
+    /// pick a member for these by hand (that is what `members` is for).
     unmatched_patch: Vec<String>,
     /// Members the patch said nothing about (left untouched).
     unmatched_members: Vec<String>,
+    /// Every member of the bundle, so the UI can offer a manual match for a row
+    /// that did not resolve on its own.
+    members: Vec<Candidate>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -319,6 +323,13 @@ async fn preview(
         ambiguous,
         unmatched_patch,
         unmatched_members,
+        members: members
+            .iter()
+            .map(|m| Candidate {
+                id: m.id,
+                name: m.name.clone(),
+            })
+            .collect(),
     }))
 }
 
