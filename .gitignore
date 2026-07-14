@@ -2,5 +2,5 @@
 /frontend/node_modules/
 /frontend/dist/
 .env
-/store/
+/backend/store/
 .DS_Store
