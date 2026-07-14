@@ -42,6 +42,20 @@ import {
   type VariantDetail,
 } from '../api'
 
+/// Wait for one job to settle. The render is the *job's* doing, so the picture is
+/// there when the job says so — no inferring it from the shape of the queue.
+/// Gives up after ~2 minutes and lets the caller refetch anyway; a render that
+/// slow has bigger problems than a stale gallery.
+async function waitForJob(jobId: number): Promise<void> {
+  for (let i = 0; i < 120; i++) {
+    const job = await api.job(jobId)
+    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+}
+
 export default function VariantSection({
   model,
   canEdit,
@@ -109,6 +123,7 @@ function VariantRow({
   const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [rendering, setRendering] = useState(false)
   const { data: files } = useQuery({
     queryKey: ['variant-files', variant.id],
     queryFn: () => api.variantFiles(variant.id),
@@ -162,7 +177,7 @@ function VariantRow({
             {variant.print_notes}
           </Alert>
         )}
-        {uploading && <LinearProgress sx={{ mb: 1 }} />}
+        {(uploading || rendering) && <LinearProgress sx={{ mb: 1 }} />}
         {expanded && files && (
           <FileTree
             files={files}
@@ -178,10 +193,23 @@ function VariantRow({
             onRender={
               canEdit
                 ? async (fileId) => {
-                    await api.renderFile(fileId)
-                    // The job is queued, not done: the model page watches the job
-                    // queue and picks the picture up when it lands.
-                    await queryClient.invalidateQueries({ queryKey: ['jobs', 'all'] })
+                    setRendering(true)
+                    try {
+                      // Wait for *this* job, then refetch. Inferring "my picture
+                      // arrived" from a shared queue-watcher is how this broke
+                      // twice: a render takes about a second, so whatever edge or
+                      // poll the watcher is built on can be over before it looks.
+                      // The job id is not ambiguous.
+                      const { job_id } = await api.renderFile(fileId)
+                      await waitForJob(job_id)
+                    } finally {
+                      setRendering(false)
+                      await queryClient.invalidateQueries({ queryKey: ['model', variant.model_id] })
+                      await queryClient.invalidateQueries({
+                        queryKey: ['variant-files', variant.id],
+                      })
+                      await queryClient.invalidateQueries({ queryKey: ['jobs', 'all'] })
+                    }
                   }
                 : undefined
             }

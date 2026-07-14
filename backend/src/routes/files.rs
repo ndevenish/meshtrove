@@ -755,7 +755,7 @@ async fn render_file(
     State(state): State<AppState>,
     user: User,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<RenderQueued>), ApiError> {
     let (_ctx, created_by) = file_context(&state, id).await?;
     user.require_can_edit(created_by)?;
 
@@ -777,13 +777,21 @@ async fn render_file(
         )));
     }
 
-    crate::services::jobs::enqueue(
+    let job_id = crate::services::jobs::enqueue(
         &state.db,
         "render_preview",
         serde_json::json!({ "file_id": id, "mode": "add" }),
     )
     .await?;
-    Ok(StatusCode::ACCEPTED)
+    // Hand the job back. The picture appears when *this* job finishes, and the
+    // caller can wait for exactly that rather than watching the whole queue and
+    // trying to infer which finish was theirs.
+    Ok((StatusCode::ACCEPTED, Json(RenderQueued { job_id })))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RenderQueued {
+    pub job_id: i64,
 }
 
 async fn download_file(

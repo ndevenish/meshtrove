@@ -457,8 +457,11 @@ export const api = {
   promoteImage: (modelId: string, imageId: string) =>
     request<void>(`/api/models/${modelId}/images/${imageId}/promote`, { method: 'PUT' }),
   deleteImage: (imageId: string) => request<void>(`/api/images/${imageId}`, { method: 'DELETE' }),
-  /// Force a render of this file, whatever the automatic pass chose.
-  renderFile: (fileId: string) => request<void>(`/api/files/${fileId}/render`, { method: 'POST' }),
+  /// Force a render of this file, whatever the automatic pass chose. Returns the
+  /// job, so the caller can wait for *its* picture rather than watching the queue.
+  renderFile: (fileId: string) =>
+    request<{ job_id: number }>(`/api/files/${fileId}/render`, { method: 'POST' }),
+  job: (jobId: number) => request<Job>(`/api/jobs/${jobId}`),
 
   creators: (q = '') => request<Creator[]>(`/api/creators?q=${encodeURIComponent(q)}`),
   creator: (id: string) => request<Creator>(`/api/creators/${id}`),
