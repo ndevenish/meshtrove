@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container,
@@ -68,6 +68,15 @@ export default function BundlePage() {
     queryFn: () => api.bundle(id!),
     enabled: !!id,
   })
+
+  // Canonical URL is the slug; arriving by UUID or a stale slug redirects here
+  // (see ModelPage). Seed the slug's cache so the swap doesn't flash a reload.
+  useEffect(() => {
+    if (bundle && id !== bundle.slug) {
+      queryClient.setQueryData(['bundle', bundle.slug], bundle)
+      navigate(`/bundles/${bundle.slug}`, { replace: true })
+    }
+  }, [bundle, id, navigate, queryClient])
 
   const canEditBundle =
     !!bundle &&

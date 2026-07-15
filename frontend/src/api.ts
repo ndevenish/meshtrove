@@ -104,6 +104,7 @@ export interface ModelDetail {
 
 export interface BundleRef {
   id: string
+  slug: string
   name: string
 }
 

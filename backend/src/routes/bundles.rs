@@ -205,11 +205,20 @@ pub fn parse_kind(kind: Option<&str>) -> Result<&str, ApiError> {
     }
 }
 
-pub async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiError> {
+/// A slug free among all bundles except `exclude` (the row being renamed, so a
+/// no-op rename keeps its own slug rather than colliding with itself). `None`
+/// when creating.
+pub async fn unique_slug(
+    state: &AppState,
+    name: &str,
+    exclude: Option<Uuid>,
+) -> Result<String, ApiError> {
     let base = slugify(name);
     let taken: Vec<String> = sqlx::query_scalar!(
-        "SELECT slug FROM bundles WHERE slug = $1 OR slug LIKE $1 || '-%'",
+        "SELECT slug FROM bundles WHERE (slug = $1 OR slug LIKE $1 || '-%')
+            AND ($2::uuid IS NULL OR id <> $2)",
         base,
+        exclude,
     )
     .fetch_all(&state.db)
     .await?;
@@ -264,7 +273,7 @@ async fn create(
         return Err(ApiError::BadRequest("name is required".into()));
     }
     let kind = parse_kind(input.kind.as_deref())?;
-    let slug = unique_slug(&state, &name).await?;
+    let slug = unique_slug(&state, &name, None).await?;
 
     let mut tx = state.db.begin().await?;
     let bundle_id: Uuid = sqlx::query_scalar!(
@@ -389,11 +398,24 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiErr
     })
 }
 
+/// Resolve a path segment that is either a bundle's UUID or its slug to the id.
+/// Canonical URLs use the slug; a UUID still resolves and the client redirects.
+async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
+    if let Ok(id) = Uuid::parse_str(key) {
+        return Ok(id);
+    }
+    sqlx::query_scalar!("SELECT id FROM bundles WHERE slug = $1", key)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
 async fn detail(
     State(state): State<AppState>,
     _user: User,
-    Path(id): Path<Uuid>,
+    Path(key): Path<String>,
 ) -> Result<Json<BundleDetail>, ApiError> {
+    let id = resolve_id(&state, &key).await?;
     fetch_detail(&state, id).await.map(Json)
 }
 
@@ -405,17 +427,21 @@ async fn update(
 ) -> Result<Json<BundleDetail>, ApiError> {
     user.require_can_edit(bundle_created_by(&state, id).await?)?;
     let kind = parse_kind(input.kind.as_deref())?;
+    // The slug follows the name (see models::update).
+    let name = input.name.trim();
+    let slug = unique_slug(&state, name, Some(id)).await?;
 
     let mut tx = state.db.begin().await?;
     sqlx::query!(
-        r#"UPDATE bundles SET name = $2, creator_id = $3, source_url = $4,
+        r#"UPDATE bundles SET name = $2, slug = $6, creator_id = $3, source_url = $4,
                kind = $5::bundle_kind, updated_at = now()
            WHERE id = $1"#,
         id,
-        input.name.trim(),
+        name,
         input.creator_id,
         input.source_url,
         kind as _,
+        slug,
     )
     .execute(&mut *tx)
     .await?;

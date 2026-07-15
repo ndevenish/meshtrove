@@ -85,7 +85,7 @@ export default function BundleEditDialog({
       }
       await queryClient.invalidateQueries()
       onClose()
-      navigate(`/bundles/${saved.id}`)
+      navigate(`/bundles/${saved.slug}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

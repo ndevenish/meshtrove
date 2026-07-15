@@ -8,7 +8,7 @@ import { type BundleSummary, imageUrl } from '../api'
 /// shows the member-model count; a "Bundle" chip makes the mixed grid scannable.
 type BundleCardData = Pick<
   BundleSummary,
-  'id' | 'name' | 'creator_name' | 'primary_image_id' | 'model_count' | 'tags'
+  'id' | 'slug' | 'name' | 'creator_name' | 'primary_image_id' | 'model_count' | 'tags'
 >
 
 export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
@@ -16,7 +16,7 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
     <Card variant="outlined" sx={{ height: '100%' }}>
       <CardActionArea
         component={Link}
-        to={`/bundles/${bundle.id}`}
+        to={`/bundles/${bundle.slug}`}
         sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'stretch' }}
       >
         <Box

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   Container,
   Box,
@@ -33,6 +33,7 @@ import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 
 export default function ModelPage() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const { user } = useAuth()
   const queryClient = useQueryClient()
   // Edit *mode*, not an edit dialog: the fields become editable where they sit,
@@ -54,6 +55,17 @@ export default function ModelPage() {
     queryFn: () => api.model(id!),
     enabled: !!id,
   })
+
+  // Canonical URL is the slug. Arriving by UUID (a redirect, an old bookmark) —
+  // or by a slug that a rename has since moved on from — lands here, resolves,
+  // then rewrites the address bar to the slug. Seed the slug's cache with what
+  // we already hold so the swap doesn't flash a reload.
+  useEffect(() => {
+    if (model && id !== model.slug) {
+      queryClient.setQueryData(['model', model.slug], model)
+      navigate(`/models/${model.slug}`, { replace: true })
+    }
+  }, [model, id, navigate, queryClient])
 
   // A render finishing adds a picture to this page, and the page has no way to
   // know: the job writes the image straight to the database. So watch the queue.
@@ -346,7 +358,7 @@ export default function ModelPage() {
                   color="primary"
                   variant="outlined"
                   component={Link}
-                  to={`/bundles/${b.id}`}
+                  to={`/bundles/${b.slug}`}
                   clickable
                 />
               ))}

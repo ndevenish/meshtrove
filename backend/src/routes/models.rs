@@ -260,6 +260,7 @@ pub struct ModelDetail {
 #[derive(Serialize, ToSchema)]
 pub struct BundleRef {
     pub id: Uuid,
+    pub slug: String,
     pub name: String,
 }
 
@@ -276,11 +277,20 @@ pub struct ImageSummary {
     pub variant_id: Option<Uuid>,
 }
 
-pub async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiError> {
+/// A slug free among all models except `exclude` (the row being renamed, so a
+/// no-op rename keeps its own slug instead of colliding with itself and gaining
+/// a `-2`). `None` when creating.
+pub async fn unique_slug(
+    state: &AppState,
+    name: &str,
+    exclude: Option<Uuid>,
+) -> Result<String, ApiError> {
     let base = slugify(name);
     let taken: Vec<String> = sqlx::query_scalar!(
-        "SELECT slug FROM models WHERE slug = $1 OR slug LIKE $1 || '-%'",
+        "SELECT slug FROM models WHERE (slug = $1 OR slug LIKE $1 || '-%')
+            AND ($2::uuid IS NULL OR id <> $2)",
         base,
+        exclude,
     )
     .fetch_all(&state.db)
     .await?;
@@ -327,7 +337,7 @@ async fn create(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
     }
-    let slug = unique_slug(&state, &name).await?;
+    let slug = unique_slug(&state, &name, None).await?;
 
     let mut tx = state.db.begin().await?;
     let model_id: Uuid = sqlx::query_scalar!(
@@ -422,7 +432,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
 
     let bundles = sqlx::query_as!(
         BundleRef,
-        r#"SELECT b.id, b.name FROM bundles b
+        r#"SELECT b.id, b.slug, b.name FROM bundles b
            JOIN bundle_models bm ON bm.bundle_id = b.id
            WHERE bm.model_id = $1 ORDER BY b.name"#,
         id,
@@ -462,11 +472,25 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
     })
 }
 
+/// Resolve a path segment that is either a model's UUID or its slug to the id.
+/// Canonical URLs use the slug; a UUID still resolves (the client redirects it
+/// to the slug), and so does an id typed by hand or held in an old bookmark.
+async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
+    if let Ok(id) = Uuid::parse_str(key) {
+        return Ok(id);
+    }
+    sqlx::query_scalar!("SELECT id FROM models WHERE slug = $1", key)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
 async fn detail(
     State(state): State<AppState>,
     _user: User,
-    Path(id): Path<Uuid>,
+    Path(key): Path<String>,
 ) -> Result<Json<ModelDetail>, ApiError> {
+    let id = resolve_id(&state, &key).await?;
     fetch_detail(&state, id).await.map(Json)
 }
 
@@ -485,6 +509,12 @@ async fn update(
 ) -> Result<Json<ModelDetail>, ApiError> {
     user.require_can_edit(model_created_by(&state, id).await?)?;
 
+    // The slug follows the name: a rename gives a new URL, and the old UUID (or
+    // old slug, if bookmarked) still resolves and redirects here. Exclude self so
+    // an unchanged name keeps its slug rather than colliding into a `-2`.
+    let name = input.name.trim();
+    let slug = unique_slug(&state, name, Some(id)).await?;
+
     let mut tx = state.db.begin().await?;
     // The purchase fields coalesce; the rest replace. No editor asks for a licence
     // or a price any more, so an omitted one means "I wasn't told about this",
@@ -492,7 +522,7 @@ async fn update(
     // licence and the price off an imported model. Name, creator and source_url
     // are on the form, so a cleared one there is a real instruction to clear.
     sqlx::query!(
-        r#"UPDATE models SET name = $2, creator_id = $3, source_url = $4,
+        r#"UPDATE models SET name = $2, slug = $9, creator_id = $3, source_url = $4,
                license = coalesce($5, license),
                purchase_price = coalesce($6::float8::numeric(10,2), purchase_price),
                purchase_date = coalesce($7, purchase_date),
@@ -500,13 +530,14 @@ async fn update(
                updated_at = now()
            WHERE id = $1"#,
         id,
-        input.name.trim(),
+        name,
         input.creator_id,
         input.source_url,
         input.license,
         input.purchase_price,
         input.purchase_date,
         input.order_ref,
+        slug,
     )
     .execute(&mut *tx)
     .await?;

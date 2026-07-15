@@ -1,4 +1,5 @@
 import { forwardRef, useImperativeHandle, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Alert, Autocomplete, MenuItem, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -16,6 +17,7 @@ const BundleDetailsEditor = forwardRef<
   }
 >(function BundleDetailsEditor({ bundle, onDone, onBusyChange }, ref) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [name, setName] = useState(bundle.name)
   const [kind, setKind] = useState(bundle.kind)
   const [creatorName, setCreatorName] = useState(bundle.creator_name ?? '')
@@ -41,7 +43,7 @@ const BundleDetailsEditor = forwardRef<
         const existing = (creators ?? []).find((c) => c.name.toLowerCase() === typed.toLowerCase())
         creator_id = existing ? existing.id : (await api.createCreator({ name: typed })).id
       }
-      await api.updateBundle(bundle.id, {
+      const saved = await api.updateBundle(bundle.id, {
         name: name.trim(),
         creator_id,
         kind,
@@ -52,9 +54,13 @@ const BundleDetailsEditor = forwardRef<
       if (description !== (bundle.description_md ?? '')) {
         await api.updateDescription('bundles', bundle.id, description)
       }
-      await queryClient.invalidateQueries({ queryKey: ['bundle', bundle.id] })
+      // A rename moves the slug and the URL — go to the canonical slug and
+      // refetch there, since the old slug no longer resolves (see
+      // ModelDetailsEditor). A no-op navigation when the slug is unchanged.
+      await queryClient.invalidateQueries({ queryKey: ['bundle', saved.slug] })
       await queryClient.invalidateQueries({ queryKey: ['creators'] })
       await queryClient.invalidateQueries({ queryKey: ['tags'] })
+      navigate(`/bundles/${saved.slug}`, { replace: true })
       onDone()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

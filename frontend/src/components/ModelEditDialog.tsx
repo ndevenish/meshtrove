@@ -99,7 +99,7 @@ export default function ModelEditDialog({
       }
       await queryClient.invalidateQueries()
       onClose()
-      navigate(`/models/${saved.id}`)
+      navigate(`/models/${saved.slug}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

@@ -1,4 +1,5 @@
 import { forwardRef, useImperativeHandle, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Alert, Autocomplete, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -28,6 +29,7 @@ const ModelDetailsEditor = forwardRef<
   }
 >(function ModelDetailsEditor({ model, onDone, onBusyChange }, ref) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   // This editor is only ever mounted in edit mode, and it carries the "Upload
   // files to this model" box — so while it is up, the app-wide drop overlay must
   // stand aside or it swallows the drop and stages an import instead.
@@ -61,7 +63,7 @@ const ModelDetailsEditor = forwardRef<
         const existing = (creators ?? []).find((c) => c.name.toLowerCase() === typed.toLowerCase())
         creator_id = existing ? existing.id : (await api.createCreator({ name: typed })).id
       }
-      await api.updateModel(model.id, {
+      const saved = await api.updateModel(model.id, {
         name: name.trim(),
         creator_id,
         source_url: sourceUrl.trim() || null,
@@ -73,9 +75,14 @@ const ModelDetailsEditor = forwardRef<
       if (description !== (model.description_md ?? '')) {
         await api.updateDescription('models', model.id, description)
       }
-      await queryClient.invalidateQueries({ queryKey: ['model', model.id] })
+      // A rename moves the slug, and with it the URL: go to the canonical slug
+      // and refetch there. The old slug in the address bar no longer resolves,
+      // so we must navigate rather than refetch it. When the slug is unchanged
+      // this is a no-op navigation and the invalidate just refreshes in place.
+      await queryClient.invalidateQueries({ queryKey: ['model', saved.slug] })
       await queryClient.invalidateQueries({ queryKey: ['creators'] })
       await queryClient.invalidateQueries({ queryKey: ['tags'] })
+      navigate(`/models/${saved.slug}`, { replace: true })
       onDone()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

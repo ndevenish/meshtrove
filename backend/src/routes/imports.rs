@@ -411,7 +411,7 @@ async fn commit(
     let result = match &input {
         CommitInput::NewModel { name, meta, .. } => {
             let name = named(name);
-            let slug = models::unique_slug(&state, &name).await?;
+            let slug = models::unique_slug(&state, &name, None).await?;
             let model_id: Uuid = sqlx::query_scalar!(
                 "INSERT INTO models (name, slug, creator_id, created_by)
                  VALUES ($1, $2, $3, $4) RETURNING id",
@@ -457,7 +457,7 @@ async fn commit(
         } => {
             let name = named(name);
             let bundle_kind = parse_bundle_kind(kind.as_deref())?;
-            let slug = bundles::unique_slug(&state, &name).await?;
+            let slug = bundles::unique_slug(&state, &name, None).await?;
             let bundle_id: Uuid = sqlx::query_scalar!(
                 "INSERT INTO bundles (name, slug, creator_id, source_url, kind, created_by)
                  VALUES ($1, $2, $3, $4, $5::bundle_kind, $6) RETURNING id",

@@ -143,7 +143,7 @@ export default function ImportPage() {
             : { target: 'new_model', name: name.trim(), layout: spec, ...meta }
       const result = await api.commitImport(staged.id, body)
       await queryClient.invalidateQueries()
-      navigate(result.type === 'model' ? `/models/${result.id}` : `/bundles/${result.id}`)
+      navigate(result.type === 'model' ? `/models/${result.slug}` : `/bundles/${result.slug}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setCommitting(false)

@@ -18,7 +18,7 @@ export default function ModelCard({
     <Card variant="outlined" sx={{ height: '100%' }}>
       <CardActionArea
         component={Link}
-        to={`/models/${model.id}`}
+        to={`/models/${model.slug}`}
         sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'stretch' }}
       >
         <Box
