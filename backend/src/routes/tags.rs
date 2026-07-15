@@ -70,22 +70,24 @@ pub async fn upsert_tag(state: &AppState, name: &str) -> Result<Tag, ApiError> {
     if name.is_empty() {
         return Err(ApiError::BadRequest("tag name is required".into()));
     }
+    // Insert-or-get in one statement. `DO NOTHING` + a `SELECT` fallback used to
+    // race: two concurrent inserts of the same new tag both come back empty — the
+    // loser's INSERT skips (no RETURNING row) and its SELECT runs under a snapshot
+    // taken before the winner committed, so it sees nothing either. `fetch_one`
+    // then hit `RowNotFound`, which the error layer turns into a spurious 404.
+    // `DO UPDATE SET name = tags.name` is a no-op self-update that still locks and
+    // RETURNs the existing row (keeping its original casing — `name` is citext),
+    // so we always get exactly one row back.
     let tag = sqlx::query!(
-        r#"WITH ins AS (
-               INSERT INTO tags (name) VALUES ($1)
-               ON CONFLICT (name) DO NOTHING
-               RETURNING id, name
-           )
-           SELECT id, name as "name!: String" FROM ins
-           UNION ALL
-           SELECT id, name as "name!: String" FROM tags WHERE name = $1
-           LIMIT 1"#,
+        r#"INSERT INTO tags (name) VALUES ($1)
+           ON CONFLICT (name) DO UPDATE SET name = tags.name
+           RETURNING id, name as "name!: String""#,
         name,
     )
     .fetch_one(&state.db)
     .await?;
     Ok(Tag {
-        id: tag.id.expect("tag id"),
+        id: tag.id,
         name: tag.name,
         model_count: 0,
     })
