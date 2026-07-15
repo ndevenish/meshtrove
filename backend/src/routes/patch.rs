@@ -653,7 +653,7 @@ async fn apply(
                     .await?;
             }
             for name in &pm.tags {
-                let tag = upsert_tag(&state, name).await?;
+                let tag = upsert_tag(&mut *tx, name).await?;
                 let added = sqlx::query!(
                     "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2)
                      ON CONFLICT DO NOTHING",

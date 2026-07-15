@@ -298,7 +298,6 @@ pub async fn unique_slug(state: &AppState, name: &str) -> Result<String, ApiErro
 
 async fn set_model_tags(
     tx: &mut sqlx::PgConnection,
-    state: &AppState,
     model_id: Uuid,
     tags: &[String],
 ) -> Result<(), ApiError> {
@@ -306,7 +305,7 @@ async fn set_model_tags(
         .execute(&mut *tx)
         .await?;
     for tag in tags {
-        let tag = upsert_tag(state, tag).await?;
+        let tag = upsert_tag(&mut *tx, tag).await?;
         sqlx::query!(
             "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             model_id,
@@ -349,7 +348,7 @@ async fn create(
     .fetch_one(&mut *tx)
     .await?;
 
-    set_model_tags(&mut tx, &state, model_id, &input.tags).await?;
+    set_model_tags(&mut tx, model_id, &input.tags).await?;
 
     if let Some(body) = &input.description_md {
         sqlx::query!(
@@ -511,7 +510,7 @@ async fn update(
     )
     .execute(&mut *tx)
     .await?;
-    set_model_tags(&mut tx, &state, id, &input.tags).await?;
+    set_model_tags(&mut tx, id, &input.tags).await?;
     tx.commit().await?;
 
     fetch_detail(&state, id).await.map(Json)

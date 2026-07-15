@@ -60,12 +60,23 @@ async fn create(
     Json(input): Json<TagInput>,
 ) -> Result<Json<Tag>, ApiError> {
     user.require_editor()?;
-    let tag = upsert_tag(&state, &input.name).await?;
+    let tag = upsert_tag(&state.db, &input.name).await?;
     Ok(Json(tag))
 }
 
 /// Get-or-create by (case-insensitive) name; reused by model tagging.
-pub async fn upsert_tag(state: &AppState, name: &str) -> Result<Tag, ApiError> {
+///
+/// Runs on whatever executor the caller passes — a pool for a one-off, or the
+/// caller's own `&mut *tx` when it is mid-transaction. Callers that hold an open
+/// write transaction MUST pass that transaction: upserting on a second pooled
+/// connection while the first holds `model_tags`/`bundle_tags` FK locks made one
+/// logical write straddle two connections, and a large patch (dozens of shared
+/// tags) could stall for tens of seconds waiting on locks its own transaction
+/// held.
+pub async fn upsert_tag<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    name: &str,
+) -> Result<Tag, ApiError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(ApiError::BadRequest("tag name is required".into()));
@@ -84,7 +95,7 @@ pub async fn upsert_tag(state: &AppState, name: &str) -> Result<Tag, ApiError> {
            RETURNING id, name as "name!: String""#,
         name,
     )
-    .fetch_one(&state.db)
+    .fetch_one(executor)
     .await?;
     Ok(Tag {
         id: tag.id,

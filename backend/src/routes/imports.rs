@@ -416,11 +416,11 @@ async fn commit(
             )
             .fetch_one(&mut *tx)
             .await?;
-            apply_meta(&mut tx, &state, model_id, meta, user.id).await?;
+            apply_meta(&mut tx, model_id, meta, user.id).await?;
             if let Some(plan) = &carve
                 && let Some(planned) = plan.models.first()
             {
-                add_model_tags(&mut tx, &state, model_id, &planned.tags).await?;
+                add_model_tags(&mut tx, model_id, &planned.tags).await?;
                 carve_variants(&mut tx, model_id, &planned.variants, user.id).await?;
             }
             // Whatever the carve didn't claim (or all of it, with no layout)
@@ -459,12 +459,11 @@ async fn commit(
             .await?;
             if let Some(plan) = &carve {
                 let created =
-                    carve_into_bundle(&mut tx, &state, bundle_id, meta.creator_id, plan, user.id)
-                        .await?;
+                    carve_into_bundle(&mut tx, bundle_id, meta.creator_id, plan, user.id).await?;
                 // The box set was bought once: what was typed on the import page
                 // is true of every model the carve just pulled out of it.
                 for model_id in &created {
-                    apply_meta(&mut tx, &state, *model_id, meta, user.id).await?;
+                    apply_meta(&mut tx, *model_id, meta, user.id).await?;
                 }
                 render_models.extend(created);
             }
@@ -495,12 +494,12 @@ async fn commit(
             if let Some(plan) = &carve {
                 let creator = meta.creator_id.or(target.creator_id);
                 let created =
-                    carve_into_bundle(&mut tx, &state, *bundle_id, creator, plan, user.id).await?;
+                    carve_into_bundle(&mut tx, *bundle_id, creator, plan, user.id).await?;
                 // Only the models this drop *created*: a member that was already
                 // in the bundle has its own metadata, and a later 75mm pack has no
                 // business rewriting it.
                 for model_id in &created {
-                    apply_meta(&mut tx, &state, *model_id, meta, user.id).await?;
+                    apply_meta(&mut tx, *model_id, meta, user.id).await?;
                 }
                 render_models.extend(created);
             }
@@ -683,7 +682,6 @@ async fn carve_variants(
 /// the import names a different one.
 async fn apply_meta(
     tx: &mut sqlx::PgConnection,
-    state: &AppState,
     model_id: Uuid,
     meta: &ImportMeta,
     user_id: Uuid,
@@ -710,7 +708,7 @@ async fn apply_meta(
 
     // Additive, like every other tagging path: the layout's captured tags and
     // the ones typed on the import page both describe the model.
-    add_model_tags(tx, state, model_id, &meta.tags).await?;
+    add_model_tags(tx, model_id, &meta.tags).await?;
 
     if let Some(body) = meta
         .description_md
@@ -734,12 +732,11 @@ async fn apply_meta(
 /// Additive model tagging — a carve never removes tags a model already has.
 async fn add_model_tags(
     tx: &mut sqlx::PgConnection,
-    state: &AppState,
     model_id: Uuid,
     tags: &[String],
 ) -> Result<(), ApiError> {
     for name in tags {
-        let tag = upsert_tag(state, name).await?;
+        let tag = upsert_tag(&mut *tx, name).await?;
         sqlx::query!(
             "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             model_id,
@@ -757,7 +754,6 @@ async fn add_model_tags(
 /// the models the 32mm drop created. Returns newly created model ids.
 async fn carve_into_bundle(
     tx: &mut sqlx::PgConnection,
-    state: &AppState,
     bundle_id: Uuid,
     bundle_creator: Option<Uuid>,
     plan: &Plan,
@@ -808,7 +804,7 @@ async fn carve_into_bundle(
                 model_id
             }
         };
-        add_model_tags(&mut *tx, state, model_id, &planned.tags).await?;
+        add_model_tags(&mut *tx, model_id, &planned.tags).await?;
         carve_variants(&mut *tx, model_id, &planned.variants, user_id).await?;
     }
     Ok(created)
