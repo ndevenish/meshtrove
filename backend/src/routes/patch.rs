@@ -104,6 +104,18 @@ impl PatchModel {
         }
         keys
     }
+    /// Each spelling as an ordered list of words, for the prefix fallback: a
+    /// member whose whole name is the leading run here (`Crocodile` in `Crocodile
+    /// Buried Tomb`) is a match even though the collapsed strings differ.
+    fn word_spellings(&self) -> Vec<Vec<String>> {
+        self.name
+            .iter()
+            .chain(self.match_hint.name.iter())
+            .chain(self.match_hint.aliases.iter())
+            .map(|s| words(s))
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
 }
 
 /// Collapse camel case, spaces, underscores and hyphens to nothing, lowercased —
@@ -113,6 +125,18 @@ fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// The same name split into its words, in order (`AdvisorMummy` → `["advisor",
+/// "mummy"]`): `expand_camel_case` puts the spaces back, then we lowercase and
+/// split on anything non-alphanumeric. Ordered, unlike `normalize`, so a prefix
+/// match can tell that "Crocodile Buried Tomb" *starts with* "Crocodile".
+fn words(s: &str) -> Vec<String> {
+    crate::util::expand_camel_case(s)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
         .collect()
 }
 
@@ -181,15 +205,27 @@ async fn bundle_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<Member>
 
 /// For each patch model, the member ids it could be. 0 = unmatched, 1 = matched,
 /// >1 = ambiguous (the user picks).
+///
+/// Two tiers. First an exact match on the collapsed name, so a clean
+/// "Advisor Mummy" always wins its `AdvisorMummy` folder outright. Only when that
+/// finds nothing do we fall back to a prefix match: the scraped name usually
+/// leads with the model and trails the bundle or category it came from
+/// ("Crocodile Buried Tomb"), so a member whose whole name is the leading run of
+/// words is a candidate. If several members prefix-match we keep the longest
+/// (most specific) one, and if still tied use the scraped `category` — carried as
+/// a tag on the model it belongs to — to break it.
 fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
     let mut by_key: HashMap<String, Vec<Uuid>> = HashMap::new();
     for m in members {
         by_key.entry(normalize(&m.name)).or_default().push(m.id);
     }
+    let member_words: Vec<Vec<String>> = members.iter().map(|m| words(&m.name)).collect();
+
     patch
         .models
         .iter()
         .map(|pm| {
+            // Tier 1: exact on the collapsed name.
             let mut ids: Vec<Uuid> = Vec::new();
             for key in pm.match_keys() {
                 for id in by_key.get(&key).into_iter().flatten() {
@@ -198,7 +234,52 @@ fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
                     }
                 }
             }
-            ids
+            if !ids.is_empty() {
+                return ids;
+            }
+
+            // Tier 2: prefix fallback.
+            let spellings = pm.word_spellings();
+            let mut cands: Vec<usize> = member_words
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| !w.is_empty() && spellings.iter().any(|s| s.starts_with(w)))
+                .map(|(i, _)| i)
+                .collect();
+
+            // Prefer the most specific: the longest name that still fits, so
+            // "WarriorMummy" beats a bare "Warrior".
+            if cands.len() > 1 {
+                let longest = cands
+                    .iter()
+                    .map(|&i| member_words[i].len())
+                    .max()
+                    .unwrap_or(0);
+                cands.retain(|&i| member_words[i].len() == longest);
+            }
+
+            // Still tied: the scraped category (Enemies, NPCs, …) rides along as a
+            // tag on the model it belongs to. Narrow to members carrying it — but
+            // only if that leaves at least one, so a category no member happens to
+            // tag doesn't wipe out an otherwise-good set.
+            if cands.len() > 1
+                && let Some(cat) = pm
+                    .category
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+            {
+                let by_cat: Vec<usize> = cands
+                    .iter()
+                    .copied()
+                    .filter(|&i| members[i].tags.iter().any(|t| t.eq_ignore_ascii_case(cat)))
+                    .collect();
+                if !by_cat.is_empty() {
+                    cands = by_cat;
+                }
+            }
+
+            cands.into_iter().map(|i| members[i].id).collect()
         })
         .collect()
 }
@@ -809,4 +890,114 @@ async fn bundle_created_by(state: &AppState, bundle_id: Uuid) -> Result<Uuid, Ap
         .fetch_optional(&state.db)
         .await?
         .ok_or(ApiError::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(name: &str, tags: &[&str]) -> Member {
+        Member {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    /// A patch model that matches on `scraped` (its scrape name), with a category.
+    fn pm(scraped: &str, category: Option<&str>) -> PatchModel {
+        PatchModel {
+            match_hint: MatchHint {
+                name: Some(scraped.into()),
+                aliases: Vec::new(),
+            },
+            name: None,
+            tags: Vec::new(),
+            image: None,
+            category: category.map(str::to_string),
+        }
+    }
+
+    fn resolve_one(pm: PatchModel, members: &[Member]) -> Vec<Uuid> {
+        let patch = Patch {
+            bundle: PatchBundle::default(),
+            models: vec![pm],
+        };
+        resolve(&patch, members).pop().unwrap()
+    }
+
+    #[test]
+    fn exact_collapsed_name_still_matches() {
+        let members = [member("AdvisorMummy", &[])];
+        assert_eq!(
+            resolve_one(pm("Advisor Mummy", None), &members),
+            vec![members[0].id]
+        );
+    }
+
+    #[test]
+    fn prefix_match_ignores_trailing_bundle_words() {
+        // The reported case: "Crocodile Buried Tomb" carries the bundle name, and
+        // there is only one Crocodile, so it matches with no ambiguity.
+        let members = [member("Crocodile", &[]), member("Camel", &[])];
+        assert_eq!(
+            resolve_one(pm("Crocodile Buried Tomb", Some("Enemies")), &members),
+            vec![members[0].id]
+        );
+    }
+
+    #[test]
+    fn prefix_is_ordered_not_a_loose_substring() {
+        // "Mummy" is inside the scraped name but not its leading run, so it is not
+        // a prefix match — only the model that actually leads matches.
+        let members = [member("Mummy", &[]), member("WarriorMummy", &[])];
+        assert_eq!(
+            resolve_one(pm("Warrior Mummy Buried Tomb", None), &members),
+            vec![members[1].id]
+        );
+    }
+
+    #[test]
+    fn longest_prefix_wins_over_a_shorter_one() {
+        let members = [member("Warrior", &[]), member("WarriorMummy", &[])];
+        assert_eq!(
+            resolve_one(pm("Warrior Mummy Buried Tomb", None), &members),
+            vec![members[1].id]
+        );
+    }
+
+    #[test]
+    fn category_breaks_a_tie_among_equal_length_prefixes() {
+        // Two same-named models, told apart only by the category they came from.
+        let members = [member("Gold", &["Enemies"]), member("Gold", &["Bonus"])];
+        assert_eq!(
+            resolve_one(pm("Gold Buried Tomb", Some("Bonus")), &members),
+            vec![members[1].id]
+        );
+    }
+
+    #[test]
+    fn category_that_no_candidate_carries_leaves_the_tie() {
+        // The category must not wipe out an otherwise-good set: with neither Gold
+        // tagged NPCs, both stay and the user picks.
+        let members = [member("Gold", &["Enemies"]), member("Gold", &["Bonus"])];
+        let got = resolve_one(pm("Gold Buried Tomb", Some("NPCs")), &members);
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn single_prefix_matches_without_a_category_tag() {
+        // Crocodile carries no category tag at all; a lone prefix still matches.
+        let members = [member("Crocodile", &["32mm", "tomb"])];
+        assert_eq!(
+            resolve_one(pm("Crocodile Buried Tomb", Some("Enemies")), &members),
+            vec![members[0].id]
+        );
+    }
+
+    #[test]
+    fn no_prefix_is_no_match() {
+        let members = [member("Crocodile", &[]), member("Camel", &[])];
+        assert!(resolve_one(pm("Dragon Buried Tomb", None), &members).is_empty());
+    }
 }
