@@ -89,10 +89,20 @@ export default function BundlePatchDialog({
       try {
         const p = await api.previewBundlePatch(bundleId, file)
         setPreview(p)
-        // Pre-tick a rename wherever the auto-matched model's name differs from the
-        // scraped one — the common case is that the scraped name is the better one.
+        // Pre-tick a rename wherever the scraped name is one the matched model
+        // isn't already known by — its current name or any of its aliases. The
+        // scraped name is usually the better one; but a name already on the
+        // model's alias list is a rename we've effectively seen and declined, so
+        // don't offer it again.
+        const knownNames = new Map(
+          p.members.map((m) => [m.id, new Set([m.name, ...m.aliases].map((n) => n.toLowerCase()))]),
+        )
         setRenameSet(
-          new Set(p.matched.filter((m) => m.patch_name !== m.model_name).map((m) => String(m.key))),
+          new Set(
+            p.matched
+              .filter((m) => !knownNames.get(m.model_id)?.has(m.patch_name.toLowerCase()))
+              .map((m) => String(m.key)),
+          ),
         )
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
@@ -105,7 +115,7 @@ export default function BundlePatchDialog({
 
   // When the parent hands us a file already dropped on its inline box, preview it
   // the moment we open — once per file, tracked by ref so a re-render doesn't
-  // re-fire it and "Choose a different file" (which clears `zip`) still works.
+  // re-fire it; the ref resets on close so the next drop previews afresh.
   const previewedFile = useRef<File | null>(null)
   useEffect(() => {
     if (!open) {
@@ -188,7 +198,6 @@ export default function BundlePatchDialog({
 
   // The member a row currently targets (fixed match, or the manual pick).
   const targetId = (r: Row) => r.fixed?.id ?? resolved[r.key] ?? ''
-  const targetName = (r: Row) => r.fixed?.name ?? membersById.get(resolved[r.key] ?? '')?.name
   // Tags that would actually be added: the patch's, minus what the target has.
   // (Matched rows already arrive pre-filtered; recompute for manual picks.)
   const addTags = (r: Row) => {
@@ -196,9 +205,18 @@ export default function BundlePatchDialog({
     const have = new Set((membersById.get(targetId(r))?.tags ?? []).map((t) => t.toLowerCase()))
     return r.patchTags.filter((t) => !have.has(t.toLowerCase()))
   }
+  // A name the target model already answers to — its current name or any alias.
+  // Renaming to such a name is one we've effectively already declined, so it is
+  // not offered.
+  const isKnownName = (memberId: string, name: string) => {
+    const m = membersById.get(memberId)
+    if (!m) return false
+    const lower = name.toLowerCase()
+    return [m.name, ...m.aliases].some((n) => n.toLowerCase() === lower)
+  }
   const nameDiffers = (r: Row) => {
-    const n = targetName(r)
-    return !!n && n !== r.label
+    const id = targetId(r)
+    return !!id && !isKnownName(id, r.label)
   }
 
   const renameable = rows.filter((r) => targetId(r) && nameDiffers(r)).map((r) => r.key)
@@ -214,8 +232,9 @@ export default function BundlePatchDialog({
 
   const pickMember = (row: Row, id: string) => {
     setResolved((r) => ({ ...r, [row.key]: id }))
-    // Default the rename on when the pick renames, like the auto matches.
-    const differs = !!id && membersById.get(id)?.name !== row.label
+    // Default the rename on when the pick renames, like the auto matches — but
+    // not to a name the model already answers to.
+    const differs = !!id && !isKnownName(id, row.label)
     setRenameSet((s) => {
       const next = new Set(s)
       if (differs) next.add(row.key)
@@ -547,11 +566,6 @@ export default function BundlePatchDialog({
           </Button>
         ) : (
           <>
-            {preview && (
-              <Button onClick={reset} disabled={busy}>
-                Choose a different file
-              </Button>
-            )}
             <Box sx={{ flexGrow: 1 }} />
             <Button onClick={onClose} disabled={busy}>
               Cancel

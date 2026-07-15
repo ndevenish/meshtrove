@@ -506,6 +506,8 @@ export interface PatchMember {
   id: string
   name: string
   tags: string[]
+  /** other names this model already answers to (skip offering a rename to one) */
+  aliases: string[]
 }
 
 export interface PatchUnresolvedRow {

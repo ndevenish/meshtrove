@@ -388,6 +388,9 @@ struct Candidate {
     id: Uuid,
     name: String,
     tags: Vec<String>,
+    /// Other names this model already answers to. The UI uses them to skip
+    /// offering a rename to a name the model is already known by.
+    aliases: Vec<String>,
 }
 
 async fn preview(
@@ -413,6 +416,7 @@ async fn preview(
         id: m.id,
         name: m.name.clone(),
         tags: m.tags.iter().map(|t| t.to_lowercase()).collect(),
+        aliases: m.aliases.clone(),
     };
     let patch_tags = |pm: &PatchModel| pm.tags.iter().map(|t| t.to_lowercase()).collect::<Vec<_>>();
     let has_image = |pm: &PatchModel| {
