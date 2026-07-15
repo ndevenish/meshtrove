@@ -143,11 +143,11 @@ pub struct GroupInfo {
 /// to. `tags: null` = unmapped (prompts the mapping table).
 #[derive(Serialize, ToSchema)]
 pub struct CapturedValue {
-    /// First-seen raw spelling; the value-map key is its lowercase.
+    /// The captured value, humanised (underscores and camelCase turned into
+    /// spaces). The same normalisation feeds its identity, so `Supported_LYCHEE`,
+    /// `Supported LYCHEE` and `SupportedLychee` are one value shown once; the
+    /// value-map key is its lowercase.
     pub raw: String,
-    /// The raw value humanised for the mapping table (underscores and camelCase
-    /// turned into spaces). Cosmetic only — `raw` stays the mapping key.
-    pub display: String,
     pub tags: Option<Vec<String>>,
 }
 
@@ -184,6 +184,13 @@ fn fold(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
+/// Identity of a captured variant-tag value. Humanise first, so the folder
+/// spelled `Supported_LYCHEE`, `Supported LYCHEE` and `SupportedLychee` all
+/// name one value — one row in the mapping table, one value-map key.
+fn value_key(raw: &str) -> String {
+    fold(&crate::util::humanize_token(raw))
+}
+
 /// Run a layout over a file list. Pure — `vocab` is the lowercased variant-tag
 /// vocabulary, fetched by the caller — so the same call backs the plan
 /// endpoint, the commit, and the tests.
@@ -217,11 +224,15 @@ pub fn analyze(
         ));
     }
 
-    let value_map: HashMap<String, &Vec<String>> =
-        spec.value_map.iter().map(|(k, v)| (fold(k), v)).collect();
+    // Value-map keys are humanised the same way the captures are, so a saved
+    // "supported_lychee" still matches the folder that spelled it any which way.
+    let value_map: HashMap<String, &Vec<String>> = spec
+        .value_map
+        .iter()
+        .map(|(k, v)| (value_key(k), v))
+        .collect();
     let resolve = |raw: &str| -> Option<Vec<String>> {
-        let key = fold(raw);
-        if let Some(tags) = value_map.get(&key) {
+        if let Some(tags) = value_map.get(&value_key(raw)) {
             return Some(
                 tags.iter()
                     .map(|t| fold(t))
@@ -229,7 +240,11 @@ pub fn analyze(
                     .collect(),
             );
         }
-        vocab.contains(&key).then(|| vec![key])
+        // The vocabulary is matched on the exact fold, not the humanised form:
+        // a tag whose name legitimately carries an underscore (lychee_project)
+        // must still resolve when a capture names it outright.
+        let folded = fold(raw);
+        vocab.contains(&folded).then(|| vec![folded])
     };
 
     let mut annotations = Vec::with_capacity(files.len());
@@ -334,14 +349,16 @@ pub fn analyze(
                 }
                 Role::VariantTag => {
                     let resolved = resolve(raw);
-                    values.entry(fold(raw)).or_insert_with(|| CapturedValue {
-                        raw: raw.to_string(),
-                        display: crate::util::humanize_token(raw),
-                        tags: resolved.clone(),
-                    });
+                    let humanised = crate::util::humanize_token(raw);
+                    values
+                        .entry(value_key(raw))
+                        .or_insert_with(|| CapturedValue {
+                            raw: humanised.clone(),
+                            tags: resolved.clone(),
+                        });
                     match resolved {
                         Some(tags) => variant_tags.extend(tags),
-                        None => unmapped.push(raw.to_string()),
+                        None => unmapped.push(humanised),
                     }
                 }
                 Role::Ignore => {}
@@ -454,7 +471,9 @@ mod tests {
                     "supported_lychee".into(),
                     vec!["supported".into(), "lychee_project".into()],
                 ),
-                ("nosupports".into(), vec!["unsupported".into()]),
+                // Keyed the way the folder spells it: humanising splits the
+                // camelCase capture, so a "nosupports" key would never match.
+                ("NoSupports".into(), vec!["unsupported".into()]),
             ]),
             flatten: false,
         }
@@ -553,18 +572,37 @@ mod tests {
             "a.stl",
         )];
         let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
-        // 32mm resolves through the vocabulary; Supported_LYCHEE does not.
-        assert_eq!(plan.unmapped_values(), vec!["Supported_LYCHEE"]);
+        // 32mm resolves through the vocabulary; Supported_LYCHEE does not — and
+        // it is reported humanised, the way it shows in the mapping table.
+        assert_eq!(plan.unmapped_values(), vec!["Supported LYCHEE"]);
         assert_eq!(plan.annotations[0].variant_tags, vec!["32mm"]);
-        assert_eq!(plan.annotations[0].unmapped, vec!["Supported_LYCHEE"]);
-        // The mapping table shows a humanised label, but keeps `raw` as its key.
-        let unmapped = plan
-            .values
-            .iter()
-            .find(|v| v.tags.is_none())
-            .expect("unmapped");
-        assert_eq!(unmapped.raw, "Supported_LYCHEE");
-        assert_eq!(unmapped.display, "Supported LYCHEE");
+        assert_eq!(plan.annotations[0].unmapped, vec!["Supported LYCHEE"]);
+    }
+
+    #[test]
+    fn separator_styles_are_one_captured_value() {
+        // The same value spelled three ways — underscored, spaced, camelCase —
+        // is one row in the mapping table, keyed by its humanised form, not
+        // three rows that all read the same.
+        let spec = LayoutSpec {
+            pattern: r"([^/]+)/[^/]+\.stl".into(),
+            roles: HashMap::from([("1".into(), Role::VariantTag)]),
+            value_map: HashMap::from([("pre supported".into(), vec!["supported".into()])]),
+            flatten: false,
+        };
+        let files = vec![
+            file(1, "Pre_Supported", "a.stl"),
+            file(2, "Pre Supported", "b.stl"),
+            file(3, "PreSupported", "c.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        assert_eq!(plan.values.len(), 1);
+        assert_eq!(plan.values[0].raw, "Pre Supported");
+        assert_eq!(
+            plan.values[0].tags.as_deref(),
+            Some(&["supported".to_string()][..])
+        );
+        assert!(plan.unmapped_values().is_empty());
     }
 
     #[test]

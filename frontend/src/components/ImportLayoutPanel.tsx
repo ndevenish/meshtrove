@@ -110,12 +110,14 @@ export default function ImportLayoutPanel({
     setPattern(layout.pattern)
     setRoles(layout.roles)
     setValueMap(layout.value_map)
+    setFlatten(layout.flatten ?? false)
   }
 
   const clear = () => {
     setPattern('')
     setRoles({})
     setValueMap({})
+    setFlatten(false)
     setPlan(null)
     setPlanError('')
   }
@@ -167,6 +169,7 @@ export default function ImportLayoutPanel({
         pattern,
         roles,
         value_map: valueMap,
+        flatten,
       })
       setSaveName('')
       setSaveError('')
@@ -333,7 +336,7 @@ export default function ImportLayoutPanel({
                       sx={{ fontFamily: 'monospace', fontSize: 12, minWidth: 180 }}
                       noWrap
                     >
-                      {value.display}
+                      {value.raw}
                     </Typography>
                     <Autocomplete
                       multiple

@@ -73,7 +73,8 @@ async fn list(
 ) -> Result<Json<Vec<ImportLayout>>, ApiError> {
     let rows = sqlx::query!(
         r#"SELECT id, name::text as "name!", creator_id,
-                  jsonb_build_object('pattern', pattern, 'roles', roles, 'value_map', value_map)
+                  jsonb_build_object('pattern', pattern, 'roles', roles,
+                                     'value_map', value_map, 'flatten', flatten)
                       as "spec!: SpecJson"
            FROM import_layouts ORDER BY name"#,
     )
@@ -99,12 +100,13 @@ async fn create(
     user.require_editor()?;
     let name = validate(&input)?;
     let id: Uuid = sqlx::query_scalar!(
-        "INSERT INTO import_layouts (name, pattern, roles, value_map, creator_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO import_layouts (name, pattern, roles, value_map, flatten, creator_id, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
         name,
         input.spec.pattern,
         serde_json::to_value(&input.spec.roles).expect("roles serialize"),
         serde_json::to_value(&input.spec.value_map).expect("value_map serialize"),
+        input.spec.flatten,
         input.creator_id,
         user.id,
     )
@@ -129,14 +131,15 @@ async fn update(
     let name = validate(&input)?;
     let updated = sqlx::query!(
         "UPDATE import_layouts
-            SET name = $2, pattern = $3, roles = $4, value_map = $5, creator_id = $6,
-                updated_at = now()
+            SET name = $2, pattern = $3, roles = $4, value_map = $5, flatten = $6,
+                creator_id = $7, updated_at = now()
           WHERE id = $1",
         id,
         name,
         input.spec.pattern,
         serde_json::to_value(&input.spec.roles).expect("roles serialize"),
         serde_json::to_value(&input.spec.value_map).expect("value_map serialize"),
+        input.spec.flatten,
         input.creator_id,
     )
     .execute(&state.db)

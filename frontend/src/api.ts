@@ -248,10 +248,10 @@ export interface GroupInfo {
 }
 
 export interface CapturedValue {
+  /** the captured value, humanised (underscores/camelCase → spaces); its
+      lowercase is the value-map key, so `Supported_LYCHEE` and `SupportedLychee`
+      are one entry */
   raw: string
-  /** `raw` humanised for display (underscores/camelCase → spaces); the value
-      map still keys off `raw`, so use this for the label only */
-  display: string
   /** resolved variant tag names; null = unmapped */
   tags: string[] | null
 }
