@@ -101,7 +101,9 @@ export default function BundlePatchDialog({
     try {
       const result = await api.applyBundlePatch(bundleId, zip, {
         ...opts,
-        matches: resolved,
+        // Drop rows left on "skip": an empty value is not a member id, and the
+        // server rejects the whole request trying to parse "" as a UUID.
+        matches: Object.fromEntries(Object.entries(resolved).filter(([, v]) => v)),
         rename: [...renameSet],
       })
       await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
@@ -128,6 +130,9 @@ export default function BundlePatchDialog({
     hasImage: boolean
     fixed?: { id: string; name: string }
     choices?: PatchMember[]
+    /** how many leading `choices` are the suggested candidates (rest is every
+     * other member, so a wrong or missing auto-match can always be corrected) */
+    shortlist?: number
   }
   const rows: Row[] = useMemo(() => {
     if (!preview) return []
@@ -140,13 +145,18 @@ export default function BundlePatchDialog({
       fixed: { id: m.model_id, name: m.model_name },
     }))
     for (const u of [...preview.ambiguous, ...preview.unmatched_patch]) {
+      // Suggestions first, then every other member — the ambiguous candidate list
+      // is only a shortlist, and the right model may not be on it (a versioned or
+      // renamed member the matcher missed).
+      const others = preview.members.filter((m) => !u.candidates.some((c) => c.id === m.id))
       out.push({
         key: String(u.key),
         label: u.patch_name,
         category: u.category,
         patchTags: u.patch_tags,
         hasImage: u.has_image,
-        choices: u.candidates.length ? u.candidates : preview.members,
+        choices: [...u.candidates, ...others],
+        shortlist: u.candidates.length,
       })
     }
     return out.sort((a, b) => a.label.localeCompare(b.label))
@@ -380,7 +390,12 @@ export default function BundlePatchDialog({
                                 <MenuItem value="">
                                   <em>skip</em>
                                 </MenuItem>
-                                {(r.choices ?? []).map((m) => (
+                                {(r.choices ?? []).flatMap((m, i) => [
+                                  ...(r.shortlist &&
+                                  i === r.shortlist &&
+                                  r.shortlist < (r.choices?.length ?? 0)
+                                    ? [<Divider key="all-members" component="li" />]
+                                    : []),
                                   <MenuItem key={m.id} value={m.id} sx={{ display: 'block' }}>
                                     <Box
                                       sx={{
@@ -402,8 +417,8 @@ export default function BundlePatchDialog({
                                         {m.tags.length ? m.tags.join(', ') : 'no tags'}
                                       </Typography>
                                     </Box>
-                                  </MenuItem>
-                                ))}
+                                  </MenuItem>,
+                                ])}
                               </Select>
                             </FormControl>
                             {renames && (
