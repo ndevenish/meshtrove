@@ -512,6 +512,7 @@ export interface PatchUnresolvedRow {
   patch_name: string
   patch_tags: string[]
   has_image: boolean
+  category: string | null
   /** non-empty for ambiguous rows; empty means "offer the whole member list" */
   candidates: PatchMember[]
 }
@@ -527,6 +528,7 @@ export interface PatchPreview {
     model_name: string
     add_tags: string[]
     has_image: boolean
+    category: string | null
   }[]
   ambiguous: PatchUnresolvedRow[]
   unmatched_patch: PatchUnresolvedRow[]

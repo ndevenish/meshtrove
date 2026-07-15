@@ -65,6 +65,10 @@ struct PatchModel {
     /// Relative path into the zip, or null.
     #[serde(default)]
     image: Option<String>,
+    /// The bundle category it came from (Heroes, Busts, …) — shown to tell two
+    /// same-named models apart.
+    #[serde(default)]
+    category: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -230,6 +234,7 @@ struct MatchedRow {
     /// Tags the patch would add that the model does not already have.
     add_tags: Vec<String>,
     has_image: bool,
+    category: Option<String>,
 }
 
 /// A patch model with no single match — ambiguous or unmatched. Carries the
@@ -240,6 +245,7 @@ struct UnresolvedRow {
     patch_name: String,
     patch_tags: Vec<String>,
     has_image: bool,
+    category: Option<String>,
     /// Present for ambiguous rows (the members it could be); empty when the UI
     /// should offer the whole member list.
     candidates: Vec<Candidate>,
@@ -289,6 +295,7 @@ async fn preview(
                 patch_name: pm.label(),
                 patch_tags: patch_tags(pm),
                 has_image: has_image(pm),
+                category: pm.category.clone(),
                 candidates: Vec::new(),
             }),
             [id] => {
@@ -307,6 +314,7 @@ async fn preview(
                     model_name: member.map(|m| m.name.clone()).unwrap_or_default(),
                     add_tags,
                     has_image: has_image(pm),
+                    category: pm.category.clone(),
                 });
             }
             many => {
@@ -317,6 +325,7 @@ async fn preview(
                     patch_name: pm.label(),
                     patch_tags: patch_tags(pm),
                     has_image: has_image(pm),
+                    category: pm.category.clone(),
                     candidates: many
                         .iter()
                         .filter_map(|id| member_of(*id))

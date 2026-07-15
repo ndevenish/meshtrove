@@ -15,6 +15,7 @@ import {
   MenuItem,
   Select,
   Stack,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import ReactMarkdown from 'react-markdown'
@@ -24,13 +25,13 @@ import { api, type PatchApplyOptions, type PatchMember, type PatchPreview } from
 import Dropzone from './Dropzone'
 
 /// Merge a scraped bundle patch onto this bundle. Drop the
-/// zip, see what matched to which member — and for what did not, pick a member by
-/// hand — tick what to apply, and apply.
+/// zip; every patch model is one row — matched to a member, or a dropdown to pick
+/// one by hand — with the tags it would add, whether it brings an image, and a
+/// rename toggle. Tick what to apply, and apply.
 ///
-/// Defaults encode the usual intent: the scraped photo replaces the auto-generated
-/// render (a real picture beats an f3d preview), tags merge onto what the model
-/// already has. Rename is per-model and off by default — a bigger commitment than
-/// a tag, decided one at a time.
+/// Defaults encode the usual intent: the scraped photo replaces the auto render,
+/// tags merge, and a name the patch improves on is renamed (all pre-ticked, since
+/// that is normally what you want — untick the few you don't).
 export default function BundlePatchDialog({
   bundleId,
   open,
@@ -49,9 +50,7 @@ export default function BundlePatchDialog({
   const [error, setError] = useState('')
   const [done, setDone] = useState('')
 
-  // patch label -> chosen member id (ambiguous + manual matches).
   const [resolved, setResolved] = useState<Record<string, string>>({})
-  // patch labels to rename to the scraped name.
   const [renameSet, setRenameSet] = useState<Set<string>>(new Set())
 
   const [opts, setOpts] = useState<Omit<PatchApplyOptions, 'matches' | 'rename'>>({
@@ -81,7 +80,13 @@ export default function BundlePatchDialog({
     setBusy(true)
     setError('')
     try {
-      setPreview(await api.previewBundlePatch(bundleId, file))
+      const p = await api.previewBundlePatch(bundleId, file)
+      setPreview(p)
+      // Pre-tick a rename wherever the auto-matched model's name differs from the
+      // scraped one — the common case is that the scraped name is the better one.
+      setRenameSet(
+        new Set(p.matched.filter((m) => m.patch_name !== m.model_name).map((m) => m.patch_name)),
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -112,50 +117,54 @@ export default function BundlePatchDialog({
     }
   }
 
-  // Every row that resolves to a member (auto-matched, or manually chosen), with
-  // the target model, the tags that would be added (patch tags minus what the
-  // member already has), and whether a rename would change the name.
+  // One row per patch model. `auto` fixes the member; `choices` (present for
+  // ambiguous / unmatched) offers a dropdown. The chosen member, add-tags and
+  // rename state all derive from here so each model shows up exactly once.
   type Row = {
     label: string
-    modelId: string
-    modelName: string
-    addTags: string[]
+    category: string | null
+    patchTags: string[]
     hasImage: boolean
-    nameDiffers: boolean
+    fixed?: { id: string; name: string }
+    choices?: PatchMember[]
   }
   const rows: Row[] = useMemo(() => {
     if (!preview) return []
-    const out: Row[] = []
-    for (const m of preview.matched) {
-      out.push({
-        label: m.patch_name,
-        modelId: m.model_id,
-        modelName: m.model_name,
-        addTags: m.add_tags,
-        hasImage: m.has_image,
-        nameDiffers: m.patch_name !== m.model_name,
-      })
-    }
-    // Ambiguous + unmatched become rows once (and only when) the user picks a member.
+    const out: Row[] = preview.matched.map((m) => ({
+      label: m.patch_name,
+      category: m.category,
+      patchTags: m.add_tags,
+      hasImage: m.has_image,
+      fixed: { id: m.model_id, name: m.model_name },
+    }))
     for (const u of [...preview.ambiguous, ...preview.unmatched_patch]) {
-      const chosen = resolved[u.patch_name]
-      if (!chosen) continue
-      const member = membersById.get(chosen)
-      const have = new Set((member?.tags ?? []).map((t) => t.toLowerCase()))
       out.push({
         label: u.patch_name,
-        modelId: chosen,
-        modelName: member?.name ?? '',
-        addTags: u.patch_tags.filter((t) => !have.has(t.toLowerCase())),
+        category: u.category,
+        patchTags: u.patch_tags,
         hasImage: u.has_image,
-        nameDiffers: !!member && u.patch_name !== member.name,
+        choices: u.candidates.length ? u.candidates : preview.members,
       })
     }
     return out
-  }, [preview, resolved, membersById])
+  }, [preview])
 
-  // "Select all" targets the rows where a rename would actually change something.
-  const renameable = rows.filter((r) => r.nameDiffers).map((r) => r.label)
+  // The member a row currently targets (fixed match, or the manual pick).
+  const targetId = (r: Row) => r.fixed?.id ?? resolved[r.label] ?? ''
+  const targetName = (r: Row) => r.fixed?.name ?? membersById.get(resolved[r.label] ?? '')?.name
+  // Tags that would actually be added: the patch's, minus what the target has.
+  // (Matched rows already arrive pre-filtered; recompute for manual picks.)
+  const addTags = (r: Row) => {
+    if (r.fixed) return r.patchTags
+    const have = new Set((membersById.get(targetId(r))?.tags ?? []).map((t) => t.toLowerCase()))
+    return r.patchTags.filter((t) => !have.has(t.toLowerCase()))
+  }
+  const nameDiffers = (r: Row) => {
+    const n = targetName(r)
+    return !!n && n !== r.label
+  }
+
+  const renameable = rows.filter((r) => targetId(r) && nameDiffers(r)).map((r) => r.label)
   const allRenamed = renameable.length > 0 && renameable.every((l) => renameSet.has(l))
   const toggleAllRenames = () => setRenameSet(allRenamed ? new Set() : new Set(renameable))
   const toggleRename = (label: string) =>
@@ -166,10 +175,26 @@ export default function BundlePatchDialog({
       return next
     })
 
-  const tagChips = (tags: string[]) =>
-    tags.map((t) => (
-      <Chip key={t} size="small" label={`+${t}`} color="primary" variant="outlined" />
-    ))
+  const pickMember = (label: string, id: string) => {
+    setResolved((r) => ({ ...r, [label]: id }))
+    // Default the rename on when the pick renames, like the auto matches.
+    const differs = !!id && membersById.get(id)?.name !== label
+    setRenameSet((s) => {
+      const next = new Set(s)
+      if (differs) next.add(label)
+      else next.delete(label)
+      return next
+    })
+  }
+
+  // Grid keeps the rename box, the name and the tags in aligned columns across
+  // every row regardless of whether a row has a rename control or a dropdown.
+  const GRID = {
+    display: 'grid',
+    gridTemplateColumns: '34px minmax(220px, 300px) 1fr',
+    alignItems: 'center',
+    columnGap: 8,
+  }
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -195,7 +220,6 @@ export default function BundlePatchDialog({
           />
         ) : (
           <Stack spacing={2}>
-            {/* Bundle cover + description preview */}
             {(preview.bundle_covers.length > 0 || preview.bundle_description) && (
               <Box>
                 <Typography variant="subtitle2" gutterBottom>
@@ -267,10 +291,9 @@ export default function BundlePatchDialog({
 
             <Divider />
 
-            {/* Models that resolve to a member */}
             <Box>
               <Stack direction="row" sx={{ alignItems: 'center', mb: 0.5 }} spacing={1}>
-                <Typography variant="subtitle2">{rows.length} model(s) will be updated</Typography>
+                <Typography variant="subtitle2">Models</Typography>
                 <Box sx={{ flexGrow: 1 }} />
                 {renameable.length > 0 && (
                   <Button size="small" onClick={toggleAllRenames}>
@@ -278,128 +301,127 @@ export default function BundlePatchDialog({
                   </Button>
                 )}
               </Stack>
-              <Stack spacing={0.5}>
-                {rows.map((r) => (
-                  <Stack
-                    key={r.label}
-                    direction="row"
-                    spacing={1}
-                    sx={{ alignItems: 'center', flexWrap: 'wrap' }}
-                  >
-                    {/* Rename control + the name that results */}
-                    {r.nameDiffers ? (
-                      <FormControlLabel
-                        sx={{ minWidth: 240, mr: 0 }}
-                        control={
+
+              <Stack spacing={0.75}>
+                {rows.map((r) => {
+                  const id = targetId(r)
+                  const renames = !!id && nameDiffers(r)
+                  const willRename = renames && renameSet.has(r.label)
+                  return (
+                    <Box key={r.label} sx={GRID}>
+                      {/* col 1 — rename checkbox, only where a rename is possible */}
+                      {renames ? (
+                        <Tooltip title={`Rename to “${r.label}”`}>
                           <Checkbox
                             size="small"
+                            sx={{ p: 0 }}
                             checked={renameSet.has(r.label)}
                             onChange={() => toggleRename(r.label)}
                           />
-                        }
-                        label={
-                          <Typography variant="body2">
-                            {renameSet.has(r.label) ? (
+                        </Tooltip>
+                      ) : (
+                        <Box />
+                      )}
+
+                      {/* col 2 — the model: its name (or a picker), plus category */}
+                      <Box sx={{ minWidth: 0 }}>
+                        {r.fixed || id ? (
+                          <Typography variant="body2" noWrap>
+                            {willRename ? (
                               <>
                                 <Box
                                   component="span"
                                   sx={{ textDecoration: 'line-through', color: 'text.disabled' }}
                                 >
-                                  {r.modelName}
+                                  {targetName(r)}
                                 </Box>{' '}
                                 → {r.label}
                               </>
                             ) : (
-                              <>
-                                {r.modelName}{' '}
-                                <Typography
-                                  component="span"
-                                  variant="caption"
-                                  color="text.secondary"
-                                >
-                                  (rename to “{r.label}”)
-                                </Typography>
-                              </>
+                              (targetName(r) ?? r.label)
                             )}
                           </Typography>
-                        }
-                      />
-                    ) : (
-                      <Typography variant="body2" sx={{ minWidth: 240 }}>
-                        {r.modelName}
-                      </Typography>
-                    )}
-                    {r.hasImage && <Chip size="small" label="image" variant="outlined" />}
-                    {tagChips(r.addTags)}
-                    {!r.hasImage && r.addTags.length === 0 && (
-                      <Typography variant="caption" color="text.secondary">
-                        nothing new
-                      </Typography>
-                    )}
-                  </Stack>
-                ))}
+                        ) : (
+                          <FormControl size="small" fullWidth>
+                            <Select
+                              displayEmpty
+                              value={resolved[r.label] ?? ''}
+                              onChange={(e) => pickMember(r.label, e.target.value)}
+                              renderValue={(v) =>
+                                v ? (
+                                  (membersById.get(v)?.name ?? '')
+                                ) : (
+                                  <em>{r.label} — pick a model</em>
+                                )
+                              }
+                            >
+                              <MenuItem value="">
+                                <em>skip</em>
+                              </MenuItem>
+                              {(r.choices ?? []).map((m) => (
+                                <MenuItem key={m.id} value={m.id} sx={{ display: 'block' }}>
+                                  <Box
+                                    sx={{
+                                      display: 'flex',
+                                      alignItems: 'baseline',
+                                      gap: 1,
+                                      whiteSpace: 'nowrap',
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                    }}
+                                  >
+                                    <span>{m.name}</span>
+                                    <Typography
+                                      component="span"
+                                      variant="caption"
+                                      color="text.secondary"
+                                      sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}
+                                    >
+                                      {m.tags.length ? m.tags.join(', ') : 'no tags'}
+                                    </Typography>
+                                  </Box>
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        )}
+                        {r.category && (
+                          <Typography variant="caption" color="text.secondary">
+                            {r.category}
+                          </Typography>
+                        )}
+                      </Box>
+
+                      {/* col 3 — what it brings */}
+                      <Stack
+                        direction="row"
+                        spacing={0.5}
+                        sx={{ flexWrap: 'wrap', alignItems: 'center' }}
+                      >
+                        {r.hasImage && <Chip size="small" label="image" variant="outlined" />}
+                        {addTags(r).map((t) => (
+                          <Chip
+                            key={t}
+                            size="small"
+                            label={`+${t}`}
+                            color="primary"
+                            variant="outlined"
+                          />
+                        ))}
+                        {id && !r.hasImage && addTags(r).length === 0 && (
+                          <Typography variant="caption" color="text.secondary">
+                            nothing new
+                          </Typography>
+                        )}
+                      </Stack>
+                    </Box>
+                  )
+                })}
               </Stack>
             </Box>
 
-            {/* Rows needing a manual choice */}
-            {[...preview.ambiguous, ...preview.unmatched_patch].filter(
-              (u) => !resolved[u.patch_name],
-            ).length > 0 && (
-              <Box>
-                <Typography variant="subtitle2" gutterBottom>
-                  Choose a model for these (or leave unset to skip)
-                </Typography>
-                {[...preview.ambiguous, ...preview.unmatched_patch].map((u) => {
-                  // Ambiguous rows offer their candidates; fully unmatched offer everyone.
-                  const options = u.candidates.length ? u.candidates : preview.members
-                  return (
-                    <Stack
-                      key={u.patch_name}
-                      direction="row"
-                      spacing={1}
-                      sx={{ alignItems: 'center', mb: 0.5, flexWrap: 'wrap' }}
-                    >
-                      <Typography variant="body2" sx={{ minWidth: 180 }}>
-                        {u.patch_name}
-                      </Typography>
-                      <FormControl size="small" sx={{ minWidth: 260 }}>
-                        <Select
-                          displayEmpty
-                          value={resolved[u.patch_name] ?? ''}
-                          onChange={(e) =>
-                            setResolved((r) => ({ ...r, [u.patch_name]: e.target.value }))
-                          }
-                          renderValue={(id) =>
-                            id ? (membersById.get(id)?.name ?? '') : <em>skip</em>
-                          }
-                        >
-                          <MenuItem value="">
-                            <em>skip</em>
-                          </MenuItem>
-                          {options.map((m) => (
-                            <MenuItem key={m.id} value={m.id}>
-                              <Box>
-                                <Typography variant="body2">{m.name}</Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                  {m.tags.length ? m.tags.join(', ') : 'no tags'}
-                                </Typography>
-                              </Box>
-                            </MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      {/* what would be applied to the (as yet unpicked) row */}
-                      {tagChips(u.patch_tags)}
-                      {u.has_image && <Chip size="small" label="image" variant="outlined" />}
-                    </Stack>
-                  )
-                })}
-              </Box>
-            )}
-
             <Divider />
 
-            {/* Global apply rules */}
             <Box>
               <Typography variant="subtitle2" gutterBottom>
                 How to apply
