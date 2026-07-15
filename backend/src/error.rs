@@ -53,9 +53,23 @@ impl From<sqlx::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg).into_response(),
+            // Client errors were silent, which made a handler-originated 404 (a
+            // secondary `fetch_one` coming back empty → sqlx RowNotFound → NotFound)
+            // indistinguishable from an unmatched route. Log them so a 4xx from
+            // inside a handler always leaves a trace; a truly unmatched route is
+            // logged separately by the API fallback in main.rs.
+            ApiError::BadRequest(msg) => {
+                tracing::warn!(status = 400, %msg, "bad request");
+                (StatusCode::BAD_REQUEST, msg).into_response()
+            }
+            ApiError::NotFound => {
+                tracing::warn!(status = 404, "not found (handler)");
+                (StatusCode::NOT_FOUND, "not found").into_response()
+            }
+            ApiError::Conflict(msg) => {
+                tracing::warn!(status = 409, %msg, "conflict");
+                (StatusCode::CONFLICT, msg).into_response()
+            }
             ApiError::Auth(e) => e.into_response(),
             ApiError::OutOfSpace => {
                 tracing::error!("blob store is out of disk space");

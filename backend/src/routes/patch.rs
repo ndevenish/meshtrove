@@ -488,12 +488,14 @@ async fn stage_image(
     }))
 }
 
+#[tracing::instrument(skip_all, fields(bundle = %bundle_id))]
 async fn apply(
     State(state): State<AppState>,
     user: User,
     Path(bundle_id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> Result<Json<ApplyResult>, ApiError> {
+    tracing::info!("patch apply: start");
     let created_by = bundle_created_by(&state, bundle_id).await?;
     user.require_can_edit(created_by)?;
 
@@ -533,6 +535,11 @@ async fn apply(
 
     let members = bundle_members(&state, bundle_id).await?;
     let resolution = resolve(&archive.patch, &members);
+    tracing::info!(
+        patch_models = archive.patch.models.len(),
+        members = members.len(),
+        "patch apply: archive read, members fetched"
+    );
 
     // A member contested by several patch models never auto-applies — the same
     // rule preview shows — so the two "Gold" entries cannot both silently land on
@@ -690,7 +697,12 @@ async fn apply(
     }
 
     tx.commit().await?;
-    tracing::info!(bundle = %bundle_id, ?result.models_updated, "bundle patch applied");
+    tracing::info!(
+        models = result.models_updated,
+        images = result.images_added,
+        tags = result.tags_added,
+        "patch apply: committed"
+    );
     Ok(Json(result))
 }
 

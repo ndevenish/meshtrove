@@ -27,6 +27,11 @@ pub async fn frontend_handler(State(state): State<AppState>, req: Request<Body>)
         .iter()
         .any(|p| path.starts_with(p) || path == p.trim_end_matches('/'))
     {
+        // A backend path that matched no route — a genuine route miss, distinct
+        // from a 4xx a handler returned (those log via ApiError). This is the line
+        // that was missing when a POST fell through to the SPA fallback and 404'd
+        // with nothing in the log.
+        tracing::warn!(method = %req.method(), %path, "unmatched backend route -> 404");
         return StatusCode::NOT_FOUND.into_response();
     }
 
