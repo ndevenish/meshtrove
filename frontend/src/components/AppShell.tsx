@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Outlet, Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   AppBar,
@@ -26,6 +26,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useAuth, useColorMode } from '../main'
 import { api } from '../api'
 import { readDrop, startImport } from '../upload'
+import { GlobalDropContext } from '../globalDrop'
 import ImportErrorDialog from './ImportErrorDialog'
 
 export default function AppShell() {
@@ -47,6 +48,18 @@ export default function AppShell() {
   const { pathname } = useLocation()
   const pathRef = useRef(pathname)
   pathRef.current = pathname
+
+  // Pages with their own inline drop target register here to switch the global
+  // overlay off while their box is up (see `useSuppressGlobalDrop`). A count, not
+  // a flag: two of them could be mounted at once, and each must un-suppress
+  // independently. The listeners read the ref live, so no re-subscribe is needed.
+  const suppressCount = useRef(0)
+  const suppress = useCallback<() => () => void>(() => {
+    suppressCount.current += 1
+    return () => {
+      suppressCount.current = Math.max(0, suppressCount.current - 1)
+    }
+  }, [])
 
   // Global file-first drop: dropping a file anywhere stages it as an import and
   // takes you to its page, where you say what it is once it has unpacked.
@@ -70,9 +83,11 @@ export default function AppShell() {
     // bundle-patch importer), and the whole-page overlay would otherwise swallow
     // the drop before the dialog ever saw it. MUI keeps a `.MuiDialog-root` in the
     // DOM only while a dialog is mounted; menus and selects use other classes.
-    const dialogOpen = () => !!document.querySelector('.MuiDialog-root')
+    // Same when a page registered an inline drop target (model file upload, the
+    // inline patch box) — `suppressCount` is how it asks us to keep out of its way.
+    const standDown = () => suppressCount.current > 0 || !!document.querySelector('.MuiDialog-root')
     const onEnter = (e: DragEvent) => {
-      if (!hasFiles(e) || dialogOpen()) return
+      if (!hasFiles(e) || standDown()) return
       depth += 1
       setDragging(true)
     }
@@ -81,10 +96,10 @@ export default function AppShell() {
       if (depth === 0) setDragging(false)
     }
     const onOver = (e: DragEvent) => {
-      if (hasFiles(e) && !dialogOpen()) e.preventDefault()
+      if (hasFiles(e) && !standDown()) e.preventDefault()
     }
     const onDrop = (e: DragEvent) => {
-      if (!hasFiles(e) || !e.dataTransfer || dialogOpen()) return
+      if (!hasFiles(e) || !e.dataTransfer || standDown()) return
       e.preventDefault()
       depth = 0
       setDragging(false)
@@ -248,7 +263,9 @@ export default function AppShell() {
         </Toolbar>
       </AppBar>
       <Box component="main" sx={{ flexGrow: 1 }}>
-        <Outlet />
+        <GlobalDropContext.Provider value={suppress}>
+          <Outlet />
+        </GlobalDropContext.Provider>
       </Box>
 
       {(dragging || importing) && (

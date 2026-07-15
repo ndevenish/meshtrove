@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Box,
@@ -35,11 +35,15 @@ import Dropzone from './Dropzone'
 export default function BundlePatchDialog({
   bundleId,
   open,
+  initialFile,
   onClose,
   onApplied,
 }: {
   bundleId: string
   open: boolean
+  /** A zip already dropped on the page's inline box — preview it straight away,
+   * so the dialog opens on the match table instead of its own drop step. */
+  initialFile?: File | null
   onClose: () => void
   onApplied: () => void
 }) {
@@ -75,24 +79,44 @@ export default function BundlePatchDialog({
     setRenameSet(new Set())
   }
 
-  const runPreview = async (file: File) => {
-    setZip(file)
-    setBusy(true)
-    setError('')
-    try {
-      const p = await api.previewBundlePatch(bundleId, file)
-      setPreview(p)
-      // Pre-tick a rename wherever the auto-matched model's name differs from the
-      // scraped one — the common case is that the scraped name is the better one.
-      setRenameSet(
-        new Set(p.matched.filter((m) => m.patch_name !== m.model_name).map((m) => String(m.key))),
-      )
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
+  // Memoised so the auto-preview effect can depend on it without re-firing every
+  // render; it only changes when the bundle does.
+  const runPreview = useCallback(
+    async (file: File) => {
+      setZip(file)
+      setBusy(true)
+      setError('')
+      try {
+        const p = await api.previewBundlePatch(bundleId, file)
+        setPreview(p)
+        // Pre-tick a rename wherever the auto-matched model's name differs from the
+        // scraped one — the common case is that the scraped name is the better one.
+        setRenameSet(
+          new Set(p.matched.filter((m) => m.patch_name !== m.model_name).map((m) => String(m.key))),
+        )
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [bundleId],
+  )
+
+  // When the parent hands us a file already dropped on its inline box, preview it
+  // the moment we open — once per file, tracked by ref so a re-render doesn't
+  // re-fire it and "Choose a different file" (which clears `zip`) still works.
+  const previewedFile = useRef<File | null>(null)
+  useEffect(() => {
+    if (!open) {
+      previewedFile.current = null
+      return
     }
-  }
+    if (initialFile && previewedFile.current !== initialFile) {
+      previewedFile.current = initialFile
+      void runPreview(initialFile)
+    }
+  }, [open, initialFile, runPreview])
 
   const runApply = async () => {
     if (!zip) return

@@ -15,7 +15,6 @@ import {
   Alert,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
-import CloudUploadIcon from '@mui/icons-material/CloudUpload'
 import StarIcon from '@mui/icons-material/Star'
 import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
@@ -27,6 +26,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
+import { useSuppressGlobalDrop } from '../globalDrop'
+import Dropzone from '../components/Dropzone'
 import ModelCard from '../components/ModelCard'
 import BundleDetailsEditor from '../components/BundleDetailsEditor'
 import { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
@@ -47,6 +48,11 @@ export default function BundlePage() {
   const editorRef = useRef<DetailsEditorHandle>(null)
   const [saving, setSaving] = useState(false)
   const [patchOpen, setPatchOpen] = useState(false)
+  // The zip dropped on the inline importer box, handed to the dialog to preview.
+  const [patchFile, setPatchFile] = useState<File | null>(null)
+  // Edit mode shows the inline patch drop box, so the app-wide overlay must stand
+  // aside while editing or it swallows the zip meant for that box.
+  useSuppressGlobalDrop(editing)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState('')
@@ -241,14 +247,20 @@ export default function BundlePage() {
                 onDone={() => setEditing(false)}
                 onBusyChange={setSaving}
               />
-              <Button
-                size="small"
-                startIcon={<CloudUploadIcon />}
-                onClick={() => setPatchOpen(true)}
-                sx={{ mb: 2 }}
-              >
-                Import scraped metadata…
-              </Button>
+              <Box sx={{ mb: 2 }}>
+                <Dropzone
+                  label="Import scraped metadata"
+                  hint="Drop a bundle-patch zip — patch.json + images"
+                  accept=".zip"
+                  onDrop={(drop) => {
+                    const file = drop.files[0]?.file
+                    if (file) {
+                      setPatchFile(file)
+                      setPatchOpen(true)
+                    }
+                  }}
+                />
+              </Box>
             </>
           )}
           {!editing && bundle.creator_name && (
@@ -318,6 +330,7 @@ export default function BundlePage() {
       <BundlePatchDialog
         bundleId={bundle.id}
         open={patchOpen}
+        initialFile={patchFile}
         onApplied={() => {
           refresh()
           // The in-place editor seeds its fields once at mount, so it would keep
@@ -326,7 +339,10 @@ export default function BundlePage() {
           // refreshed values show through the read view.
           setEditing(false)
         }}
-        onClose={() => setPatchOpen(false)}
+        onClose={() => {
+          setPatchOpen(false)
+          setPatchFile(null)
+        }}
       />
       <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
       <Snackbar

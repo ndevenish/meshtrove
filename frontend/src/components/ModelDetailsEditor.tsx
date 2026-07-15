@@ -3,6 +3,7 @@ import { Alert, Autocomplete, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, uploadWithProgress, type FileRecord, type ModelDetail } from '../api'
+import { useSuppressGlobalDrop } from '../globalDrop'
 import Dropzone from './Dropzone'
 
 /// What the page can ask of the editor. Save and Cancel live in the page header,
@@ -27,6 +28,10 @@ const ModelDetailsEditor = forwardRef<
   }
 >(function ModelDetailsEditor({ model, onDone, onBusyChange }, ref) {
   const queryClient = useQueryClient()
+  // This editor is only ever mounted in edit mode, and it carries the "Upload
+  // files to this model" box — so while it is up, the app-wide drop overlay must
+  // stand aside or it swallows the drop and stages an import instead.
+  useSuppressGlobalDrop()
   const [name, setName] = useState(model.name)
   const [creatorName, setCreatorName] = useState(model.creator_name ?? '')
   const [tags, setTags] = useState<string[]>(model.tags)
