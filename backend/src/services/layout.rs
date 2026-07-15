@@ -109,8 +109,9 @@ pub struct FileAnnotation {
     pub unmapped: Vec<String>,
 }
 
-/// One planned variant of a planned model. Empty `tags` = the model's
-/// unsorted bucket (matched files that resolved no variant tags).
+/// One planned variant of a planned model. Empty `tags` = matched files that
+/// resolved no variant tags; the commit puts them in the model's unsorted
+/// bucket (one-model carve) or its anonymous variant (bundle carve).
 #[derive(Serialize, ToSchema)]
 pub struct PlanVariant {
     pub tags: Vec<String>,

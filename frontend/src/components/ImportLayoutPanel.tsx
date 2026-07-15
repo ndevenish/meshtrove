@@ -403,7 +403,11 @@ export default function ImportLayoutPanel({
                           />
                         ))
                       ) : (
-                        <Chip size="small" label="unsorted" variant="outlined" />
+                        <Chip
+                          size="small"
+                          label={target === 'bundle' ? 'anonymous variant' : 'unsorted'}
+                          variant="outlined"
+                        />
                       )}
                       <Typography variant="body2" color="text.secondary">
                         {variant.file_count}

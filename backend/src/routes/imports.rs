@@ -427,7 +427,14 @@ async fn commit(
                 && let Some(planned) = plan.models.first()
             {
                 add_model_tags(&mut tx, model_id, &planned.tags).await?;
-                carve_variants(&mut tx, model_id, &planned.variants, user.id).await?;
+                carve_variants(
+                    &mut tx,
+                    model_id,
+                    &planned.variants,
+                    user.id,
+                    Untagged::UnsortedBucket,
+                )
+                .await?;
             }
             // Whatever the carve didn't claim (or all of it, with no layout)
             // lands in the model's unsorted bucket.
@@ -630,17 +637,33 @@ async fn commit(
 // the carve: execute a plan inside the commit transaction
 // ---------------------------------------------------------------------------
 
-/// Assign carved files: each non-empty tag set get-or-creates that variant of
-/// the model (the existing merge-by-tag-set semantics), an empty set is the
-/// model's unsorted bucket.
+/// Where a carve puts files that resolved no variant tags.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Untagged {
+    /// Loose in the model's unsorted bucket (variant_id NULL) — a one-model carve.
+    UnsortedBucket,
+    /// The model's anonymous variant (empty tag set) — a bundle carve.
+    AnonymousVariant,
+}
+
+/// Assign carved files: each tag set get-or-creates that variant of the model
+/// (the existing merge-by-tag-set semantics). Files that resolved no variant
+/// tags go either into the model's unsorted bucket or into its anonymous
+/// variant (the empty-tag-set variant), per `untagged`.
 async fn carve_variants(
     tx: &mut sqlx::PgConnection,
     model_id: Uuid,
     variants: &[PlanVariant],
     user_id: Uuid,
+    untagged: Untagged,
 ) -> Result<(), ApiError> {
     for planned in variants {
-        if planned.tags.is_empty() {
+        // A one-model carve leaves untagged files loose in the model's unsorted
+        // bucket — they are just the model's own files. A bundle carve instead
+        // gives each member its anonymous variant, a first-class sibling to its
+        // tagged variants (so it renders a preview and reads as a variant, not
+        // as leftovers the carve couldn't place).
+        if planned.tags.is_empty() && untagged == Untagged::UnsortedBucket {
             sqlx::query!(
                 "UPDATE files SET model_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
                 model_id,
@@ -650,6 +673,7 @@ async fn carve_variants(
             .await?;
             continue;
         }
+        // Empty `tag_ids` get-or-creates the anonymous variant (tag_key '').
         let mut tag_ids: Vec<Uuid> = Vec::new();
         for name in &planned.tags {
             let tag_id = upsert_variant_tag(&mut *tx, name).await?;
@@ -811,7 +835,14 @@ async fn carve_into_bundle(
             }
         };
         add_model_tags(&mut *tx, model_id, &planned.tags).await?;
-        carve_variants(&mut *tx, model_id, &planned.variants, user_id).await?;
+        carve_variants(
+            &mut *tx,
+            model_id,
+            &planned.variants,
+            user_id,
+            Untagged::AnonymousVariant,
+        )
+        .await?;
     }
     Ok(created)
 }
