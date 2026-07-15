@@ -19,6 +19,27 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
+/// A short random token appended to every model/bundle slug, so uniqueness never
+/// depends on creation order: the first `Gold Warrior` is not privileged with the
+/// plain slug while the second gets a `-2`. Five hex chars (~1M per name); the
+/// caller re-rolls on the rare clash.
+pub fn slug_token() -> String {
+    uuid::Uuid::new_v4().as_simple().to_string()[..5].to_string()
+}
+
+/// The token off the end of a slug (`gold-warrior-a3f9` -> `a3f9`), preserved
+/// across renames so a slug keeps its identity when its name changes. `None` for
+/// a legacy slug with no token — the caller then mints a fresh one rather than
+/// mistaking a word off the name for a token.
+pub fn slug_token_of(slug: &str) -> Option<&str> {
+    let (_, token) = slug.rsplit_once('-')?;
+    let looks_like_token = (4..=6).contains(&token.len())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase());
+    looks_like_token.then_some(token)
+}
+
 /// Put the spaces back into a name that never had them: `KnightRider` reads as
 /// "Knight Rider", `STLKnight` as "STL Knight". Archives name folders in camel
 /// case constantly, and a library full of `DwarfBerserkerAxe` is a library you
@@ -92,6 +113,19 @@ mod tests {
         );
         assert_eq!(humanize_token("  spare___parts_kit "), "spare parts kit");
         assert_eq!(humanize_token(""), "");
+    }
+
+    #[test]
+    fn slug_tokens_round_trip() {
+        assert_eq!(super::slug_token().len(), 5);
+        // The final segment, when it looks like a token, splits off.
+        assert_eq!(super::slug_token_of("gold-warrior-a3f9"), Some("a3f9"));
+        assert_eq!(super::slug_token_of("item-0000a"), Some("0000a"));
+        // A base that itself carries dashes keeps them; only the last wins.
+        assert_eq!(super::slug_token_of("gold-2-abcde"), Some("abcde"));
+        // A word off the name is not a token, so a legacy slug re-rolls.
+        assert_eq!(super::slug_token_of("gold-warrior"), None);
+        assert_eq!(super::slug_token_of("gold"), None);
     }
 
     #[test]

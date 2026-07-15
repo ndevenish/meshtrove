@@ -19,7 +19,7 @@ use crate::extractors::User;
 use crate::routes::tags::upsert_tag;
 use crate::routes::variants::{VariantDetail, fetch_variants};
 use crate::state::AppState;
-use crate::util::slugify;
+use crate::util::{slug_token, slug_token_of, slugify};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -277,33 +277,39 @@ pub struct ImageSummary {
     pub variant_id: Option<Uuid>,
 }
 
-/// A slug free among all models except `exclude` (the row being renamed, so a
-/// no-op rename keeps its own slug instead of colliding with itself and gaining
-/// a `-2`). `None` when creating.
+/// A slug for `name`: `slugify(name)` plus a random token, so no model is
+/// privileged with the plain slug by being created first. On a rename, `keep` is
+/// the row's current slug, whose token is preserved so the URL keeps its identity
+/// as the name changes; `exclude` is that row, skipped in the uniqueness check.
+/// Both are `None` when creating.
 pub async fn unique_slug(
     state: &AppState,
     name: &str,
+    keep: Option<&str>,
     exclude: Option<Uuid>,
 ) -> Result<String, ApiError> {
     let base = slugify(name);
-    let taken: Vec<String> = sqlx::query_scalar!(
-        "SELECT slug FROM models WHERE (slug = $1 OR slug LIKE $1 || '-%')
-            AND ($2::uuid IS NULL OR id <> $2)",
-        base,
-        exclude,
-    )
-    .fetch_all(&state.db)
-    .await?;
-    if !taken.iter().any(|s| s == &base) {
-        return Ok(base);
-    }
-    for n in 2.. {
-        let candidate = format!("{base}-{n}");
-        if !taken.iter().any(|s| s == &candidate) {
+    let mut token = keep.and_then(slug_token_of).map(str::to_string);
+    loop {
+        let candidate = match &token {
+            Some(t) => format!("{base}-{t}"),
+            None => format!("{base}-{}", slug_token()),
+        };
+        let clash = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM models
+                 WHERE slug = $1 AND ($2::uuid IS NULL OR id <> $2))",
+            candidate,
+            exclude,
+        )
+        .fetch_one(&state.db)
+        .await?
+        .unwrap_or(false);
+        if !clash {
             return Ok(candidate);
         }
+        // A kept token collided (astronomically unlikely) — mint a fresh one.
+        token = None;
     }
-    unreachable!()
 }
 
 async fn set_model_tags(
@@ -337,7 +343,7 @@ async fn create(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
     }
-    let slug = unique_slug(&state, &name, None).await?;
+    let slug = unique_slug(&state, &name, None, None).await?;
 
     let mut tx = state.db.begin().await?;
     let model_id: Uuid = sqlx::query_scalar!(
@@ -510,10 +516,15 @@ async fn update(
     user.require_can_edit(model_created_by(&state, id).await?)?;
 
     // The slug follows the name: a rename gives a new URL, and the old UUID (or
-    // old slug, if bookmarked) still resolves and redirects here. Exclude self so
-    // an unchanged name keeps its slug rather than colliding into a `-2`.
+    // old slug, if bookmarked) still resolves and redirects here. The random
+    // token is carried over from the current slug, so the URL keeps its identity
+    // across the rename; `exclude` skips this row so a no-op rename is stable.
     let name = input.name.trim();
-    let slug = unique_slug(&state, name, Some(id)).await?;
+    let current_slug = sqlx::query_scalar!("SELECT slug FROM models WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let slug = unique_slug(&state, name, Some(&current_slug), Some(id)).await?;
 
     let mut tx = state.db.begin().await?;
     // The purchase fields coalesce; the rest replace. No editor asks for a licence

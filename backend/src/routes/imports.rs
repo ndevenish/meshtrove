@@ -30,7 +30,7 @@ use crate::routes::variants::{set_variant_tags, variant_with_tag_set};
 use crate::services::gc;
 use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan, PlanVariant};
 use crate::state::AppState;
-use crate::util::slugify;
+use crate::util::{slug_token, slugify};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -411,7 +411,7 @@ async fn commit(
     let result = match &input {
         CommitInput::NewModel { name, meta, .. } => {
             let name = named(name);
-            let slug = models::unique_slug(&state, &name, None).await?;
+            let slug = models::unique_slug(&state, &name, None, None).await?;
             let model_id: Uuid = sqlx::query_scalar!(
                 "INSERT INTO models (name, slug, creator_id, created_by)
                  VALUES ($1, $2, $3, $4) RETURNING id",
@@ -457,7 +457,7 @@ async fn commit(
         } => {
             let name = named(name);
             let bundle_kind = parse_bundle_kind(kind.as_deref())?;
-            let slug = bundles::unique_slug(&state, &name, None).await?;
+            let slug = bundles::unique_slug(&state, &name, None, None).await?;
             let bundle_id: Uuid = sqlx::query_scalar!(
                 "INSERT INTO bundles (name, slug, creator_id, source_url, kind, created_by)
                  VALUES ($1, $2, $3, $4, $5::bundle_kind, $6) RETURNING id",
@@ -848,25 +848,30 @@ async fn carve_into_bundle(
 }
 
 /// Like `models::unique_slug`, but reading through the commit transaction and
-/// aware of slugs this same carve has claimed but not yet made visible.
+/// aware of slugs this same carve has claimed but not yet made visible. Member
+/// models get the same `name-token` shape as any other, so a later rename can
+/// carry the token over.
 async fn unique_member_slug(
     tx: &mut sqlx::PgConnection,
     name: &str,
     reserved: &mut HashSet<String>,
 ) -> Result<String, ApiError> {
     let base = slugify(name);
-    let taken: Vec<String> = sqlx::query_scalar!(
-        "SELECT slug FROM models WHERE slug = $1 OR slug LIKE $1 || '-%'",
-        base,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut candidate = base.clone();
-    let mut n = 2;
-    while taken.contains(&candidate) || reserved.contains(&candidate) {
-        candidate = format!("{base}-{n}");
-        n += 1;
+    loop {
+        let candidate = format!("{base}-{}", slug_token());
+        if reserved.contains(&candidate) {
+            continue;
+        }
+        let clash = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM models WHERE slug = $1)",
+            candidate
+        )
+        .fetch_one(&mut *tx)
+        .await?
+        .unwrap_or(false);
+        if !clash {
+            reserved.insert(candidate.clone());
+            return Ok(candidate);
+        }
     }
-    reserved.insert(candidate.clone());
-    Ok(candidate)
 }

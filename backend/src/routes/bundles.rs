@@ -22,7 +22,7 @@ use crate::routes::models::{
 };
 use crate::routes::tags::upsert_tag;
 use crate::state::AppState;
-use crate::util::slugify;
+use crate::util::{slug_token, slug_token_of, slugify};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -205,33 +205,37 @@ pub fn parse_kind(kind: Option<&str>) -> Result<&str, ApiError> {
     }
 }
 
-/// A slug free among all bundles except `exclude` (the row being renamed, so a
-/// no-op rename keeps its own slug rather than colliding with itself). `None`
-/// when creating.
+/// A slug for `name`: `slugify(name)` plus a random token (see
+/// [`crate::routes::models::unique_slug`]). On a rename, `keep` is the current
+/// slug whose token is preserved; `exclude` is the row being updated. Both
+/// `None` when creating.
 pub async fn unique_slug(
     state: &AppState,
     name: &str,
+    keep: Option<&str>,
     exclude: Option<Uuid>,
 ) -> Result<String, ApiError> {
     let base = slugify(name);
-    let taken: Vec<String> = sqlx::query_scalar!(
-        "SELECT slug FROM bundles WHERE (slug = $1 OR slug LIKE $1 || '-%')
-            AND ($2::uuid IS NULL OR id <> $2)",
-        base,
-        exclude,
-    )
-    .fetch_all(&state.db)
-    .await?;
-    if !taken.iter().any(|s| s == &base) {
-        return Ok(base);
-    }
-    for n in 2.. {
-        let candidate = format!("{base}-{n}");
-        if !taken.iter().any(|s| s == &candidate) {
+    let mut token = keep.and_then(slug_token_of).map(str::to_string);
+    loop {
+        let candidate = match &token {
+            Some(t) => format!("{base}-{t}"),
+            None => format!("{base}-{}", slug_token()),
+        };
+        let clash = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM bundles
+                 WHERE slug = $1 AND ($2::uuid IS NULL OR id <> $2))",
+            candidate,
+            exclude,
+        )
+        .fetch_one(&state.db)
+        .await?
+        .unwrap_or(false);
+        if !clash {
             return Ok(candidate);
         }
+        token = None;
     }
-    unreachable!()
 }
 
 async fn set_bundle_tags(
@@ -273,7 +277,7 @@ async fn create(
         return Err(ApiError::BadRequest("name is required".into()));
     }
     let kind = parse_kind(input.kind.as_deref())?;
-    let slug = unique_slug(&state, &name, None).await?;
+    let slug = unique_slug(&state, &name, None, None).await?;
 
     let mut tx = state.db.begin().await?;
     let bundle_id: Uuid = sqlx::query_scalar!(
@@ -427,9 +431,14 @@ async fn update(
 ) -> Result<Json<BundleDetail>, ApiError> {
     user.require_can_edit(bundle_created_by(&state, id).await?)?;
     let kind = parse_kind(input.kind.as_deref())?;
-    // The slug follows the name (see models::update).
+    // The slug follows the name, keeping its token across the rename (see
+    // models::update).
     let name = input.name.trim();
-    let slug = unique_slug(&state, name, Some(id)).await?;
+    let current_slug = sqlx::query_scalar!("SELECT slug FROM bundles WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let slug = unique_slug(&state, name, Some(&current_slug), Some(id)).await?;
 
     let mut tx = state.db.begin().await?;
     sqlx::query!(
