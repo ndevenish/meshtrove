@@ -502,9 +502,25 @@ export const api = {
 
 // --- Bundle metadata patch --------------------------------------------------
 
+export interface PatchMember {
+  id: string
+  name: string
+  tags: string[]
+}
+
+export interface PatchUnresolvedRow {
+  patch_name: string
+  patch_tags: string[]
+  has_image: boolean
+  /** non-empty for ambiguous rows; empty means "offer the whole member list" */
+  candidates: PatchMember[]
+}
+
 export interface PatchPreview {
-  bundle_has_description: boolean
-  bundle_cover_count: number
+  /** the bundle description the patch carries (markdown), or null */
+  bundle_description: string | null
+  /** candidate covers as data: URLs, primary first */
+  bundle_covers: string[]
   matched: {
     patch_name: string
     model_id: string
@@ -512,14 +528,15 @@ export interface PatchPreview {
     add_tags: string[]
     has_image: boolean
   }[]
-  ambiguous: { patch_name: string; candidates: { id: string; name: string }[] }[]
-  unmatched_patch: string[]
+  ambiguous: PatchUnresolvedRow[]
+  unmatched_patch: PatchUnresolvedRow[]
   unmatched_members: string[]
-  members: { id: string; name: string }[]
+  members: PatchMember[]
 }
 
 export interface PatchApplyOptions {
-  rename_models: boolean
+  /** patch model labels to rename to the scraped name (per-model, not global) */
+  rename: string[]
   model_tags: 'merge' | 'replace' | 'skip'
   model_images: 'replace_generated' | 'add' | 'skip'
   bundle_cover: boolean

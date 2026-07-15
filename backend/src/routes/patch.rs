@@ -205,17 +205,20 @@ fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
 
 #[derive(Serialize, ToSchema)]
 struct PatchPreview {
-    bundle_has_description: bool,
-    bundle_cover_count: usize,
+    /// The bundle description the patch carries, verbatim (markdown), or null.
+    bundle_description: Option<String>,
+    /// Candidate covers as `data:` URLs, primary first — so the UI shows the
+    /// actual pictures, not just a count.
+    bundle_covers: Vec<String>,
     matched: Vec<MatchedRow>,
-    ambiguous: Vec<AmbiguousRow>,
+    ambiguous: Vec<UnresolvedRow>,
     /// Patch models that matched no member automatically — the user can still
     /// pick a member for these by hand (that is what `members` is for).
-    unmatched_patch: Vec<String>,
+    unmatched_patch: Vec<UnresolvedRow>,
     /// Members the patch said nothing about (left untouched).
     unmatched_members: Vec<String>,
-    /// Every member of the bundle, so the UI can offer a manual match for a row
-    /// that did not resolve on its own.
+    /// Every member of the bundle, with its current tags — so the UI can offer a
+    /// manual match and show, per candidate, what it already has.
     members: Vec<Candidate>,
 }
 
@@ -229,9 +232,16 @@ struct MatchedRow {
     has_image: bool,
 }
 
+/// A patch model with no single match — ambiguous or unmatched. Carries the
+/// patch's own tags and image so the UI can show what *would* be applied once a
+/// member is chosen (add-tags recomputed client-side against that member).
 #[derive(Serialize, ToSchema)]
-struct AmbiguousRow {
+struct UnresolvedRow {
     patch_name: String,
+    patch_tags: Vec<String>,
+    has_image: bool,
+    /// Present for ambiguous rows (the members it could be); empty when the UI
+    /// should offer the whole member list.
     candidates: Vec<Candidate>,
 }
 
@@ -239,6 +249,7 @@ struct AmbiguousRow {
 struct Candidate {
     id: Uuid,
     name: String,
+    tags: Vec<String>,
 }
 
 async fn preview(
@@ -260,19 +271,34 @@ async fn preview(
     let mut unmatched_patch = Vec::new();
     let mut claimed: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
 
+    let candidate_of = |m: &Member| Candidate {
+        id: m.id,
+        name: m.name.clone(),
+        tags: m.tags.iter().map(|t| t.to_lowercase()).collect(),
+    };
+    let patch_tags = |pm: &PatchModel| pm.tags.iter().map(|t| t.to_lowercase()).collect::<Vec<_>>();
+    let has_image = |pm: &PatchModel| {
+        pm.image
+            .as_deref()
+            .is_some_and(|p| archive.images.contains_key(p))
+    };
+
     for (pm, ids) in archive.patch.models.iter().zip(&resolution) {
         match ids.as_slice() {
-            [] => unmatched_patch.push(pm.label()),
+            [] => unmatched_patch.push(UnresolvedRow {
+                patch_name: pm.label(),
+                patch_tags: patch_tags(pm),
+                has_image: has_image(pm),
+                candidates: Vec::new(),
+            }),
             [id] => {
                 claimed.insert(*id);
                 let member = member_of(*id);
                 let have: std::collections::HashSet<String> = member
                     .map(|m| m.tags.iter().map(|t| t.to_lowercase()).collect())
                     .unwrap_or_default();
-                let add_tags = pm
-                    .tags
-                    .iter()
-                    .map(|t| t.to_lowercase())
+                let add_tags = patch_tags(pm)
+                    .into_iter()
                     .filter(|t| !have.contains(t))
                     .collect::<Vec<_>>();
                 matched.push(MatchedRow {
@@ -280,25 +306,21 @@ async fn preview(
                     model_id: *id,
                     model_name: member.map(|m| m.name.clone()).unwrap_or_default(),
                     add_tags,
-                    has_image: pm
-                        .image
-                        .as_deref()
-                        .is_some_and(|p| archive.images.contains_key(p)),
+                    has_image: has_image(pm),
                 });
             }
             many => {
                 for id in many {
                     claimed.insert(*id);
                 }
-                ambiguous.push(AmbiguousRow {
+                ambiguous.push(UnresolvedRow {
                     patch_name: pm.label(),
+                    patch_tags: patch_tags(pm),
+                    has_image: has_image(pm),
                     candidates: many
                         .iter()
                         .filter_map(|id| member_of(*id))
-                        .map(|m| Candidate {
-                            id: m.id,
-                            name: m.name.clone(),
-                        })
+                        .map(candidate_of)
                         .collect(),
                 });
             }
@@ -312,24 +334,35 @@ async fn preview(
         .collect();
 
     Ok(Json(PatchPreview {
-        bundle_has_description: archive
+        bundle_description: archive
             .patch
             .bundle
             .description_md
-            .as_deref()
-            .is_some_and(|d| !d.trim().is_empty()),
-        bundle_cover_count: archive.patch.bundle.images.len(),
+            .clone()
+            .filter(|d| !d.trim().is_empty()),
+        bundle_covers: archive
+            .patch
+            .bundle
+            .images
+            .iter()
+            .filter_map(|path| {
+                let bytes = archive.images.get(path)?;
+                let mime = mime_guess::from_path(path)
+                    .first()
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "image/png".into());
+                use base64::Engine;
+                Some(format!(
+                    "data:{mime};base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                ))
+            })
+            .collect(),
         matched,
         ambiguous,
         unmatched_patch,
         unmatched_members,
-        members: members
-            .iter()
-            .map(|m| Candidate {
-                id: m.id,
-                name: m.name.clone(),
-            })
-            .collect(),
+        members: members.iter().map(candidate_of).collect(),
     }))
 }
 
@@ -359,8 +392,11 @@ enum ImageMode {
 
 #[derive(Deserialize, Default)]
 struct ApplyOptions {
+    /// Patch model labels whose matched model should be renamed to the scraped
+    /// name. Per-model, not all-or-nothing — a rename is a bigger commitment than
+    /// a tag, and worth deciding one at a time.
     #[serde(default)]
-    rename_models: bool,
+    rename: Vec<String>,
     #[serde(default)]
     model_tags: TagMode,
     #[serde(default)]
@@ -539,7 +575,7 @@ async fn apply(
         let pm = &archive.patch.models[*idx];
         let mut touched = false;
 
-        if options.rename_models
+        if options.rename.contains(&pm.label())
             && let Some(name) = pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
         {
             sqlx::query!("UPDATE models SET name = $2 WHERE id = $1", model_id, name)

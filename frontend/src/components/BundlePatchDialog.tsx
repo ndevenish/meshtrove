@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Chip,
   Dialog,
   DialogActions,
@@ -12,22 +13,24 @@ import {
   FormControl,
   FormControlLabel,
   MenuItem,
-  Checkbox,
   Select,
   Stack,
   Typography,
 } from '@mui/material'
+import ReactMarkdown from 'react-markdown'
 import { useQueryClient } from '@tanstack/react-query'
 
-import { api, type PatchApplyOptions, type PatchPreview } from '../api'
+import { api, type PatchApplyOptions, type PatchMember, type PatchPreview } from '../api'
 import Dropzone from './Dropzone'
 
 /// Merge a scraped bundle patch onto this bundle. Drop the
-/// zip, see what it matched to which member, tick what to apply, and apply.
+/// zip, see what matched to which member — and for what did not, pick a member by
+/// hand — tick what to apply, and apply.
 ///
-/// The defaults encode the usual intent: the scraped photo replaces the
-/// auto-generated render (a real picture beats an f3d preview), while tags are
-/// merged onto whatever the model already has rather than overwriting them.
+/// Defaults encode the usual intent: the scraped photo replaces the auto-generated
+/// render (a real picture beats an f3d preview), tags merge onto what the model
+/// already has. Rename is per-model and off by default — a bigger commitment than
+/// a tag, decided one at a time.
 export default function BundlePatchDialog({
   bundleId,
   open,
@@ -46,23 +49,23 @@ export default function BundlePatchDialog({
   const [error, setError] = useState('')
   const [done, setDone] = useState('')
 
-  // Which member each ambiguous / unmatched patch model should apply to.
+  // patch label -> chosen member id (ambiguous + manual matches).
   const [resolved, setResolved] = useState<Record<string, string>>({})
+  // patch labels to rename to the scraped name.
+  const [renameSet, setRenameSet] = useState<Set<string>>(new Set())
 
-  const [opts, setOpts] = useState<Omit<PatchApplyOptions, 'matches'>>({
-    rename_models: false,
+  const [opts, setOpts] = useState<Omit<PatchApplyOptions, 'matches' | 'rename'>>({
     model_tags: 'merge',
     model_images: 'replace_generated',
     bundle_cover: true,
     bundle_description: true,
   })
 
-  // A member is "taken" if a matched row already owns it, or another patch row's
-  // pick points at it. Only a hint — the backend last-write-wins if you insist.
-  const chosenElsewhere = (forName: string, memberId: string) => {
-    if (preview?.matched.some((m) => m.model_id === memberId)) return true
-    return Object.entries(resolved).some(([name, id]) => name !== forName && id === memberId)
-  }
+  const membersById = useMemo(() => {
+    const m = new Map<string, PatchMember>()
+    for (const mem of preview?.members ?? []) m.set(mem.id, mem)
+    return m
+  }, [preview])
 
   const reset = () => {
     setZip(null)
@@ -70,6 +73,7 @@ export default function BundlePatchDialog({
     setError('')
     setDone('')
     setResolved({})
+    setRenameSet(new Set())
   }
 
   const runPreview = async (file: File) => {
@@ -90,7 +94,11 @@ export default function BundlePatchDialog({
     setBusy(true)
     setError('')
     try {
-      const result = await api.applyBundlePatch(bundleId, zip, { ...opts, matches: resolved })
+      const result = await api.applyBundlePatch(bundleId, zip, {
+        ...opts,
+        matches: resolved,
+        rename: [...renameSet],
+      })
       await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
       onApplied()
       setDone(
@@ -103,6 +111,65 @@ export default function BundlePatchDialog({
       setBusy(false)
     }
   }
+
+  // Every row that resolves to a member (auto-matched, or manually chosen), with
+  // the target model, the tags that would be added (patch tags minus what the
+  // member already has), and whether a rename would change the name.
+  type Row = {
+    label: string
+    modelId: string
+    modelName: string
+    addTags: string[]
+    hasImage: boolean
+    nameDiffers: boolean
+  }
+  const rows: Row[] = useMemo(() => {
+    if (!preview) return []
+    const out: Row[] = []
+    for (const m of preview.matched) {
+      out.push({
+        label: m.patch_name,
+        modelId: m.model_id,
+        modelName: m.model_name,
+        addTags: m.add_tags,
+        hasImage: m.has_image,
+        nameDiffers: m.patch_name !== m.model_name,
+      })
+    }
+    // Ambiguous + unmatched become rows once (and only when) the user picks a member.
+    for (const u of [...preview.ambiguous, ...preview.unmatched_patch]) {
+      const chosen = resolved[u.patch_name]
+      if (!chosen) continue
+      const member = membersById.get(chosen)
+      const have = new Set((member?.tags ?? []).map((t) => t.toLowerCase()))
+      out.push({
+        label: u.patch_name,
+        modelId: chosen,
+        modelName: member?.name ?? '',
+        addTags: u.patch_tags.filter((t) => !have.has(t.toLowerCase())),
+        hasImage: u.has_image,
+        nameDiffers: !!member && u.patch_name !== member.name,
+      })
+    }
+    return out
+  }, [preview, resolved, membersById])
+
+  // "Select all" targets the rows where a rename would actually change something.
+  const renameable = rows.filter((r) => r.nameDiffers).map((r) => r.label)
+  const allRenamed = renameable.length > 0 && renameable.every((l) => renameSet.has(l))
+  const toggleAllRenames = () => setRenameSet(allRenamed ? new Set() : new Set(renameable))
+  const toggleRename = (label: string) =>
+    setRenameSet((s) => {
+      const next = new Set(s)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
+      return next
+    })
+
+  const tagChips = (tags: string[]) =>
+    tags.map((t) => (
+      <Chip key={t} size="small" label={`+${t}`} color="primary" variant="outlined" />
+    ))
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -128,41 +195,143 @@ export default function BundlePatchDialog({
           />
         ) : (
           <Stack spacing={2}>
-            {/* What matched */}
+            {/* Bundle cover + description preview */}
+            {(preview.bundle_covers.length > 0 || preview.bundle_description) && (
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  Bundle
+                </Typography>
+                <Stack direction="row" spacing={2}>
+                  {preview.bundle_covers.length > 0 && (
+                    <Stack spacing={0.5}>
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={opts.bundle_cover}
+                            onChange={(e) =>
+                              setOpts((o) => ({ ...o, bundle_cover: e.target.checked }))
+                            }
+                          />
+                        }
+                        label="Set cover"
+                      />
+                      <Stack direction="row" spacing={1}>
+                        {preview.bundle_covers.map((src, i) => (
+                          <Box
+                            key={i}
+                            component="img"
+                            src={src}
+                            sx={{
+                              width: 96,
+                              height: 96,
+                              objectFit: 'cover',
+                              borderRadius: 1,
+                              opacity: opts.bundle_cover ? 1 : 0.4,
+                              border: (t) =>
+                                i === 0 ? `2px solid ${t.palette.primary.main}` : '1px solid #8884',
+                            }}
+                          />
+                        ))}
+                      </Stack>
+                    </Stack>
+                  )}
+                  {preview.bundle_description && (
+                    <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={opts.bundle_description}
+                            onChange={(e) =>
+                              setOpts((o) => ({ ...o, bundle_description: e.target.checked }))
+                            }
+                          />
+                        }
+                        label="Set description"
+                      />
+                      <Box
+                        sx={{
+                          fontSize: 13,
+                          maxHeight: 120,
+                          overflow: 'auto',
+                          opacity: opts.bundle_description ? 1 : 0.4,
+                          '& p': { m: 0 },
+                        }}
+                      >
+                        <ReactMarkdown>{preview.bundle_description}</ReactMarkdown>
+                      </Box>
+                    </Box>
+                  )}
+                </Stack>
+              </Box>
+            )}
+
+            <Divider />
+
+            {/* Models that resolve to a member */}
             <Box>
-              <Typography variant="subtitle2" gutterBottom>
-                {preview.matched.length} of{' '}
-                {preview.matched.length + preview.ambiguous.length + preview.unmatched_patch.length}{' '}
-                patch models matched a member
-              </Typography>
+              <Stack direction="row" sx={{ alignItems: 'center', mb: 0.5 }} spacing={1}>
+                <Typography variant="subtitle2">{rows.length} model(s) will be updated</Typography>
+                <Box sx={{ flexGrow: 1 }} />
+                {renameable.length > 0 && (
+                  <Button size="small" onClick={toggleAllRenames}>
+                    {allRenamed ? 'Deselect all renames' : 'Select all renames'}
+                  </Button>
+                )}
+              </Stack>
               <Stack spacing={0.5}>
-                {preview.matched.map((m) => (
+                {rows.map((r) => (
                   <Stack
-                    key={m.model_id}
+                    key={r.label}
                     direction="row"
                     spacing={1}
                     sx={{ alignItems: 'center', flexWrap: 'wrap' }}
                   >
-                    <Typography variant="body2" sx={{ minWidth: 160 }}>
-                      {m.patch_name}
-                      {m.patch_name !== m.model_name && (
-                        <Typography component="span" variant="caption" color="text.secondary">
-                          {' → '}
-                          {m.model_name}
-                        </Typography>
-                      )}
-                    </Typography>
-                    {m.has_image && <Chip size="small" label="image" variant="outlined" />}
-                    {m.add_tags.map((t) => (
-                      <Chip
-                        key={t}
-                        size="small"
-                        label={`+${t}`}
-                        color="primary"
-                        variant="outlined"
+                    {/* Rename control + the name that results */}
+                    {r.nameDiffers ? (
+                      <FormControlLabel
+                        sx={{ minWidth: 240, mr: 0 }}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={renameSet.has(r.label)}
+                            onChange={() => toggleRename(r.label)}
+                          />
+                        }
+                        label={
+                          <Typography variant="body2">
+                            {renameSet.has(r.label) ? (
+                              <>
+                                <Box
+                                  component="span"
+                                  sx={{ textDecoration: 'line-through', color: 'text.disabled' }}
+                                >
+                                  {r.modelName}
+                                </Box>{' '}
+                                → {r.label}
+                              </>
+                            ) : (
+                              <>
+                                {r.modelName}{' '}
+                                <Typography
+                                  component="span"
+                                  variant="caption"
+                                  color="text.secondary"
+                                >
+                                  (rename to “{r.label}”)
+                                </Typography>
+                              </>
+                            )}
+                          </Typography>
+                        }
                       />
-                    ))}
-                    {!m.has_image && m.add_tags.length === 0 && (
+                    ) : (
+                      <Typography variant="body2" sx={{ minWidth: 240 }}>
+                        {r.modelName}
+                      </Typography>
+                    )}
+                    {r.hasImage && <Chip size="small" label="image" variant="outlined" />}
+                    {tagChips(r.addTags)}
+                    {!r.hasImage && r.addTags.length === 0 && (
                       <Typography variant="caption" color="text.secondary">
                         nothing new
                       </Typography>
@@ -172,161 +341,103 @@ export default function BundlePatchDialog({
               </Stack>
             </Box>
 
-            {/* Ambiguous — the user picks */}
-            {preview.ambiguous.length > 0 && (
+            {/* Rows needing a manual choice */}
+            {[...preview.ambiguous, ...preview.unmatched_patch].filter(
+              (u) => !resolved[u.patch_name],
+            ).length > 0 && (
               <Box>
                 <Typography variant="subtitle2" gutterBottom>
-                  Ambiguous — choose the model to apply to
+                  Choose a model for these (or leave unset to skip)
                 </Typography>
-                {preview.ambiguous.map((a) => (
-                  <Stack
-                    key={a.patch_name}
-                    direction="row"
-                    spacing={1}
-                    sx={{ alignItems: 'center', mb: 0.5 }}
-                  >
-                    <Typography variant="body2" sx={{ minWidth: 160 }}>
-                      {a.patch_name}
-                    </Typography>
-                    <FormControl size="small" sx={{ minWidth: 200 }}>
-                      <Select
-                        displayEmpty
-                        value={resolved[a.patch_name] ?? ''}
-                        onChange={(e) =>
-                          setResolved((r) => ({ ...r, [a.patch_name]: e.target.value }))
-                        }
-                      >
-                        <MenuItem value="">
-                          <em>skip</em>
-                        </MenuItem>
-                        {a.candidates.map((c) => (
-                          <MenuItem key={c.id} value={c.id}>
-                            {c.name}
+                {[...preview.ambiguous, ...preview.unmatched_patch].map((u) => {
+                  // Ambiguous rows offer their candidates; fully unmatched offer everyone.
+                  const options = u.candidates.length ? u.candidates : preview.members
+                  return (
+                    <Stack
+                      key={u.patch_name}
+                      direction="row"
+                      spacing={1}
+                      sx={{ alignItems: 'center', mb: 0.5, flexWrap: 'wrap' }}
+                    >
+                      <Typography variant="body2" sx={{ minWidth: 180 }}>
+                        {u.patch_name}
+                      </Typography>
+                      <FormControl size="small" sx={{ minWidth: 260 }}>
+                        <Select
+                          displayEmpty
+                          value={resolved[u.patch_name] ?? ''}
+                          onChange={(e) =>
+                            setResolved((r) => ({ ...r, [u.patch_name]: e.target.value }))
+                          }
+                          renderValue={(id) =>
+                            id ? (membersById.get(id)?.name ?? '') : <em>skip</em>
+                          }
+                        >
+                          <MenuItem value="">
+                            <em>skip</em>
                           </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Stack>
-                ))}
-              </Box>
-            )}
-
-            {preview.unmatched_patch.length > 0 && (
-              <Box>
-                <Typography variant="subtitle2" gutterBottom>
-                  No automatic match — pick a model, or leave unset to skip
-                </Typography>
-                {preview.unmatched_patch.map((name) => (
-                  <Stack
-                    key={name}
-                    direction="row"
-                    spacing={1}
-                    sx={{ alignItems: 'center', mb: 0.5 }}
-                  >
-                    <Typography variant="body2" sx={{ minWidth: 160 }}>
-                      {name}
-                    </Typography>
-                    <FormControl size="small" sx={{ minWidth: 220 }}>
-                      <Select
-                        displayEmpty
-                        value={resolved[name] ?? ''}
-                        onChange={(e) => setResolved((r) => ({ ...r, [name]: e.target.value }))}
-                      >
-                        <MenuItem value="">
-                          <em>skip</em>
-                        </MenuItem>
-                        {preview.members.map((m) => (
-                          <MenuItem key={m.id} value={m.id}>
-                            {m.name}
-                            {chosenElsewhere(name, m.id) ? ' — already chosen' : ''}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Stack>
-                ))}
+                          {options.map((m) => (
+                            <MenuItem key={m.id} value={m.id}>
+                              <Box>
+                                <Typography variant="body2">{m.name}</Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  {m.tags.length ? m.tags.join(', ') : 'no tags'}
+                                </Typography>
+                              </Box>
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      {/* what would be applied to the (as yet unpicked) row */}
+                      {tagChips(u.patch_tags)}
+                      {u.has_image && <Chip size="small" label="image" variant="outlined" />}
+                    </Stack>
+                  )
+                })}
               </Box>
             )}
 
             <Divider />
 
-            {/* What to apply */}
+            {/* Global apply rules */}
             <Box>
               <Typography variant="subtitle2" gutterBottom>
-                What to apply
+                How to apply
               </Typography>
-              <Stack>
-                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                  <Typography variant="body2" sx={{ minWidth: 120 }}>
-                    Model tags
-                  </Typography>
-                  <Select
-                    size="small"
-                    value={opts.model_tags}
-                    onChange={(e) =>
-                      setOpts((o) => ({ ...o, model_tags: e.target.value as typeof o.model_tags }))
-                    }
-                  >
-                    <MenuItem value="merge">Merge (add new)</MenuItem>
-                    <MenuItem value="replace">Replace (overwrite)</MenuItem>
-                    <MenuItem value="skip">Skip</MenuItem>
-                  </Select>
-                </Stack>
-                <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 1 }}>
-                  <Typography variant="body2" sx={{ minWidth: 120 }}>
-                    Model images
-                  </Typography>
-                  <Select
-                    size="small"
-                    value={opts.model_images}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        model_images: e.target.value as typeof o.model_images,
-                      }))
-                    }
-                  >
-                    <MenuItem value="replace_generated">Replace the render</MenuItem>
-                    <MenuItem value="add">Add alongside</MenuItem>
-                    <MenuItem value="skip">Skip</MenuItem>
-                  </Select>
-                </Stack>
-                <FormControlLabel
-                  sx={{ mt: 1 }}
-                  control={
-                    <Checkbox
-                      checked={opts.rename_models}
-                      onChange={(e) => setOpts((o) => ({ ...o, rename_models: e.target.checked }))}
-                    />
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                <Typography variant="body2" sx={{ minWidth: 120 }}>
+                  Model tags
+                </Typography>
+                <Select
+                  size="small"
+                  value={opts.model_tags}
+                  onChange={(e) =>
+                    setOpts((o) => ({ ...o, model_tags: e.target.value as typeof o.model_tags }))
                   }
-                  label="Rename models to the scraped names"
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={opts.bundle_cover}
-                      disabled={preview.bundle_cover_count === 0}
-                      onChange={(e) => setOpts((o) => ({ ...o, bundle_cover: e.target.checked }))}
-                    />
+                >
+                  <MenuItem value="merge">Merge (add new)</MenuItem>
+                  <MenuItem value="replace">Replace (overwrite)</MenuItem>
+                  <MenuItem value="skip">Skip</MenuItem>
+                </Select>
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 1 }}>
+                <Typography variant="body2" sx={{ minWidth: 120 }}>
+                  Model images
+                </Typography>
+                <Select
+                  size="small"
+                  value={opts.model_images}
+                  onChange={(e) =>
+                    setOpts((o) => ({
+                      ...o,
+                      model_images: e.target.value as typeof o.model_images,
+                    }))
                   }
-                  label={`Set the bundle cover${
-                    preview.bundle_cover_count ? '' : ' (none in patch)'
-                  }`}
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={opts.bundle_description}
-                      disabled={!preview.bundle_has_description}
-                      onChange={(e) =>
-                        setOpts((o) => ({ ...o, bundle_description: e.target.checked }))
-                      }
-                    />
-                  }
-                  label={`Set the bundle description${
-                    preview.bundle_has_description ? '' : ' (none in patch)'
-                  }`}
-                />
+                >
+                  <MenuItem value="replace_generated">Replace the render</MenuItem>
+                  <MenuItem value="add">Add alongside</MenuItem>
+                  <MenuItem value="skip">Skip</MenuItem>
+                </Select>
               </Stack>
             </Box>
           </Stack>
