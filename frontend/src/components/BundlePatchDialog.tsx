@@ -146,7 +146,7 @@ export default function BundlePatchDialog({
         choices: u.candidates.length ? u.candidates : preview.members,
       })
     }
-    return out
+    return out.sort((a, b) => a.label.localeCompare(b.label))
   }, [preview])
 
   // The member a row currently targets (fixed match, or the manual pick).
@@ -187,11 +187,11 @@ export default function BundlePatchDialog({
     })
   }
 
-  // Grid keeps the rename box, the name and the tags in aligned columns across
+  // Grid keeps the rename box, category, name and tags in aligned columns across
   // every row regardless of whether a row has a rename control or a dropdown.
   const GRID = {
     display: 'grid',
-    gridTemplateColumns: '34px minmax(220px, 300px) 1fr',
+    gridTemplateColumns: '32px 88px minmax(180px, 300px) 1fr',
     alignItems: 'center',
     columnGap: 8,
   }
@@ -302,13 +302,20 @@ export default function BundlePatchDialog({
                 )}
               </Stack>
 
-              <Stack spacing={0.75}>
+              <Box sx={{ borderTop: (t) => `1px solid ${t.palette.divider}` }}>
                 {rows.map((r) => {
                   const id = targetId(r)
                   const renames = !!id && nameDiffers(r)
                   const willRename = renames && renameSet.has(r.label)
                   return (
-                    <Box key={r.label} sx={GRID}>
+                    <Box
+                      key={r.label}
+                      sx={{
+                        ...GRID,
+                        py: 0.75,
+                        borderBottom: (t) => `1px solid ${t.palette.divider}`,
+                      }}
+                    >
                       {/* col 1 — rename checkbox, only where a rename is possible */}
                       {renames ? (
                         <Tooltip title={`Rename to “${r.label}”`}>
@@ -323,7 +330,12 @@ export default function BundlePatchDialog({
                         <Box />
                       )}
 
-                      {/* col 2 — the model: its name (or a picker), plus category */}
+                      {/* col 2 — category, to tell same-named models apart */}
+                      <Typography variant="caption" color="text.secondary" noWrap>
+                        {r.category ?? ''}
+                      </Typography>
+
+                      {/* col 3 — the model: its name, or a picker */}
                       <Box sx={{ minWidth: 0 }}>
                         {r.fixed || id ? (
                           <Typography variant="body2" noWrap>
@@ -385,14 +397,9 @@ export default function BundlePatchDialog({
                             </Select>
                           </FormControl>
                         )}
-                        {r.category && (
-                          <Typography variant="caption" color="text.secondary">
-                            {r.category}
-                          </Typography>
-                        )}
                       </Box>
 
-                      {/* col 3 — what it brings */}
+                      {/* col 4 — what it brings */}
                       <Stack
                         direction="row"
                         spacing={0.5}
@@ -417,7 +424,7 @@ export default function BundlePatchDialog({
                     </Box>
                   )
                 })}
-              </Stack>
+              </Box>
             </Box>
 
             <Divider />
