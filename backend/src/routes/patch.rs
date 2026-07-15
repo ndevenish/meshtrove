@@ -228,6 +228,10 @@ struct PatchPreview {
 
 #[derive(Serialize, ToSchema)]
 struct MatchedRow {
+    /// The patch model's index — its stable identity. Names are not unique (a
+    /// "Mummy Lord" in Enemies and another in Busts), so the UI and the apply
+    /// options key on this, not the name.
+    key: usize,
     patch_name: String,
     model_id: Uuid,
     model_name: String,
@@ -242,6 +246,7 @@ struct MatchedRow {
 /// member is chosen (add-tags recomputed client-side against that member).
 #[derive(Serialize, ToSchema)]
 struct UnresolvedRow {
+    key: usize,
     patch_name: String,
     patch_tags: Vec<String>,
     has_image: bool,
@@ -301,9 +306,10 @@ async fn preview(
         }
     }
 
-    for (pm, ids) in archive.patch.models.iter().zip(&resolution) {
+    for (key, (pm, ids)) in archive.patch.models.iter().zip(&resolution).enumerate() {
         match ids.as_slice() {
             [] => unmatched_patch.push(UnresolvedRow {
+                key,
                 patch_name: pm.label(),
                 patch_tags: patch_tags(pm),
                 has_image: has_image(pm),
@@ -313,6 +319,7 @@ async fn preview(
             [id] if sole_counts.get(id).copied().unwrap_or(0) > 1 => {
                 claimed.insert(*id);
                 ambiguous.push(UnresolvedRow {
+                    key,
                     patch_name: pm.label(),
                     patch_tags: patch_tags(pm),
                     has_image: has_image(pm),
@@ -331,6 +338,7 @@ async fn preview(
                     .filter(|t| !have.contains(t))
                     .collect::<Vec<_>>();
                 matched.push(MatchedRow {
+                    key,
                     patch_name: pm.label(),
                     model_id: *id,
                     model_name: member.map(|m| m.name.clone()).unwrap_or_default(),
@@ -344,6 +352,7 @@ async fn preview(
                     claimed.insert(*id);
                 }
                 ambiguous.push(UnresolvedRow {
+                    key,
                     patch_name: pm.label(),
                     patch_tags: patch_tags(pm),
                     has_image: has_image(pm),
@@ -423,9 +432,9 @@ enum ImageMode {
 
 #[derive(Deserialize, Default)]
 struct ApplyOptions {
-    /// Patch model labels whose matched model should be renamed to the scraped
-    /// name. Per-model, not all-or-nothing — a rename is a bigger commitment than
-    /// a tag, and worth deciding one at a time.
+    /// Patch model *keys* (indices, as strings) whose matched model should be
+    /// renamed to the scraped name. Per-model, not all-or-nothing — a rename is a
+    /// bigger commitment than a tag. Keyed by index, not name: names are not unique.
     #[serde(default)]
     rename: Vec<String>,
     #[serde(default)]
@@ -436,8 +445,9 @@ struct ApplyOptions {
     bundle_cover: bool,
     #[serde(default)]
     bundle_description: bool,
-    /// Resolves ambiguous rows and adopts unmatched ones: patch model label →
-    /// the member id to apply it to. Overrides the automatic single match too.
+    /// Resolves ambiguous/contested rows and adopts unmatched ones: patch model
+    /// key (index, as a string) → the member id to apply it to. Overrides the
+    /// automatic single match too.
     #[serde(default)]
     matches: HashMap<String, Uuid>,
 }
@@ -524,15 +534,29 @@ async fn apply(
     let members = bundle_members(&state, bundle_id).await?;
     let resolution = resolve(&archive.patch, &members);
 
-    // Which member each patch model applies to: the automatic single match, then
-    // the caller's overrides (which also adopt ambiguous/unmatched rows).
+    // A member contested by several patch models never auto-applies — the same
+    // rule preview shows — so the two "Gold" entries cannot both silently land on
+    // one model. Only an explicit `matches` entry resolves a contested one.
+    let mut sole_counts: HashMap<Uuid, usize> = HashMap::new();
+    for ids in &resolution {
+        if let [id] = ids.as_slice() {
+            *sole_counts.entry(*id).or_default() += 1;
+        }
+    }
+
+    // Which member each patch model applies to: the caller's explicit choice
+    // (keyed by index), else the automatic single, uncontested match.
     let mut targets: Vec<(usize, Uuid)> = Vec::new();
-    for (idx, (pm, ids)) in archive.patch.models.iter().zip(&resolution).enumerate() {
-        let chosen = options
-            .matches
-            .get(&pm.label())
-            .copied()
-            .or(if ids.len() == 1 { Some(ids[0]) } else { None });
+    for (idx, ids) in resolution.iter().enumerate() {
+        let chosen =
+            options
+                .matches
+                .get(&idx.to_string())
+                .copied()
+                .or_else(|| match ids.as_slice() {
+                    [id] if sole_counts.get(id).copied().unwrap_or(0) == 1 => Some(*id),
+                    _ => None,
+                });
         if let Some(model_id) = chosen {
             targets.push((idx, model_id));
         }
@@ -606,7 +630,7 @@ async fn apply(
         let pm = &archive.patch.models[*idx];
         let mut touched = false;
 
-        if options.rename.contains(&pm.label())
+        if options.rename.contains(&idx.to_string())
             && let Some(name) = pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
         {
             sqlx::query!("UPDATE models SET name = $2 WHERE id = $1", model_id, name)

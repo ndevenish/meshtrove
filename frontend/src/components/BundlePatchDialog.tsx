@@ -85,7 +85,7 @@ export default function BundlePatchDialog({
       // Pre-tick a rename wherever the auto-matched model's name differs from the
       // scraped one — the common case is that the scraped name is the better one.
       setRenameSet(
-        new Set(p.matched.filter((m) => m.patch_name !== m.model_name).map((m) => m.patch_name)),
+        new Set(p.matched.filter((m) => m.patch_name !== m.model_name).map((m) => String(m.key))),
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -121,7 +121,8 @@ export default function BundlePatchDialog({
   // ambiguous / unmatched) offers a dropdown. The chosen member, add-tags and
   // rename state all derive from here so each model shows up exactly once.
   type Row = {
-    label: string
+    key: string // stable identity (patch model index); names are not unique
+    label: string // display name (patch_name)
     category: string | null
     patchTags: string[]
     hasImage: boolean
@@ -131,6 +132,7 @@ export default function BundlePatchDialog({
   const rows: Row[] = useMemo(() => {
     if (!preview) return []
     const out: Row[] = preview.matched.map((m) => ({
+      key: String(m.key),
       label: m.patch_name,
       category: m.category,
       patchTags: m.add_tags,
@@ -139,6 +141,7 @@ export default function BundlePatchDialog({
     }))
     for (const u of [...preview.ambiguous, ...preview.unmatched_patch]) {
       out.push({
+        key: String(u.key),
         label: u.patch_name,
         category: u.category,
         patchTags: u.patch_tags,
@@ -150,8 +153,8 @@ export default function BundlePatchDialog({
   }, [preview])
 
   // The member a row currently targets (fixed match, or the manual pick).
-  const targetId = (r: Row) => r.fixed?.id ?? resolved[r.label] ?? ''
-  const targetName = (r: Row) => r.fixed?.name ?? membersById.get(resolved[r.label] ?? '')?.name
+  const targetId = (r: Row) => r.fixed?.id ?? resolved[r.key] ?? ''
+  const targetName = (r: Row) => r.fixed?.name ?? membersById.get(resolved[r.key] ?? '')?.name
   // Tags that would actually be added: the patch's, minus what the target has.
   // (Matched rows already arrive pre-filtered; recompute for manual picks.)
   const addTags = (r: Row) => {
@@ -164,25 +167,25 @@ export default function BundlePatchDialog({
     return !!n && n !== r.label
   }
 
-  const renameable = rows.filter((r) => targetId(r) && nameDiffers(r)).map((r) => r.label)
-  const allRenamed = renameable.length > 0 && renameable.every((l) => renameSet.has(l))
+  const renameable = rows.filter((r) => targetId(r) && nameDiffers(r)).map((r) => r.key)
+  const allRenamed = renameable.length > 0 && renameable.every((k) => renameSet.has(k))
   const toggleAllRenames = () => setRenameSet(allRenamed ? new Set() : new Set(renameable))
-  const toggleRename = (label: string) =>
+  const toggleRename = (key: string) =>
     setRenameSet((s) => {
       const next = new Set(s)
-      if (next.has(label)) next.delete(label)
-      else next.add(label)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
 
-  const pickMember = (label: string, id: string) => {
-    setResolved((r) => ({ ...r, [label]: id }))
+  const pickMember = (row: Row, id: string) => {
+    setResolved((r) => ({ ...r, [row.key]: id }))
     // Default the rename on when the pick renames, like the auto matches.
-    const differs = !!id && membersById.get(id)?.name !== label
+    const differs = !!id && membersById.get(id)?.name !== row.label
     setRenameSet((s) => {
       const next = new Set(s)
-      if (differs) next.add(label)
-      else next.delete(label)
+      if (differs) next.add(row.key)
+      else next.delete(row.key)
       return next
     })
   }
@@ -310,10 +313,10 @@ export default function BundlePatchDialog({
                 {rows.map((r) => {
                   const id = targetId(r)
                   const renames = !!id && nameDiffers(r)
-                  const willRename = renames && renameSet.has(r.label)
+                  const willRename = renames && renameSet.has(r.key)
                   return (
                     <Box
-                      key={r.label}
+                      key={r.key}
                       sx={{
                         ...GRID,
                         py: 0.75,
@@ -326,8 +329,8 @@ export default function BundlePatchDialog({
                           <Checkbox
                             size="small"
                             sx={{ p: 0 }}
-                            checked={renameSet.has(r.label)}
-                            onChange={() => toggleRename(r.label)}
+                            checked={renameSet.has(r.key)}
+                            onChange={() => toggleRename(r.key)}
                           />
                         </Tooltip>
                       ) : (
@@ -364,8 +367,8 @@ export default function BundlePatchDialog({
                             <FormControl size="small" fullWidth>
                               <Select
                                 displayEmpty
-                                value={resolved[r.label] ?? ''}
-                                onChange={(e) => pickMember(r.label, e.target.value)}
+                                value={resolved[r.key] ?? ''}
+                                onChange={(e) => pickMember(r, e.target.value)}
                                 renderValue={(v) =>
                                   v ? (
                                     (membersById.get(v)?.name ?? '')

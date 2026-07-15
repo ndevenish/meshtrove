@@ -509,6 +509,8 @@ export interface PatchMember {
 }
 
 export interface PatchUnresolvedRow {
+  /** the patch model's index — its stable identity (names are not unique) */
+  key: number
   patch_name: string
   patch_tags: string[]
   has_image: boolean
@@ -523,6 +525,7 @@ export interface PatchPreview {
   /** candidate covers as data: URLs, primary first */
   bundle_covers: string[]
   matched: {
+    key: number
     patch_name: string
     model_id: string
     model_name: string
