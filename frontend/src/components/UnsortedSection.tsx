@@ -190,51 +190,57 @@ export default function UnsortedSection({
 
       {visible.length > 0 && (
         <>
-          <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center' }}>
-            <Button
-              size="small"
-              startIcon={<DriveFileMoveIcon />}
-              variant="contained"
-              disabled={selected.size === 0}
-              onClick={() => setMoveOpen(true)}
-            >
-              Move {selected.size || ''} to variant
-            </Button>
-            {model.bundles.length > 0 && (
+          {/* Classifying and moving files is edit-mode work; browsing a model
+              shows the unsorted files read-only (still downloadable). */}
+          {editing && (
+            <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center' }}>
               <Button
                 size="small"
-                startIcon={<Inventory2Icon />}
+                startIcon={<DriveFileMoveIcon />}
+                variant="contained"
                 disabled={selected.size === 0}
-                onClick={() => setToBundleOpen(true)}
+                onClick={() => setMoveOpen(true)}
               >
-                Move to bundle
+                Move {selected.size || ''} to variant
               </Button>
-            )}
-            <Button
-              size="small"
-              color="error"
-              startIcon={<DeleteIcon />}
-              disabled={selected.size === 0}
-              onClick={removeSelected}
-            >
-              Delete
-            </Button>
-            <Box sx={{ flexGrow: 1 }} />
-            <Button
-              size="small"
-              onClick={() =>
-                setSelected(
-                  selected.size === visible.length ? new Set() : new Set(visible.map((f) => f.id)),
-                )
-              }
-            >
-              {selected.size === visible.length ? 'Clear' : 'Select all'}
-            </Button>
-          </Stack>
+              {model.bundles.length > 0 && (
+                <Button
+                  size="small"
+                  startIcon={<Inventory2Icon />}
+                  disabled={selected.size === 0}
+                  onClick={() => setToBundleOpen(true)}
+                >
+                  Move to bundle
+                </Button>
+              )}
+              <Button
+                size="small"
+                color="error"
+                startIcon={<DeleteIcon />}
+                disabled={selected.size === 0}
+                onClick={removeSelected}
+              >
+                Delete
+              </Button>
+              <Box sx={{ flexGrow: 1 }} />
+              <Button
+                size="small"
+                onClick={() =>
+                  setSelected(
+                    selected.size === visible.length
+                      ? new Set()
+                      : new Set(visible.map((f) => f.id)),
+                  )
+                }
+              >
+                {selected.size === visible.length ? 'Clear' : 'Select all'}
+              </Button>
+            </Stack>
+          )}
 
           <FileTree
             files={visible}
-            selectable
+            selectable={editing}
             selected={selected}
             onToggle={toggle}
             onKindChange={editing ? setKind : undefined}
