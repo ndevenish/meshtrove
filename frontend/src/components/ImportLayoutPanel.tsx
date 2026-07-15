@@ -333,7 +333,7 @@ export default function ImportLayoutPanel({
                       sx={{ fontFamily: 'monospace', fontSize: 12, minWidth: 180 }}
                       noWrap
                     >
-                      {value.raw}
+                      {value.display}
                     </Typography>
                     <Autocomplete
                       multiple

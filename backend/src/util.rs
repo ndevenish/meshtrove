@@ -46,9 +46,20 @@ pub fn expand_camel_case(name: &str) -> String {
     out
 }
 
+/// Make a captured folder/file token readable before we show it back to the
+/// user to map onto tags: underscores become spaces, camelCase gets its spaces
+/// back, and runs of whitespace collapse to one. `Supported_PreLychee` reads as
+/// "Supported Pre Lychee". Purely cosmetic — the value's identity (its folded
+/// form, the value-map key) is untouched, so mapping and matching still key off
+/// the raw capture.
+pub fn humanize_token(raw: &str) -> String {
+    let expanded = expand_camel_case(&raw.replace('_', " "));
+    expanded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{expand_camel_case, slugify};
+    use super::{expand_camel_case, humanize_token, slugify};
 
     #[test]
     fn camel_case_gets_its_spaces_back() {
@@ -67,6 +78,20 @@ mod tests {
         assert_eq!(expand_camel_case("Knight Rider"), "Knight Rider");
         assert_eq!(expand_camel_case("knight"), "knight");
         assert_eq!(expand_camel_case(""), "");
+    }
+
+    #[test]
+    fn tokens_get_humanised_for_display() {
+        assert_eq!(humanize_token("Supported_LYCHEE"), "Supported LYCHEE");
+        assert_eq!(humanize_token("PreSupported"), "Pre Supported");
+        assert_eq!(humanize_token("32_mm"), "32 mm");
+        // Underscores and camelCase together, and doubled/edge whitespace.
+        assert_eq!(
+            humanize_token("Supported_PreLychee"),
+            "Supported Pre Lychee"
+        );
+        assert_eq!(humanize_token("  spare___parts_kit "), "spare parts kit");
+        assert_eq!(humanize_token(""), "");
     }
 
     #[test]

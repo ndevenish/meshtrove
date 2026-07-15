@@ -145,6 +145,9 @@ pub struct GroupInfo {
 pub struct CapturedValue {
     /// First-seen raw spelling; the value-map key is its lowercase.
     pub raw: String,
+    /// The raw value humanised for the mapping table (underscores and camelCase
+    /// turned into spaces). Cosmetic only — `raw` stays the mapping key.
+    pub display: String,
     pub tags: Option<Vec<String>>,
 }
 
@@ -333,6 +336,7 @@ pub fn analyze(
                     let resolved = resolve(raw);
                     values.entry(fold(raw)).or_insert_with(|| CapturedValue {
                         raw: raw.to_string(),
+                        display: crate::util::humanize_token(raw),
                         tags: resolved.clone(),
                     });
                     match resolved {
@@ -553,6 +557,14 @@ mod tests {
         assert_eq!(plan.unmapped_values(), vec!["Supported_LYCHEE"]);
         assert_eq!(plan.annotations[0].variant_tags, vec!["32mm"]);
         assert_eq!(plan.annotations[0].unmapped, vec!["Supported_LYCHEE"]);
+        // The mapping table shows a humanised label, but keeps `raw` as its key.
+        let unmapped = plan
+            .values
+            .iter()
+            .find(|v| v.tags.is_none())
+            .expect("unmapped");
+        assert_eq!(unmapped.raw, "Supported_LYCHEE");
+        assert_eq!(unmapped.display, "Supported LYCHEE");
     }
 
     #[test]

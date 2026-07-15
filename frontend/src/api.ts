@@ -249,6 +249,9 @@ export interface GroupInfo {
 
 export interface CapturedValue {
   raw: string
+  /** `raw` humanised for display (underscores/camelCase → spaces); the value
+      map still keys off `raw`, so use this for the label only */
+  display: string
   /** resolved variant tag names; null = unmapped */
   tags: string[] | null
 }
