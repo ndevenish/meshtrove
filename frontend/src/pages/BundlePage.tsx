@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container,
   Box,
@@ -27,6 +27,7 @@ import { api, imageUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import { useSuppressGlobalDrop } from '../globalDrop'
+import { startImport } from '../upload'
 import Dropzone from '../components/Dropzone'
 import ModelCard from '../components/ModelCard'
 import BundleDetailsEditor from '../components/BundleDetailsEditor'
@@ -38,6 +39,7 @@ import BundlePatchDialog from '../components/BundlePatchDialog'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const { user } = useAuth()
   const queryClient = useQueryClient()
   // Edit *mode*: the fields become editable in place, and the destructive
@@ -50,6 +52,9 @@ export default function BundlePage() {
   const [patchOpen, setPatchOpen] = useState(false)
   // The zip dropped on the inline importer box, handed to the dialog to preview.
   const [patchFile, setPatchFile] = useState<File | null>(null)
+  // Upload progress (0..1) for the "merge files into this bundle" drop box, while
+  // it stages the drop before jumping to the import page.
+  const [mergePct, setMergePct] = useState<number | null>(null)
   // Edit mode shows the inline patch drop box, so the app-wide overlay must stand
   // aside while editing or it swallows the zip meant for that box.
   useSuppressGlobalDrop(editing)
@@ -247,20 +252,50 @@ export default function BundlePage() {
                 onDone={() => setEditing(false)}
                 onBusyChange={setSaving}
               />
-              <Box sx={{ mb: 2 }}>
-                <Dropzone
-                  label="Import scraped metadata"
-                  hint="Drop a bundle-patch zip — patch.json + images"
-                  accept=".zip"
-                  onDrop={(drop) => {
-                    const file = drop.files[0]?.file
-                    if (file) {
-                      setPatchFile(file)
-                      setPatchOpen(true)
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 2 }}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Dropzone
+                    label={
+                      mergePct === null
+                        ? 'Merge files into this bundle'
+                        : mergePct < 100
+                          ? `Uploading ${mergePct}%…`
+                          : 'Staging…'
                     }
-                  }}
-                />
-              </Box>
+                    hint="Drop an archive or folder — opens the import set to add to this bundle"
+                    multiple
+                    busy={mergePct !== null}
+                    progress={mergePct !== null && mergePct < 100 ? mergePct : undefined}
+                    onDrop={(drop) => {
+                      if (!drop.files.length) return
+                      setMergePct(0)
+                      void startImport(drop, (f) => setMergePct(Math.round(f * 100)))
+                        .then(async (staged) => {
+                          await queryClient.invalidateQueries({ queryKey: ['imports'] })
+                          navigate(`/imports/${staged.id}?bundle=${bundle.id}`)
+                        })
+                        .catch((err) =>
+                          setUploadError(err instanceof Error ? err.message : String(err)),
+                        )
+                        .finally(() => setMergePct(null))
+                    }}
+                  />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Dropzone
+                    label="Import scraped metadata"
+                    hint="Drop a bundle-patch zip — patch.json + images"
+                    accept=".zip"
+                    onDrop={(drop) => {
+                      const file = drop.files[0]?.file
+                      if (file) {
+                        setPatchFile(file)
+                        setPatchOpen(true)
+                      }
+                    }}
+                  />
+                </Box>
+              </Stack>
             </>
           )}
           {!editing && bundle.creator_name && (
