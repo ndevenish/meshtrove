@@ -178,6 +178,9 @@ struct Member {
     id: Uuid,
     name: String,
     tags: Vec<String>,
+    /// Other names this model already answers to (from earlier imports/renames);
+    /// extra lookup keys so a scrape that uses one of them still resolves.
+    aliases: Vec<String>,
 }
 
 async fn bundle_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<Member>, ApiError> {
@@ -185,7 +188,10 @@ async fn bundle_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<Member>
         r#"SELECT m.id, m.name,
                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                             JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}')
-                      as "tags!: Vec<String>"
+                      as "tags!: Vec<String>",
+                  coalesce((SELECT array_agg(a.alias::text ORDER BY a.alias)
+                            FROM model_aliases a WHERE a.model_id = m.id), '{}')
+                      as "aliases!: Vec<String>"
            FROM models m JOIN bundle_models bm ON bm.model_id = m.id
            WHERE bm.bundle_id = $1
            ORDER BY m.name"#,
@@ -199,6 +205,7 @@ async fn bundle_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<Member>
             id: r.id,
             name: r.name,
             tags: r.tags,
+            aliases: r.aliases,
         })
         .collect())
 }
@@ -214,18 +221,41 @@ async fn bundle_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<Member>
 /// words is a candidate. If several members prefix-match we keep the longest
 /// (most specific) one, and if still tied use the scraped `category` — carried as
 /// a tag on the model it belongs to — to break it.
+///
+/// Both tiers consider each member's stored aliases alongside its name, so a
+/// model that a past import taught an alternate name still resolves by it.
 fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
+    // Every name a member answers to, as a word list, for the prefix tier.
+    let member_spellings: Vec<Vec<Vec<String>>> = members
+        .iter()
+        .map(|m| {
+            std::iter::once(&m.name)
+                .chain(m.aliases.iter())
+                .map(|s| words(s))
+                .filter(|w| !w.is_empty())
+                .collect()
+        })
+        .collect();
+
     let mut by_key: HashMap<String, Vec<Uuid>> = HashMap::new();
     for m in members {
-        by_key.entry(normalize(&m.name)).or_default().push(m.id);
+        for name in std::iter::once(&m.name).chain(m.aliases.iter()) {
+            let key = normalize(name);
+            if key.is_empty() {
+                continue;
+            }
+            let ids = by_key.entry(key).or_default();
+            if !ids.contains(&m.id) {
+                ids.push(m.id);
+            }
+        }
     }
-    let member_words: Vec<Vec<String>> = members.iter().map(|m| words(&m.name)).collect();
 
     patch
         .models
         .iter()
         .map(|pm| {
-            // Tier 1: exact on the collapsed name.
+            // Tier 1: exact on the collapsed name (or any alias).
             let mut ids: Vec<Uuid> = Vec::new();
             for key in pm.match_keys() {
                 for id in by_key.get(&key).into_iter().flatten() {
@@ -238,24 +268,26 @@ fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
                 return ids;
             }
 
-            // Tier 2: prefix fallback.
-            let spellings = pm.word_spellings();
-            let mut cands: Vec<usize> = member_words
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| !w.is_empty() && spellings.iter().any(|s| s.starts_with(w)))
-                .map(|(i, _)| i)
-                .collect();
+            // Tier 2: prefix fallback. A member matches if any of its spellings is
+            // the leading run of a scraped spelling; its "length" for the
+            // most-specific test is that of the longest such spelling.
+            let scraped = pm.word_spellings();
+            let matched_len = |i: usize| -> usize {
+                member_spellings[i]
+                    .iter()
+                    .filter(|w| scraped.iter().any(|s| s.starts_with(w)))
+                    .map(|w| w.len())
+                    .max()
+                    .unwrap_or(0)
+            };
+            let mut cands: Vec<usize> =
+                (0..members.len()).filter(|&i| matched_len(i) > 0).collect();
 
             // Prefer the most specific: the longest name that still fits, so
             // "WarriorMummy" beats a bare "Warrior".
             if cands.len() > 1 {
-                let longest = cands
-                    .iter()
-                    .map(|&i| member_words[i].len())
-                    .max()
-                    .unwrap_or(0);
-                cands.retain(|&i| member_words[i].len() == longest);
+                let longest = cands.iter().map(|&i| matched_len(i)).max().unwrap_or(0);
+                cands.retain(|&i| matched_len(i) == longest);
             }
 
             // Still tied: the scraped category (Enemies, NPCs, …) rides along as a
@@ -538,6 +570,7 @@ struct ApplyResult {
     models_updated: usize,
     images_added: usize,
     tags_added: usize,
+    aliases_added: usize,
 }
 
 /// A blob already put into the store, ready to become an image row.
@@ -675,6 +708,7 @@ async fn apply(
         models_updated: 0,
         images_added: 0,
         tags_added: 0,
+        aliases_added: 0,
     };
     let mut tx = state.db.begin().await?;
 
@@ -718,9 +752,12 @@ async fn apply(
         let pm = &archive.patch.models[*idx];
         let mut touched = false;
 
-        if options.rename.contains(&idx.to_string())
-            && let Some(name) = pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
-        {
+        let renamed_to = if options.rename.contains(&idx.to_string()) {
+            pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
+        } else {
+            None
+        };
+        if let Some(name) = renamed_to {
             sqlx::query!("UPDATE models SET name = $2 WHERE id = $1", model_id, name)
                 .execute(&mut *tx)
                 .await?;
@@ -772,6 +809,41 @@ async fn apply(
             touched = true;
         }
 
+        // ---- aliases ----
+        // Teach the model every name this scrape knows it by, so a later import
+        // resolves it outright instead of falling back to a fuzzy match; a rename
+        // also records the name being left behind. citext + the (model, alias)
+        // key dedup case variants; we drop any that just repeat the model's own
+        // (final) name.
+        let member = members.iter().find(|m| m.id == *model_id);
+        let final_name = renamed_to
+            .map(str::to_string)
+            .or_else(|| member.map(|m| m.name.clone()))
+            .unwrap_or_default();
+        let mut aliases: Vec<&str> = pm.match_hint.aliases.iter().map(String::as_str).collect();
+        if renamed_to.is_some()
+            && let Some(m) = member
+        {
+            aliases.push(m.name.as_str());
+        }
+        for alias in aliases {
+            let alias = alias.trim();
+            if alias.is_empty() || alias.eq_ignore_ascii_case(&final_name) {
+                continue;
+            }
+            let added = sqlx::query!(
+                "INSERT INTO model_aliases (model_id, alias) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                model_id,
+                alias,
+            )
+            .execute(&mut *tx)
+            .await?;
+            if added.rows_affected() > 0 {
+                result.aliases_added += 1;
+                touched = true;
+            }
+        }
+
         if touched {
             result.models_updated += 1;
         }
@@ -782,6 +854,7 @@ async fn apply(
         models = result.models_updated,
         images = result.images_added,
         tags = result.tags_added,
+        aliases = result.aliases_added,
         "patch apply: committed"
     );
     Ok(Json(result))
@@ -901,6 +974,16 @@ mod tests {
             id: Uuid::new_v4(),
             name: name.into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            aliases: Vec::new(),
+        }
+    }
+
+    fn member_with_aliases(name: &str, aliases: &[&str]) -> Member {
+        Member {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            tags: Vec::new(),
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
         }
     }
 
@@ -999,5 +1082,32 @@ mod tests {
     fn no_prefix_is_no_match() {
         let members = [member("Crocodile", &[]), member("Camel", &[])];
         assert!(resolve_one(pm("Dragon Buried Tomb", None), &members).is_empty());
+    }
+
+    #[test]
+    fn a_stored_alias_gives_an_exact_match() {
+        let members = [member_with_aliases(
+            "WerejackalPriest_V2",
+            &["Werejackal Priest"],
+        )];
+        assert_eq!(
+            resolve_one(pm("Werejackal Priest", None), &members),
+            vec![members[0].id]
+        );
+    }
+
+    #[test]
+    fn a_stored_alias_participates_in_the_prefix_fallback() {
+        // The reported case: a versioned member the bare name would miss. Its alias
+        // "Werejackal Priest" leads the scraped name, and being the longer spelling
+        // it wins over a plain "Werejackal".
+        let members = [
+            member_with_aliases("WerejackalPriest_V2", &["Werejackal Priest"]),
+            member("Werejackal", &[]),
+        ];
+        assert_eq!(
+            resolve_one(pm("Werejackal Priest Buried Tomb", None), &members),
+            vec![members[0].id]
+        );
     }
 }

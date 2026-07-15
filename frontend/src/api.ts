@@ -554,6 +554,7 @@ export interface PatchApplyResult {
   models_updated: number
   images_added: number
   tags_added: number
+  aliases_added: number
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`

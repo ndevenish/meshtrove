@@ -110,7 +110,7 @@ export default function BundlePatchDialog({
       onApplied()
       setDone(
         `Applied: ${result.models_updated} model(s) updated, ${result.tags_added} tag(s) added, ` +
-          `${result.images_added} image(s) added.`,
+          `${result.images_added} image(s) added, ${result.aliases_added} alias(es) recorded.`,
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
