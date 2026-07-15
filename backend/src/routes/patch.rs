@@ -40,13 +40,27 @@ pub fn router() -> Router<AppState> {
 #[derive(Deserialize, Default)]
 struct Patch {
     #[serde(default)]
+    source: PatchSource,
+    #[serde(default)]
     bundle: PatchBundle,
     #[serde(default)]
     models: Vec<PatchModel>,
 }
 
+/// Where the scrape came from. Only `url` interests us — the page the bundle was
+/// bought/scraped from, which we stamp onto member models that have no source.
+#[derive(Deserialize, Default)]
+struct PatchSource {
+    #[serde(default)]
+    url: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct PatchBundle {
+    /// The site/author the bundle came from, by name — resolved to a `creators`
+    /// row and stamped onto member models that have no creator yet.
+    #[serde(default)]
+    creator: Option<String>,
     #[serde(default)]
     description_md: Option<String>,
     /// Candidate covers, primary first (relative paths into the zip).
@@ -747,10 +761,48 @@ async fn apply(
         }
     }
 
+    // The bundle's creator and source page ride along with the scrape. Resolve
+    // them once, then fill any matched model that has none of its own — the
+    // carve rarely knows either, and "if it has one already, leave it" mirrors
+    // how an import stamps a member without clobbering.
+    let patch_creator_id = match archive.patch.bundle.creator.as_deref() {
+        Some(name) => resolve_creator(&mut tx, name).await?,
+        None => None,
+    };
+    let patch_source_url = archive
+        .patch
+        .source
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+
     // ---- per model ----
     for (idx, model_id) in &targets {
         let pm = &archive.patch.models[*idx];
         let mut touched = false;
+
+        // Stamp the bundle's creator/source onto the model, but only where it has
+        // none — coalesce keeps whatever the model already knows, and the WHERE
+        // means an all-already-set model reports no change.
+        if patch_creator_id.is_some() || patch_source_url.is_some() {
+            let filled = sqlx::query!(
+                r#"UPDATE models SET
+                     creator_id = coalesce(creator_id, $2::uuid),
+                     source_url = coalesce(source_url, $3::text)
+                   WHERE id = $1
+                     AND (($2::uuid IS NOT NULL AND creator_id IS NULL)
+                       OR ($3::text IS NOT NULL AND source_url IS NULL))"#,
+                model_id,
+                patch_creator_id,
+                patch_source_url,
+            )
+            .execute(&mut *tx)
+            .await?;
+            if filled.rows_affected() > 0 {
+                touched = true;
+            }
+        }
 
         let renamed_to = if options.rename.contains(&idx.to_string()) {
             pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
@@ -958,6 +1010,33 @@ async fn read_archive_from_bytes(bytes: Vec<u8>) -> Result<Archive, ApiError> {
     .map_err(|e| ApiError::Internal(e.into()))?
 }
 
+/// Resolve a creator name to a `creators` row, reusing an existing one
+/// (case-insensitively) or creating it. `creators.name` has no unique index, so
+/// this is a find-then-insert rather than an upsert; a blank name resolves to
+/// nothing. Runs inside the caller's transaction.
+async fn resolve_creator(
+    tx: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<Option<Uuid>, ApiError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if let Some(id) = sqlx::query_scalar!(
+        "SELECT id FROM creators WHERE lower(name) = lower($1) ORDER BY created_at LIMIT 1",
+        name,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        return Ok(Some(id));
+    }
+    let id = sqlx::query_scalar!("INSERT INTO creators (name) VALUES ($1) RETURNING id", name)
+        .fetch_one(&mut *tx)
+        .await?;
+    Ok(Some(id))
+}
+
 async fn bundle_created_by(state: &AppState, bundle_id: Uuid) -> Result<Uuid, ApiError> {
     sqlx::query_scalar!("SELECT created_by FROM bundles WHERE id = $1", bundle_id)
         .fetch_optional(&state.db)
@@ -1003,6 +1082,7 @@ mod tests {
 
     fn resolve_one(pm: PatchModel, members: &[Member]) -> Vec<Uuid> {
         let patch = Patch {
+            source: PatchSource::default(),
             bundle: PatchBundle::default(),
             models: vec![pm],
         };
