@@ -226,8 +226,14 @@ async fn plan_files(
     db: impl sqlx::PgExecutor<'_>,
     import_id: Uuid,
 ) -> Result<Vec<layout::PlanFile>, ApiError> {
+    // The archive itself is staged alongside its contents, but it is never
+    // carved — it becomes a source_archives row at commit. Matching the carve
+    // against its filename can only fail, which would drag the match count down
+    // by one against a file that was never a candidate.
     let rows = sqlx::query!(
-        "SELECT id, path, filename FROM files WHERE import_id = $1 ORDER BY path, filename",
+        "SELECT id, path, filename FROM files
+         WHERE import_id = $1 AND kind <> 'archive'::file_kind
+         ORDER BY path, filename",
         import_id,
     )
     .fetch_all(db)

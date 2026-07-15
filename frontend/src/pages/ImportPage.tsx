@@ -271,7 +271,7 @@ export default function ImportPage() {
         </Typography>
         <ImportLayoutPanel
           importId={staged.id}
-          fileCount={staged.file_count}
+          fileCount={(files ?? []).filter((f) => f.kind !== 'archive').length}
           unpacking={staged.unpacking}
           target={dest === 'new_model' ? 'model' : 'bundle'}
           onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
