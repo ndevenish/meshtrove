@@ -289,6 +289,18 @@ async fn preview(
             .is_some_and(|p| archive.images.contains_key(p))
     };
 
+    // A member is "contested" when it is the sole match of more than one patch
+    // model — two patch entries named "Gold" (Heroes and Busts) both landing on a
+    // single "Gold" member, say. Applying both would quietly overwrite one with
+    // the other, so none of them auto-applies: each becomes a manual choice
+    // offering just that member, and the user says which patch entry owns it.
+    let mut sole_counts: HashMap<Uuid, usize> = HashMap::new();
+    for ids in &resolution {
+        if let [id] = ids.as_slice() {
+            *sole_counts.entry(*id).or_default() += 1;
+        }
+    }
+
     for (pm, ids) in archive.patch.models.iter().zip(&resolution) {
         match ids.as_slice() {
             [] => unmatched_patch.push(UnresolvedRow {
@@ -298,6 +310,16 @@ async fn preview(
                 category: pm.category.clone(),
                 candidates: Vec::new(),
             }),
+            [id] if sole_counts.get(id).copied().unwrap_or(0) > 1 => {
+                claimed.insert(*id);
+                ambiguous.push(UnresolvedRow {
+                    patch_name: pm.label(),
+                    patch_tags: patch_tags(pm),
+                    has_image: has_image(pm),
+                    category: pm.category.clone(),
+                    candidates: member_of(*id).map(candidate_of).into_iter().collect(),
+                });
+            }
             [id] => {
                 claimed.insert(*id);
                 let member = member_of(*id);

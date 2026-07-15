@@ -195,6 +195,10 @@ export default function BundlePatchDialog({
     alignItems: 'center',
     columnGap: 8,
   }
+  // Strike a name when it is *not* the result: the old name when renaming, the new
+  // one when not — so the target is always shown, just crossed out if it won't apply.
+  const strike = (on: boolean) =>
+    on ? { textDecoration: 'line-through', color: 'text.disabled' } : undefined
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -335,67 +339,84 @@ export default function BundlePatchDialog({
                         {r.category ?? ''}
                       </Typography>
 
-                      {/* col 3 — the model: its name, or a picker */}
+                      {/* col 3 — the model. Auto matches show old → new; manual
+                          matches keep their dropdown mounted so a wrong pick can be
+                          changed, with the rename target shown beneath. */}
                       <Box sx={{ minWidth: 0 }}>
-                        {r.fixed || id ? (
-                          <Typography variant="body2" noWrap>
-                            {willRename ? (
-                              <>
-                                <Box
-                                  component="span"
-                                  sx={{ textDecoration: 'line-through', color: 'text.disabled' }}
-                                >
-                                  {targetName(r)}
-                                </Box>{' '}
-                                → {r.label}
-                              </>
-                            ) : (
-                              (targetName(r) ?? r.label)
-                            )}
-                          </Typography>
+                        {r.fixed ? (
+                          nameDiffers(r) ? (
+                            <Typography variant="body2" noWrap>
+                              <Box component="span" sx={strike(willRename)}>
+                                {r.fixed.name}
+                              </Box>
+                              {' → '}
+                              <Box component="span" sx={strike(!willRename)}>
+                                {r.label}
+                              </Box>
+                            </Typography>
+                          ) : (
+                            <Typography variant="body2" noWrap>
+                              {r.fixed.name}
+                            </Typography>
+                          )
                         ) : (
-                          <FormControl size="small" fullWidth>
-                            <Select
-                              displayEmpty
-                              value={resolved[r.label] ?? ''}
-                              onChange={(e) => pickMember(r.label, e.target.value)}
-                              renderValue={(v) =>
-                                v ? (
-                                  (membersById.get(v)?.name ?? '')
-                                ) : (
-                                  <em>{r.label} — pick a model</em>
-                                )
-                              }
-                            >
-                              <MenuItem value="">
-                                <em>skip</em>
-                              </MenuItem>
-                              {(r.choices ?? []).map((m) => (
-                                <MenuItem key={m.id} value={m.id} sx={{ display: 'block' }}>
-                                  <Box
-                                    sx={{
-                                      display: 'flex',
-                                      alignItems: 'baseline',
-                                      gap: 1,
-                                      whiteSpace: 'nowrap',
-                                      overflow: 'hidden',
-                                      textOverflow: 'ellipsis',
-                                    }}
-                                  >
-                                    <span>{m.name}</span>
-                                    <Typography
-                                      component="span"
-                                      variant="caption"
-                                      color="text.secondary"
-                                      sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}
-                                    >
-                                      {m.tags.length ? m.tags.join(', ') : 'no tags'}
-                                    </Typography>
-                                  </Box>
+                          <>
+                            <FormControl size="small" fullWidth>
+                              <Select
+                                displayEmpty
+                                value={resolved[r.label] ?? ''}
+                                onChange={(e) => pickMember(r.label, e.target.value)}
+                                renderValue={(v) =>
+                                  v ? (
+                                    (membersById.get(v)?.name ?? '')
+                                  ) : (
+                                    <em>{r.label} — pick a model</em>
+                                  )
+                                }
+                              >
+                                <MenuItem value="">
+                                  <em>skip</em>
                                 </MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
+                                {(r.choices ?? []).map((m) => (
+                                  <MenuItem key={m.id} value={m.id} sx={{ display: 'block' }}>
+                                    <Box
+                                      sx={{
+                                        display: 'flex',
+                                        alignItems: 'baseline',
+                                        gap: 1,
+                                        whiteSpace: 'nowrap',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                      }}
+                                    >
+                                      <span>{m.name}</span>
+                                      <Typography
+                                        component="span"
+                                        variant="caption"
+                                        color="text.secondary"
+                                        sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}
+                                      >
+                                        {m.tags.length ? m.tags.join(', ') : 'no tags'}
+                                      </Typography>
+                                    </Box>
+                                  </MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                            {renames && (
+                              <Typography
+                                variant="caption"
+                                component="div"
+                                sx={{ mt: 0.25 }}
+                                noWrap
+                              >
+                                {'renames to '}
+                                <Box component="span" sx={strike(!willRename)}>
+                                  {r.label}
+                                </Box>
+                              </Typography>
+                            )}
+                          </>
                         )}
                       </Box>
 
