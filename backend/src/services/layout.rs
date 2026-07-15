@@ -192,6 +192,29 @@ fn value_key(raw: &str) -> String {
     fold(&crate::util::humanize_token(raw))
 }
 
+/// Collapse a value map onto canonical keys so two spellings of one value can't
+/// both survive. The UI keys an edit by the humanised value (`supported lychee`),
+/// but a template saved earlier may still carry the legacy spelling
+/// (`supported_lychee`); both fold to one [`value_key`], and left as-is which one
+/// wins is down to hash order — so a tag the user *removed* can quietly come back
+/// through the stale key. Canonicalise, and let the already-canonical spelling
+/// (the UI's edit) win over a legacy one, so a removal sticks.
+pub fn canonical_value_map(map: &HashMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Legacy spellings first, then canonical keys overwrite them.
+    for (k, v) in map {
+        if value_key(k) != *k {
+            out.insert(value_key(k), v.clone());
+        }
+    }
+    for (k, v) in map {
+        if value_key(k) == *k {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
+}
+
 /// Run a layout over a file list. Pure — `vocab` is the lowercased variant-tag
 /// vocabulary, fetched by the caller — so the same call backs the plan
 /// endpoint, the commit, and the tests.
@@ -226,12 +249,9 @@ pub fn analyze(
     }
 
     // Value-map keys are humanised the same way the captures are, so a saved
-    // "supported_lychee" still matches the folder that spelled it any which way.
-    let value_map: HashMap<String, &Vec<String>> = spec
-        .value_map
-        .iter()
-        .map(|(k, v)| (value_key(k), v))
-        .collect();
+    // "supported_lychee" still matches the folder that spelled it any which way —
+    // and a legacy spelling can't shadow the UI's re-mapping of the same value.
+    let value_map = canonical_value_map(&spec.value_map);
     let resolve = |raw: &str| -> Option<Vec<String>> {
         if let Some(tags) = value_map.get(&value_key(raw)) {
             return Some(
@@ -604,6 +624,28 @@ mod tests {
             Some(&["supported".to_string()][..])
         );
         assert!(plan.unmapped_values().is_empty());
+    }
+
+    #[test]
+    fn ui_edit_beats_a_legacy_spelling_of_the_same_value() {
+        // A template that carries both the legacy key and the UI's re-map of the
+        // same value, which dropped lychee_project. The removal must stick — the
+        // stale spelling cannot bring the tag back.
+        let mut spec = loot_spec();
+        spec.value_map
+            .insert("supported lychee".into(), vec!["supported".into()]);
+        let files = vec![file(
+            1,
+            "X/1 - Heroes/Set_32mm_Supported_LYCHEE/Gold_32mm_Supported_LYCHEE",
+            "a.stl",
+        )];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        let tags = &plan.annotations[0].variant_tags;
+        assert!(tags.contains(&"supported".to_string()));
+        assert!(
+            !tags.contains(&"lychee_project".to_string()),
+            "removed tag came back: {tags:?}"
+        );
     }
 
     #[test]

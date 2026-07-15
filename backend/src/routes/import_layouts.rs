@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
-use crate::services::layout::{CarveTarget, LayoutSpec, analyze};
+use crate::services::layout::{CarveTarget, LayoutSpec, analyze, canonical_value_map};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -95,10 +95,15 @@ async fn list(
 async fn create(
     State(state): State<AppState>,
     user: User,
-    Json(input): Json<LayoutInput>,
+    Json(mut input): Json<LayoutInput>,
 ) -> Result<Json<ImportLayout>, ApiError> {
     user.require_editor()?;
     let name = validate(&input)?;
+    // Store canonical value-map keys, so a template never carries two spellings
+    // of one value that a carve then resolves by hash order (see layout.rs).
+    input.spec.value_map = canonical_value_map(&input.spec.value_map)
+        .into_iter()
+        .collect();
     let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO import_layouts (name, pattern, roles, value_map, flatten, creator_id, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
@@ -125,10 +130,13 @@ async fn update(
     State(state): State<AppState>,
     user: User,
     Path(id): Path<Uuid>,
-    Json(input): Json<LayoutInput>,
+    Json(mut input): Json<LayoutInput>,
 ) -> Result<Json<ImportLayout>, ApiError> {
     user.require_editor()?;
     let name = validate(&input)?;
+    input.spec.value_map = canonical_value_map(&input.spec.value_map)
+        .into_iter()
+        .collect();
     let updated = sqlx::query!(
         "UPDATE import_layouts
             SET name = $2, pattern = $3, roles = $4, value_map = $5, flatten = $6,
