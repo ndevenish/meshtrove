@@ -574,11 +574,11 @@ export const imageUrl = (id: string) => `/api/images/${id}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 
 /// How to refer to a variant in prose: its label if it has one, else its tags,
-/// else the fact that it is the model's untagged bucket of files.
+/// else the fact that it is the model's default (tagless) bucket of files.
 export function variantLabel(variant: VariantDetail): string {
   if (variant.name) return variant.name
   if (variant.tags.length) return variant.tags.join(' + ')
-  return 'Untagged'
+  return 'Default'
 }
 
 export function formatBytes(bytes: number): string {

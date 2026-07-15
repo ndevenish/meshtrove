@@ -75,7 +75,7 @@ export default function VariantSection({
       <Stack direction="row" sx={{ alignItems: 'center', mb: 1 }}>
         <Typography variant="h6">Variants</Typography>
         <Box sx={{ flexGrow: 1 }} />
-        {canEdit && (
+        {editing && (
           <Button startIcon={<AddIcon />} size="small" onClick={() => setEditingVariant('new')}>
             Add variant
           </Button>
@@ -83,7 +83,7 @@ export default function VariantSection({
       </Stack>
       {model.variants.length === 0 && (
         <Typography color="text.secondary" variant="body2">
-          No variants yet{canEdit ? ' — add one to attach files' : ''}.
+          No variants yet{editing ? ' — add one to attach files' : ''}.
         </Typography>
       )}
       {model.variants.map((variant) => (
@@ -121,7 +121,7 @@ function VariantRow({
   onEdit: () => void
 }) {
   const queryClient = useQueryClient()
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [rendering, setRendering] = useState(false)
   const { data: files } = useQuery({
@@ -157,7 +157,7 @@ function VariantRow({
           ) : (
             variant.tags.length === 0 && (
               <Typography sx={{ fontWeight: 600, fontStyle: 'italic' }} color="text.secondary">
-                Untagged
+                Default
               </Typography>
             )
           )}
@@ -215,7 +215,9 @@ function VariantRow({
             }
           />
         )}
-        {canEdit && (
+        {/* Uploading, retagging and deleting a variant all belong to edit mode;
+            browsing a model is read-only. */}
+        {editing && (
           <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
             <Button component="label" size="small" startIcon={<UploadFileIcon />}>
               Upload files (.zip auto-unpacks)
@@ -232,21 +234,19 @@ function VariantRow({
             <Button size="small" onClick={onEdit}>
               Edit
             </Button>
-            {/* Deleting a variant takes its files with it: edit mode only. */}
-            {editing && (
-              <Button
-                size="small"
-                color="error"
-                onClick={async () => {
-                  if (confirm(`Delete variant "${variantLabel(variant)}" and its files?`)) {
-                    await api.deleteVariant(variant.id)
-                    onChange()
-                  }
-                }}
-              >
-                Delete
-              </Button>
-            )}
+            {/* Deleting a variant takes its files with it. */}
+            <Button
+              size="small"
+              color="error"
+              onClick={async () => {
+                if (confirm(`Delete variant "${variantLabel(variant)}" and its files?`)) {
+                  await api.deleteVariant(variant.id)
+                  onChange()
+                }
+              }}
+            >
+              Delete
+            </Button>
           </Stack>
         )}
       </AccordionDetails>
