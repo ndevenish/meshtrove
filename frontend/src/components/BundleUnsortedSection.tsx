@@ -181,44 +181,50 @@ export default function BundleUnsortedSection({
 
       {visible.length > 0 && (
         <>
-          <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center' }}>
-            <Button
-              size="small"
-              startIcon={<DriveFileMoveIcon />}
-              variant="contained"
-              disabled={selected.size === 0}
-              onClick={() => setMoveOpen(true)}
-            >
-              Move {selected.size || ''} to model
-            </Button>
-            <Button
-              size="small"
-              color="error"
-              startIcon={<DeleteIcon />}
-              disabled={selected.size === 0}
-              onClick={removeSelected}
-            >
-              Delete
-            </Button>
-            <Box sx={{ flexGrow: 1 }} />
-            <Button
-              size="small"
-              onClick={() =>
-                setSelected(
-                  selected.size === visible.length ? new Set() : new Set(visible.map((f) => f.id)),
-                )
-              }
-            >
-              {selected.size === visible.length ? 'Clear' : 'Select all'}
-            </Button>
-          </Stack>
+          {/* Classifying and moving files is edit-mode work; browsing a bundle
+              shows the unsorted files read-only (still downloadable). */}
+          {editing && (
+            <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center' }}>
+              <Button
+                size="small"
+                startIcon={<DriveFileMoveIcon />}
+                variant="contained"
+                disabled={selected.size === 0}
+                onClick={() => setMoveOpen(true)}
+              >
+                Move {selected.size || ''} to model
+              </Button>
+              <Button
+                size="small"
+                color="error"
+                startIcon={<DeleteIcon />}
+                disabled={selected.size === 0}
+                onClick={removeSelected}
+              >
+                Delete
+              </Button>
+              <Box sx={{ flexGrow: 1 }} />
+              <Button
+                size="small"
+                onClick={() =>
+                  setSelected(
+                    selected.size === visible.length
+                      ? new Set()
+                      : new Set(visible.map((f) => f.id)),
+                  )
+                }
+              >
+                {selected.size === visible.length ? 'Clear' : 'Select all'}
+              </Button>
+            </Stack>
+          )}
 
           <FileTree
             files={visible}
-            selectable
+            selectable={editing}
             selected={selected}
             onToggle={toggle}
-            onKindChange={setKind}
+            onKindChange={editing ? setKind : undefined}
             onDelete={editing ? removeFile : undefined}
           />
         </>
