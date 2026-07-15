@@ -5,7 +5,15 @@ import ViewInArIcon from '@mui/icons-material/ViewInAr'
 
 import { type ModelSummary, imageUrl } from '../api'
 
-export default function ModelCard({ model }: { model: ModelSummary }) {
+export default function ModelCard({
+  model,
+  hideCreator = false,
+}: {
+  model: ModelSummary
+  /** Suppress the creator line — e.g. inside a bundle view whose members all
+      share the bundle's creator, where repeating it on every card is noise. */
+  hideCreator?: boolean
+}) {
   return (
     <Card variant="outlined" sx={{ height: '100%' }}>
       <CardActionArea
@@ -39,9 +47,11 @@ export default function ModelCard({ model }: { model: ModelSummary }) {
           <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.25 }} noWrap>
             {model.name}
           </Typography>
-          <Typography variant="body2" color="text.secondary" noWrap>
-            {model.creator_name ?? 'Unknown creator'}
-          </Typography>
+          {!hideCreator && (
+            <Typography variant="body2" color="text.secondary" noWrap>
+              {model.creator_name ?? 'Unknown creator'}
+            </Typography>
+          )}
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.75 }}>
             {/* Nothing can set a like yet (no endpoint, no button), so a heart on
                 every card is a row of honest zeroes telling the reader nothing.

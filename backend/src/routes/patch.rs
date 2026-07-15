@@ -781,6 +781,25 @@ async fn apply(
         .map(str::trim)
         .filter(|u| !u.is_empty());
 
+    // The scrape *is* this bundle's page, so its creator and source are the
+    // bundle's own — replace what the bundle carries (a carve rarely knows
+    // either). This is `replace`, not the `fill-if-empty` used for members
+    // below: a member can have a creator of its own to protect, the bundle
+    // cannot — its creator is whoever the scrape says made it.
+    if patch_creator_id.is_some() || patch_source_url.is_some() {
+        sqlx::query!(
+            r#"UPDATE bundles SET
+                 creator_id = coalesce($2::uuid, creator_id),
+                 source_url = coalesce($3::text, source_url)
+               WHERE id = $1"#,
+            bundle_id,
+            patch_creator_id,
+            patch_source_url,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
     // ---- per model ----
     for (idx, model_id) in &targets {
         let pm = &archive.patch.models[*idx];

@@ -346,6 +346,7 @@ export default function BundlePage() {
           />
           <MembersSection
             bundleId={bundle.id}
+            bundleCreatorId={bundle.creator_id}
             models={bundle.models}
             canEdit={!!canEdit}
             editing={editing}
@@ -404,12 +405,15 @@ export default function BundlePage() {
 /// carve has to be undoable.
 function MembersSection({
   bundleId,
+  bundleCreatorId,
   models,
   canEdit,
   editing,
   onChange,
 }: {
   bundleId: string
+  /** The bundle's creator: a member sharing it doesn't repeat it on its card. */
+  bundleCreatorId: string | null
   models: import('../api').ModelSummary[]
   canEdit: boolean
   /** Edit mode: only here can a model be pulled out of the bundle. */
@@ -447,7 +451,7 @@ function MembersSection({
         >
           {models.map((model) => (
             <Box key={model.id} sx={{ position: 'relative' }}>
-              <ModelCard model={model} />
+              <ModelCard model={model} hideCreator={model.creator_id === bundleCreatorId} />
               {canEdit && editing && (
                 <Tooltip title="Remove from bundle">
                   <IconButton
