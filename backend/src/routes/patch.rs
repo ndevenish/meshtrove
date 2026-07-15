@@ -882,6 +882,15 @@ async fn apply(
         {
             aliases.push(m.name.as_str());
         }
+        // Rename declined: the name it would have taken is still a name this scrape
+        // knows the model by. Record it as an alias so a later import recognises the
+        // model by it and doesn't re-offer the rename. (When the rename was applied,
+        // pm.name is the new name and the dedup below drops it — hence the guard.)
+        if renamed_to.is_none()
+            && let Some(name) = pm.name.as_deref()
+        {
+            aliases.push(name);
+        }
         for alias in aliases {
             let alias = alias.trim();
             if alias.is_empty() || alias.eq_ignore_ascii_case(&final_name) {
