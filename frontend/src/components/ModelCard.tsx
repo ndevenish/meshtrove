@@ -51,14 +51,8 @@ export default function ModelCard({ model }: { model: ModelSummary }) {
               <>
                 <FavoriteIcon sx={{ fontSize: 16, color: 'primary.main' }} />
                 <Typography variant="caption">{model.like_count}</Typography>
-                <Typography variant="caption" color="text.secondary">
-                  ·
-                </Typography>
               </>
             )}
-            <Typography variant="caption" color="text.secondary">
-              {model.variant_count} variant{model.variant_count === 1 ? '' : 's'}
-            </Typography>
             <Box sx={{ flexGrow: 1 }} />
             {model.tags.slice(0, 2).map((tag) => (
               <Chip key={tag} label={tag} size="small" variant="outlined" />

@@ -237,7 +237,7 @@ export default function UnsortedSection({
             selectable
             selected={selected}
             onToggle={toggle}
-            onKindChange={setKind}
+            onKindChange={editing ? setKind : undefined}
             onDelete={editing ? removeFile : undefined}
           />
         </>
