@@ -318,8 +318,15 @@ export default function BundlePage() {
       <BundlePatchDialog
         bundleId={bundle.id}
         open={patchOpen}
+        onApplied={() => {
+          refresh()
+          // The in-place editor seeds its fields once at mount, so it would keep
+          // showing the pre-patch name/tags/description — and saving that stale
+          // state would revert the patch we just applied. Leave edit mode so the
+          // refreshed values show through the read view.
+          setEditing(false)
+        }}
         onClose={() => setPatchOpen(false)}
-        onApplied={refresh}
       />
       <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
       <Snackbar
