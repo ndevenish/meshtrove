@@ -114,6 +114,8 @@ export default function ExportDialog({
       }
       return next
     })
+  const toggleTag = (t: string) =>
+    setTagFilter((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]))
   const toggleKind = (kind: string) =>
     setExcludedKinds((prev) => {
       const next = new Set(prev)
@@ -154,6 +156,28 @@ export default function ExportDialog({
               <Typography variant="body2" color="text.secondary">
                 Choose which member models to include.
               </Typography>
+              {bundle.categories.length > 0 && (
+                <Box>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                    Filter by category
+                  </Typography>
+                  <FormGroup row>
+                    {bundle.categories.map((c) => (
+                      <FormControlLabel
+                        key={c}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={tagFilter.includes(c)}
+                            onChange={() => toggleTag(c)}
+                          />
+                        }
+                        label={<Typography variant="body2">{c}</Typography>}
+                      />
+                    ))}
+                  </FormGroup>
+                </Box>
+              )}
               {memberTags.length > 0 && (
                 <Autocomplete
                   multiple
@@ -162,7 +186,7 @@ export default function ExportDialog({
                   value={tagFilter}
                   onChange={(_, v) => setTagFilter(v)}
                   renderInput={(p) => (
-                    <TextField {...p} label="Filter members by tag" placeholder="tag…" />
+                    <TextField {...p} label="Filter members by tag" placeholder="other tags…" />
                   )}
                 />
               )}

@@ -3,16 +3,18 @@
 //! An archive is a zip with two layers. The readable layer mirrors the
 //! collection on disk so it can be browsed without ever importing: a model
 //! export puts the model at the root as a CamelCase folder, and a bundle export
-//! nests its members *inside* the bundle, grouped by the bundle's category tabs
-//! (`Undead-Horde/Heroes/WarriorMummy/variants/32mm/warrior.stl`). The
-//! authoritative layer is `manifest.json`: every entity with its metadata, flat,
-//! cross-referenced by id, and for each file the `archive_path` where its bytes
-//! sit. Import trusts the manifest and never parses the tree, so the tree is free
-//! to be lossy (colliding readable paths get a ` (2)` suffix in the archive path
-//! only) and to nest members without confusing the restore.
+//! nests its members *inside* the bundle, grouped by the bundle's category tabs.
+//! A model's variant folders sit directly under it and its own images sit in its
+//! root (`Undead-Horde/Heroes/WarriorMummy/32mm/warrior.stl`,
+//! `Undead-Horde/Heroes/WarriorMummy/primary.png`). The authoritative layer is
+//! `manifest.json`: every entity with its metadata, flat, cross-referenced by id,
+//! and for each file the `archive_path` where its bytes sit. Import trusts the
+//! manifest and never parses the tree, so the tree is free to be lossy (colliding
+//! readable paths get a ` (2)` suffix in the archive path only) and to nest
+//! members without confusing the restore.
 //!
-//! `gather_model` / `gather_bundle` build a manifest (plus the readable-only text
-//! files); `restore` writes a manifest back, remapping every id and either
+//! `gather_export` builds a manifest (plus the readable-only text files);
+//! `restore` writes a manifest back, remapping every id and either
 //! skipping or fresh-copying entities that are already present. Blob bytes are
 //! streamed into the store by the route layer before `restore` runs, mirroring
 //! how `patch.rs` stages images before opening its transaction.
@@ -748,7 +750,9 @@ async fn gather_models(
             if !filter.matches(&vtags) {
                 continue;
             }
-            let vbase = format!("{base}/variants/{}", variant_dir(&vtags));
+            // Variant folders sit directly under the model (no `variants/`
+            // wrapper); a variant's renders sit in its own folder.
+            let vbase = format!("{base}/{}", variant_dir(&vtags));
             let files = build_files(
                 variant_files(db, v.id).await?,
                 &vbase,
@@ -884,7 +888,10 @@ async fn gather_bundles(
             assigner,
             blobs,
         );
-        let images = build_images(bundle_images(db, r.id).await?, &base, assigner, blobs);
+        // The bundle root is busy with category/member folders, so its own cover
+        // art stays namespaced under images/.
+        let img_dir = format!("{base}/images");
+        let images = build_images(bundle_images(db, r.id).await?, &img_dir, assigner, blobs);
         let source_archive = gather_source_archive_bundle(db, r.id).await?;
 
         bundles.push(Bundle {
@@ -941,9 +948,11 @@ fn build_files(
     files
 }
 
+/// Lay images out directly in `dir` (the caller decides whether that is the
+/// owner's own folder or an `images/` subfolder of it).
 fn build_images(
     rows: Vec<RawImage>,
-    base: &str,
+    dir: &str,
     assigner: &mut PathAssigner,
     blobs: &mut HashMap<String, i64>,
 ) -> Vec<Image> {
@@ -955,7 +964,7 @@ fn build_images(
         } else {
             format!("{n:02}.{ext}")
         };
-        let archive_path = assigner.assign(&format!("{base}/images/{name}"), &r.blob_sha256);
+        let archive_path = assigner.assign(&format!("{dir}/{name}"), &r.blob_sha256);
         blobs.insert(r.blob_sha256.clone(), r.size);
         images.push(Image {
             blob_sha256: r.blob_sha256,
