@@ -388,7 +388,7 @@ pub struct VariantFilter {
 }
 
 impl VariantFilter {
-    fn matches(&self, tags: &[String]) -> bool {
+    pub fn matches(&self, tags: &[String]) -> bool {
         let have: HashSet<String> = tags.iter().map(|t| t.to_lowercase()).collect();
         self.include
             .iter()
@@ -401,7 +401,8 @@ impl VariantFilter {
 }
 
 /// What an export gathers: an optional bundle (for nesting and its own
-/// metadata), the models to include, and which of their variants.
+/// metadata), the models to include, which of their variants, and which file
+/// kinds to keep.
 #[derive(Serialize, Deserialize)]
 pub struct ExportSpec {
     #[serde(default)]
@@ -410,6 +411,10 @@ pub struct ExportSpec {
     pub model_ids: Vec<Uuid>,
     #[serde(default)]
     pub filter: VariantFilter,
+    /// File kinds to drop from the archive (e.g. `["project", "archive"]`).
+    /// Empty keeps every kind. Images are never governed by this.
+    #[serde(default)]
+    pub file_kinds_exclude: Vec<String>,
 }
 
 /// Gather an export from its spec: the chosen models (their filtered variants),
@@ -444,6 +449,7 @@ pub async fn gather_export(
         &bundle_ids,
         &placement,
         &spec.filter,
+        &spec.file_kinds_exclude,
         exported_at,
     )
     .await
@@ -512,12 +518,14 @@ async fn bundle_placement(
 /// The shared body: read every model and bundle in the set into the manifest,
 /// laying files out under the folders `placement` assigns, keeping only the
 /// variants that pass `filter`.
+#[allow(clippy::too_many_arguments)]
 async fn gather_core(
     db: &PgPool,
     model_ids: &[Uuid],
     bundle_ids: &[Uuid],
     placement: &Placement,
     filter: &VariantFilter,
+    kind_exclude: &[String],
     exported_at: DateTime<Utc>,
 ) -> Result<Export, ApiError> {
     let mut assigner = PathAssigner::default();
@@ -529,6 +537,7 @@ async fn gather_core(
         model_ids,
         placement,
         filter,
+        kind_exclude,
         &mut assigner,
         &mut blobs,
         &mut texts,
@@ -538,6 +547,7 @@ async fn gather_core(
         db,
         bundle_ids,
         placement,
+        kind_exclude,
         &mut assigner,
         &mut blobs,
         &mut texts,
@@ -668,6 +678,7 @@ async fn gather_models(
     model_ids: &[Uuid],
     placement: &Placement,
     filter: &VariantFilter,
+    kind_exclude: &[String],
     assigner: &mut PathAssigner,
     blobs: &mut HashMap<String, i64>,
     texts: &mut Vec<(String, Vec<u8>)>,
@@ -738,7 +749,13 @@ async fn gather_models(
                 continue;
             }
             let vbase = format!("{base}/variants/{}", variant_dir(&vtags));
-            let files = build_files(variant_files(db, v.id).await?, &vbase, assigner, blobs);
+            let files = build_files(
+                variant_files(db, v.id).await?,
+                &vbase,
+                kind_exclude,
+                assigner,
+                blobs,
+            );
             let images = build_images(variant_images(db, v.id).await?, &vbase, assigner, blobs);
             variants.push(Variant {
                 id: v.id,
@@ -753,7 +770,13 @@ async fn gather_models(
         }
 
         let doc_base = format!("{base}/documents");
-        let files = build_files(model_files(db, r.id).await?, &doc_base, assigner, blobs);
+        let files = build_files(
+            model_files(db, r.id).await?,
+            &doc_base,
+            kind_exclude,
+            assigner,
+            blobs,
+        );
         let images = build_images(model_images(db, r.id).await?, &base, assigner, blobs);
         let source_archive = gather_source_archive_model(db, r.id).await?;
 
@@ -780,10 +803,12 @@ async fn gather_models(
     Ok(models)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn gather_bundles(
     db: &PgPool,
     bundle_ids: &[Uuid],
     placement: &Placement,
+    kind_exclude: &[String],
     assigner: &mut PathAssigner,
     blobs: &mut HashMap<String, i64>,
     texts: &mut Vec<(String, Vec<u8>)>,
@@ -852,7 +877,13 @@ async fn gather_bundles(
         .collect();
 
         let doc_base = format!("{base}/documents");
-        let files = build_files(bundle_files(db, r.id).await?, &doc_base, assigner, blobs);
+        let files = build_files(
+            bundle_files(db, r.id).await?,
+            &doc_base,
+            kind_exclude,
+            assigner,
+            blobs,
+        );
         let images = build_images(bundle_images(db, r.id).await?, &base, assigner, blobs);
         let source_archive = gather_source_archive_bundle(db, r.id).await?;
 
@@ -881,11 +912,16 @@ async fn gather_bundles(
 fn build_files(
     rows: Vec<RawFile>,
     base: &str,
+    kind_exclude: &[String],
     assigner: &mut PathAssigner,
     blobs: &mut HashMap<String, i64>,
 ) -> Vec<File> {
     let mut files = Vec::with_capacity(rows.len());
     for r in rows {
+        // Drop file kinds the export opted out of (project files, archives, …).
+        if kind_exclude.iter().any(|k| k == &r.kind) {
+            continue;
+        }
         let mut segments = vec![base.to_string()];
         segments.extend(rel_path(&r.path));
         segments.push(seg(&r.filename));

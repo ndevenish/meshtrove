@@ -5,11 +5,13 @@
 //! downloads the finished zip. A bundle can be gigabytes, so nothing here blocks
 //! on the build — `create` returns immediately with a `building` row.
 
+use std::collections::HashMap;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/exports", get(list).post(create))
+        .route("/api/exports/preview", post(preview))
         .route("/api/exports/{id}", get(detail).delete(remove))
         .route("/api/exports/{id}/download", get(download))
 }
@@ -62,6 +65,9 @@ struct CreateExport {
     /// Variant must carry none of these tags (e.g. `["supported"]` = unsupported).
     #[serde(default)]
     variant_exclude: Vec<String>,
+    /// File kinds to drop (e.g. `["project", "archive"]`); empty keeps all.
+    #[serde(default)]
+    file_kinds_exclude: Vec<String>,
 }
 
 async fn create(
@@ -93,6 +99,7 @@ async fn create(
             include: input.variant_include,
             exclude: input.variant_exclude,
         },
+        file_kinds_exclude: input.file_kinds_exclude,
     };
     let spec_json = serde_json::to_value(&spec).map_err(|e| ApiError::Internal(e.into()))?;
 
@@ -113,6 +120,153 @@ async fn create(
     .await?;
 
     Ok(Json(fetch(&state, id).await?))
+}
+
+// ---------------------------------------------------------------------------
+// preview: what the current selection + filters would keep.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, ToSchema)]
+struct ExportPreview {
+    /// Per selected model, how many of its variants pass the variant filter.
+    models: Vec<PreviewModel>,
+    /// Every distinct variant (tag-set) across the selected models, with how many
+    /// instances there are and whether the filter keeps it.
+    variants: Vec<PreviewVariant>,
+    /// File counts by kind, over the variants the filter keeps plus model/bundle
+    /// documents — so each checkbox shows how many files it governs.
+    file_kinds: Vec<PreviewKind>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct PreviewModel {
+    id: Uuid,
+    name: String,
+    variants_total: i64,
+    variants_kept: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+struct PreviewVariant {
+    /// Human label for the tag-set ("32mm + supported", or "(untagged)").
+    label: String,
+    count: i64,
+    kept: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+struct PreviewKind {
+    kind: String,
+    count: i64,
+}
+
+async fn preview(
+    State(state): State<AppState>,
+    user: User,
+    Json(input): Json<CreateExport>,
+) -> Result<Json<ExportPreview>, ApiError> {
+    user.require_editor()?;
+    let filter = VariantFilter {
+        include: input.variant_include,
+        exclude: input.variant_exclude,
+    };
+
+    // Every variant of every selected model, with its tag-set.
+    let vrows = sqlx::query!(
+        r#"SELECT v.id, v.model_id,
+                  coalesce(array_agg(vt.name::text) FILTER (WHERE vt.name IS NOT NULL), '{}')
+                      as "tags!: Vec<String>"
+           FROM model_variants v
+           LEFT JOIN variant_tag_assignments a ON a.variant_id = v.id
+           LEFT JOIN variant_tags vt ON vt.id = a.tag_id
+           WHERE v.model_id = ANY($1)
+           GROUP BY v.id"#,
+        &input.model_ids
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let names: HashMap<Uuid, String> = sqlx::query!(
+        "SELECT id, name FROM models WHERE id = ANY($1)",
+        &input.model_ids
+    )
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|r| (r.id, r.name))
+    .collect();
+
+    let mut per_model: HashMap<Uuid, (i64, i64)> = HashMap::new();
+    let mut summary: HashMap<String, (i64, bool)> = HashMap::new();
+    let mut kept_variant_ids: Vec<Uuid> = Vec::new();
+    for v in vrows {
+        let mut tags = v.tags;
+        tags.sort();
+        let kept = filter.matches(&tags);
+        let entry = per_model.entry(v.model_id).or_insert((0, 0));
+        entry.0 += 1;
+        if kept {
+            entry.1 += 1;
+            kept_variant_ids.push(v.id);
+        }
+        let label = if tags.is_empty() {
+            "(untagged)".to_string()
+        } else {
+            tags.join(" + ")
+        };
+        let s = summary.entry(label).or_insert((0, kept));
+        s.0 += 1;
+    }
+
+    // Models in the order the caller selected them.
+    let models = input
+        .model_ids
+        .iter()
+        .map(|id| {
+            let (total, kept) = per_model.get(id).copied().unwrap_or((0, 0));
+            PreviewModel {
+                id: *id,
+                name: names.get(id).cloned().unwrap_or_default(),
+                variants_total: total,
+                variants_kept: kept,
+            }
+        })
+        .collect();
+
+    // Variant summary, most common first.
+    let mut variants: Vec<PreviewVariant> = summary
+        .into_iter()
+        .map(|(label, (count, kept))| PreviewVariant { label, count, kept })
+        .collect();
+    variants.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+
+    // File counts by kind over kept variants + model/bundle documents.
+    let file_kinds = sqlx::query!(
+        r#"SELECT f.kind::text as "kind!", count(*) as "count!"
+           FROM files f
+           WHERE f.variant_id = ANY($1)
+              OR f.model_id = ANY($2)
+              OR (f.bundle_id = $3 AND $3 IS NOT NULL)
+           GROUP BY f.kind
+           ORDER BY f.kind"#,
+        &kept_variant_ids,
+        &input.model_ids,
+        input.bundle_id,
+    )
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|r| PreviewKind {
+        kind: r.kind,
+        count: r.count,
+    })
+    .collect();
+
+    Ok(Json(ExportPreview {
+        models,
+        variants,
+        file_kinds,
+    }))
 }
 
 async fn default_name(
@@ -210,7 +364,7 @@ async fn remove(
     State(state): State<AppState>,
     user: User,
     Path(id): Path<Uuid>,
-) -> Result<(), ApiError> {
+) -> Result<axum::http::StatusCode, ApiError> {
     let created_by = export_created_by(&state, id).await?;
     user.require_can_edit(created_by)?;
     // Delete the artifact first; the row is the record that it existed.
@@ -219,7 +373,7 @@ async fn remove(
     sqlx::query!("DELETE FROM exports WHERE id = $1", id)
         .execute(&state.db)
         .await?;
-    Ok(())
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn fetch(state: &AppState, id: Uuid) -> Result<ExportSummary, ApiError> {

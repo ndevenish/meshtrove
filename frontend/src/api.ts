@@ -524,6 +524,11 @@ export const api = {
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
 
+  /// What the current selection + filters would keep (per-model variant counts,
+  /// a variant summary, and file counts by kind). Cheap; called as the dialog
+  /// changes.
+  exportPreview: (body: ExportRequest) =>
+    request<ExportPreview>('/api/exports/preview', json(body)),
   /// Queue building an export archive; returns immediately with a building row.
   createExport: (body: ExportRequest) => request<ExportSummary>('/api/exports', json(body)),
   exports: () => request<ExportSummary[]>('/api/exports'),
@@ -634,6 +639,15 @@ export interface ExportRequest {
   model_ids: string[]
   variant_include?: string[]
   variant_exclude?: string[]
+  /** file kinds to drop (e.g. ["project", "archive"]); empty keeps all */
+  file_kinds_exclude?: string[]
+}
+
+/// What the current selection + filters would keep, for the export dialog.
+export interface ExportPreview {
+  models: { id: string; name: string; variants_total: number; variants_kept: number }[]
+  variants: { label: string; count: number; kept: boolean }[]
+  file_kinds: { kind: string; count: number }[]
 }
 
 export interface ExportSummary {
