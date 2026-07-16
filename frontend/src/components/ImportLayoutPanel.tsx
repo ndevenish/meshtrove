@@ -161,6 +161,21 @@ export default function ImportLayoutPanel({
     return resolved
   }
 
+  // Set a value's mapping, or `null` to clear the explicit entry and fall back
+  // to unmapped. An explicit empty list is "recognised, no tags" — distinct from
+  // an absent entry, which the commit refuses; the "No tags" checkbox is the one
+  // affordance that reaches the empty state without adding then deleting a chip.
+  const setMapping = (raw: string, tags: string[] | null) => {
+    const key = raw.toLowerCase()
+    setValueMap((prev) => {
+      if (tags === null) {
+        const { [key]: _drop, ...rest } = prev
+        return rest
+      }
+      return { ...prev, [key]: tags }
+    })
+  }
+
   const save = async () => {
     if (!saveName.trim() || !pattern.trim()) return
     try {
@@ -344,18 +359,29 @@ export default function ImportLayoutPanel({
                       size="small"
                       options={(vocab ?? []).map((t) => t.name)}
                       value={mapped ?? []}
-                      onChange={(_, tags) =>
-                        setValueMap({ ...valueMap, [value.raw.toLowerCase()]: tags })
-                      }
+                      onChange={(_, tags) => setMapping(value.raw, tags)}
                       renderInput={(props) => (
                         <TextField
                           {...props}
                           error={mapped === null}
-                          placeholder={mapped === null ? 'unmapped — pick tags' : undefined}
+                          placeholder={mapped === null ? 'pick tags, or tick “No tags”' : undefined}
                         />
                       )}
                       sx={{ flexGrow: 1, maxWidth: 420 }}
                     />
+                    <Tooltip title="Recognise this value but add no variant tags — its files land in a plain, untagged variant. Use this to confirm you meant to leave it blank.">
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={mapped !== null && mapped.length === 0}
+                            onChange={(e) => setMapping(value.raw, e.target.checked ? [] : null)}
+                          />
+                        }
+                        label={<Typography variant="body2">No tags</Typography>}
+                        sx={{ ml: 0, whiteSpace: 'nowrap' }}
+                      />
+                    </Tooltip>
                   </Stack>
                 )
               })}
