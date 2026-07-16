@@ -97,10 +97,89 @@ export function readFileList(list: FileList): Drop {
   return { name, files }
 }
 
+// A big drop is uploaded in bounded batches, not one all-or-nothing request: a
+// single hiccup partway through a multi-GB tree used to lose the whole thing (and
+// tie one request up for minutes). A batch is capped by both a byte budget and a
+// file count, whichever fills first.
+const MAX_BATCH_BYTES = 128 * 1024 * 1024 // file bodies per request
+const MAX_BATCH_FILES = 50 // …or this many files
+const BATCH_ATTEMPTS = 3 // tries per batch before the whole import gives up
+
+/// Greedily pack files into batches bounded by a byte budget and a file count. A
+/// file bigger than the budget rides in a batch of its own — one file can't be
+/// split across requests without a chunked protocol we don't have.
+function planBatches(files: StagedFile[]): StagedFile[][] {
+  const batches: StagedFile[][] = []
+  let batch: StagedFile[] = []
+  let bytes = 0
+  for (const sf of files) {
+    if (
+      batch.length > 0 &&
+      (batch.length >= MAX_BATCH_FILES || bytes + sf.file.size > MAX_BATCH_BYTES)
+    ) {
+      batches.push(batch)
+      batch = []
+      bytes = 0
+    }
+    batch.push(sf)
+    bytes += sf.file.size
+  }
+  if (batch.length) batches.push(batch)
+  return batches
+}
+
+// A file's identity within an import: its folder plus its name. The server keeps
+// the same pair (its `sanitize_path` only trims slashes, which our paths lack),
+// so it is how we tell what already landed from what still has to go up.
+const fileKey = (path: string, filename: string) => `${path}\u0000${filename}`
+
+/// Upload one batch as one multipart request: a `path` field precedes each `file`,
+/// so the folder tree is preserved (the server applies a `path` to every `file`
+/// after it).
+async function uploadBatch(
+  importId: string,
+  files: StagedFile[],
+  onFraction: (fraction: number) => void,
+): Promise<void> {
+  const form = new FormData()
+  for (const { file, path } of files) {
+    form.append('path', path)
+    form.append('file', file)
+  }
+  await uploadWithProgress<FileRecord[]>(`/api/imports/${importId}/files`, form, onFraction)
+}
+
+/// Upload a batch, retrying it on failure. A dropped connection can commit some of
+/// a batch's files before it breaks, and the server has no unique key to dedupe
+/// on — so before each retry we re-read what is already staged and re-send only
+/// the files still missing. That makes a retry idempotent: a file that landed is
+/// never uploaded twice, even if it was the *reply* that got lost.
+async function uploadBatchResilient(
+  importId: string,
+  batch: StagedFile[],
+  onFraction: (fraction: number) => void,
+): Promise<void> {
+  let pending = batch
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await uploadBatch(importId, pending, onFraction)
+      return
+    } catch (err) {
+      if (attempt >= BATCH_ATTEMPTS) throw err
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt))
+      const staged = await api.importFiles(importId)
+      const have = new Set(staged.map((f) => fileKey(f.path, f.filename)))
+      pending = batch.filter((sf) => !have.has(fileKey(sf.path, sf.file.name)))
+      if (!pending.length) return // the whole batch had landed; only the reply was lost
+    }
+  }
+}
+
 /// Stage a drop: create an import named after it, then upload every file into it
-/// with its folder preserved, reporting progress (0..1) across the whole tree. A
-/// `.zip` unpacks in the background; the import page waits for that, then offers
-/// model / bundle / existing bundle.
+/// with its folder preserved, reporting progress (0..1) across the whole tree.
+/// Files go up in bounded, individually-retried batches so a dropped connection
+/// costs one batch, not the upload. A `.zip` unpacks in the background; the import
+/// page waits for that, then offers model / bundle / existing bundle.
 export async function startImport(
   drop: Drop,
   onProgress?: (fraction: number) => void,
@@ -109,18 +188,21 @@ export async function startImport(
 
   const staged = await api.createImport(drop.name)
   try {
-    // The multipart contract: a `path` field applies to every `file` that follows
-    // it, so one pair per file carries the whole tree up in a single request.
-    const form = new FormData()
-    for (const { file, path } of drop.files) {
-      form.append('path', path)
-      form.append('file', file)
+    const report = onProgress ?? (() => {})
+    const batches = planBatches(drop.files)
+    // Progress is byte-weighted: files run from a few KB of metadata to hundreds
+    // of MB of mesh, so counting files would lurch. Completed batches advance the
+    // baseline; the in-flight batch fills its own slice.
+    const totalBytes = drop.files.reduce((sum, f) => sum + f.file.size, 0) || 1
+    let completedBytes = 0
+    for (const batch of batches) {
+      const batchBytes = batch.reduce((sum, f) => sum + f.file.size, 0)
+      await uploadBatchResilient(staged.id, batch, (fraction) =>
+        report((completedBytes + fraction * batchBytes) / totalBytes),
+      )
+      completedBytes += batchBytes
     }
-    await uploadWithProgress<FileRecord[]>(
-      `/api/imports/${staged.id}/files`,
-      form,
-      onProgress ?? (() => {}),
-    )
+    report(1)
   } catch (err) {
     // The import row exists before the bytes do; a failed upload would otherwise
     // strand an empty one in the Importing list, unpackable and uncommittable.
