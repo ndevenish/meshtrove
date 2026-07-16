@@ -6,7 +6,12 @@
 //! leaves the store alone. The bytes only become garbage once the *last*
 //! reference goes, and this is where that is checked.
 
+use std::collections::HashSet;
+use std::time::{Duration, SystemTime};
+
 use anyhow::Result;
+use serde::Serialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::services::blobstore::BlobStore;
@@ -87,4 +92,92 @@ pub async fn redundant_archives(
             size: r.size,
         })
         .collect())
+}
+
+/// What a full-store sweep found (and, unless it was a dry run, freed).
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct GcReport {
+    /// True when nothing was deleted — the counts are what *would* be freed.
+    pub dry_run: bool,
+    /// `blobs` rows referenced by no file and no image: bytes a delete left
+    /// behind. Always safe to collect.
+    pub db_orphans: i64,
+    pub db_bytes: i64,
+    /// Bytes on disk with no `blobs` row at all — the crash-recovery case
+    /// (process died between writing the blob and committing its row). Only
+    /// those older than the grace period are counted; see `skipped_recent`.
+    pub disk_orphans: i64,
+    pub disk_bytes: i64,
+    /// On-disk files with no `blobs` row that were left alone because they are
+    /// newer than the grace period — most likely an upload still in flight,
+    /// whose row has simply not been inserted yet.
+    pub skipped_recent: i64,
+}
+
+/// Default grace period for disk orphans. Every write path stores the bytes
+/// before inserting the `blobs` row, so a just-written blob briefly has no row;
+/// a day of slack keeps even a very long-running import safe from collection.
+pub const DEFAULT_DISK_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Sweep the whole store for unreferenced bytes. With `dry_run`, nothing is
+/// deleted and the report says what would be. `disk_grace` spares recently
+/// written disk orphans (see `GcReport::skipped_recent`).
+///
+/// DB orphans are collected first (via `collect_blob`, which re-checks the
+/// reference under its own statement), then the on-disk set is diffed against
+/// the surviving `blobs` rows so nothing collected above is double-counted.
+pub async fn sweep(state: &AppState, dry_run: bool, disk_grace: Duration) -> Result<GcReport> {
+    let mut report = GcReport {
+        dry_run,
+        ..Default::default()
+    };
+
+    // --- DB orphans: blobs rows nothing points at any more. ---
+    let orphans = sqlx::query!(
+        r#"SELECT b.sha256, b.size FROM blobs b
+           WHERE NOT EXISTS (SELECT 1 FROM files WHERE blob_sha256 = b.sha256)
+             AND NOT EXISTS (SELECT 1 FROM images WHERE blob_sha256 = b.sha256)"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    report.db_orphans = orphans.len() as i64;
+    report.db_bytes = orphans.iter().map(|r| r.size).sum();
+    if !dry_run {
+        for orphan in &orphans {
+            collect_blob(state, &orphan.sha256).await?;
+        }
+    }
+
+    // --- Disk orphans: bytes on disk with no surviving blobs row. ---
+    // Fetched after the DB sweep so blobs just collected above are already gone
+    // from both the store and this set.
+    let known: HashSet<String> = sqlx::query_scalar!("SELECT sha256 FROM blobs")
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .collect();
+    let now = SystemTime::now();
+    for entry in state.store.list().await? {
+        if known.contains(&entry.sha256) {
+            continue;
+        }
+        // Treat unknown/future mtimes as "recent" — err toward keeping bytes.
+        let recent = entry
+            .modified
+            .and_then(|m| now.duration_since(m).ok())
+            .map(|age| age < disk_grace)
+            .unwrap_or(true);
+        if recent {
+            report.skipped_recent += 1;
+            continue;
+        }
+        report.disk_orphans += 1;
+        report.disk_bytes += entry.size;
+        if !dry_run {
+            state.store.delete(&entry.sha256).await?;
+            tracing::info!(blob = %entry.sha256, size = entry.size, "collected disk orphan");
+        }
+    }
+
+    Ok(report)
 }

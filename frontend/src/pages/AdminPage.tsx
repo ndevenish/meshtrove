@@ -11,7 +11,7 @@ import {
 } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 
-import { api } from '../api'
+import { api, formatBytes, type GcReport } from '../api'
 import { useAuth } from '../main'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
@@ -24,6 +24,8 @@ export default function AdminPage() {
   const [mode, setMode] = useState<'add' | 'replace'>('replace')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [gcReport, setGcReport] = useState<GcReport | null>(null)
+  const [gcBusy, setGcBusy] = useState<'scan' | 'delete' | null>(null)
 
   const { data: config, refetch } = useQuery({
     queryKey: ['renderer-config'],
@@ -73,6 +75,29 @@ export default function AdminPage() {
       setError(e instanceof Error ? e.message : String(e))
     }
   }
+
+  const gc = async (dryRun: boolean) => {
+    setError('')
+    setMessage('')
+    setGcBusy(dryRun ? 'scan' : 'delete')
+    try {
+      const report = await api.gcBlobs(dryRun)
+      setGcReport(report)
+      if (!dryRun) {
+        const freed = report.db_bytes + report.disk_bytes
+        setMessage(
+          `Freed ${formatBytes(freed)} across ${report.db_orphans + report.disk_orphans} blob(s).`,
+        )
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setGcBusy(null)
+    }
+  }
+
+  const gcTotal = gcReport ? gcReport.db_orphans + gcReport.disk_orphans : 0
+  const gcBytes = gcReport ? gcReport.db_bytes + gcReport.disk_bytes : 0
 
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
@@ -151,6 +176,51 @@ export default function AdminPage() {
           </TextField>
           <Button variant="contained" onClick={rerender}>
             Queue re-renders
+          </Button>
+        </Stack>
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 3, mt: 3 }}>
+        <Typography variant="h6" sx={{ mb: 0.5 }}>
+          Reclaim storage
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Deleting a model, variant, bundle or image removes its records but leaves the file bytes
+          on disk until nothing else references them. Scan first to see what can be freed, then
+          delete. Recently written files (under 24h) are left alone in case an upload is still in
+          flight.
+        </Typography>
+        {gcReport && (
+          <Alert severity={gcTotal > 0 ? 'info' : 'success'} sx={{ mb: 2 }}>
+            {gcTotal > 0 ? (
+              <>
+                {gcReport.dry_run ? 'Reclaimable: ' : 'Freed: '}
+                <strong>{formatBytes(gcBytes)}</strong> across {gcTotal} blob(s)
+                {' — '}
+                {gcReport.db_orphans} unreferenced, {gcReport.disk_orphans} orphaned on disk.
+                {gcReport.skipped_recent > 0 &&
+                  ` ${gcReport.skipped_recent} recent file(s) skipped.`}
+              </>
+            ) : (
+              <>
+                Nothing to reclaim — the store is clean.
+                {gcReport.skipped_recent > 0 &&
+                  ` (${gcReport.skipped_recent} recent file(s) skipped.)`}
+              </>
+            )}
+          </Alert>
+        )}
+        <Stack direction="row" spacing={2}>
+          <Button variant="outlined" onClick={() => gc(true)} disabled={gcBusy !== null}>
+            {gcBusy === 'scan' ? 'Scanning…' : 'Scan'}
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => gc(false)}
+            disabled={gcBusy !== null || !gcReport || gcTotal === 0}
+          >
+            {gcBusy === 'delete' ? 'Deleting…' : 'Delete orphans'}
           </Button>
         </Stack>
       </Paper>

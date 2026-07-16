@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::services::gc::{self, DEFAULT_DISK_GRACE, GcReport};
 use crate::services::jobs;
 use crate::services::renderer::{RENDERER_SETTING, RendererConfig, current_config};
 use crate::state::AppState;
@@ -22,6 +23,7 @@ pub fn router() -> Router<AppState> {
             get(get_renderer).put(put_renderer),
         )
         .route("/api/admin/rerender", post(rerender))
+        .route("/api/admin/gc", post(gc_blobs))
 }
 
 async fn get_renderer(
@@ -126,4 +128,36 @@ async fn rerender(
     Ok(Json(RerenderResponse {
         jobs_queued: queued,
     }))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct GcRequest {
+    /// When true (the default), report what would be freed without deleting.
+    #[serde(default = "default_true")]
+    pub dry_run: bool,
+    /// Spare on-disk blobs with no `blobs` row that are newer than this many
+    /// hours (in-flight uploads). Defaults to 24h; omit to keep the default.
+    #[serde(default)]
+    pub disk_grace_hours: Option<u64>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Reclaim storage: blob bytes no file/image references any more, plus on-disk
+/// bytes left by a crash. Dry-run by default so the panel can show the tally
+/// before anything is deleted.
+async fn gc_blobs(
+    State(state): State<AppState>,
+    user: User,
+    Json(request): Json<GcRequest>,
+) -> Result<Json<GcReport>, ApiError> {
+    user.require_admin()?;
+    let grace = request
+        .disk_grace_hours
+        .map(|h| std::time::Duration::from_secs(h.saturating_mul(3600)))
+        .unwrap_or(DEFAULT_DISK_GRACE);
+    let report = gc::sweep(&state, request.dry_run, grace).await?;
+    Ok(Json(report))
 }

@@ -363,6 +363,15 @@ export interface RendererConfig {
   args: string[]
 }
 
+export interface GcReport {
+  dry_run: boolean
+  db_orphans: number
+  db_bytes: number
+  disk_orphans: number
+  disk_bytes: number
+  skipped_recent: number
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -523,6 +532,7 @@ export const api = {
     request<RendererConfig>('/api/admin/settings/renderer', { ...json(config), method: 'PUT' }),
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
+  gcBlobs: (dryRun: boolean) => request<GcReport>('/api/admin/gc', json({ dry_run: dryRun })),
 
   /// What the current selection + filters would keep (per-model variant counts,
   /// a variant summary, and file counts by kind). Cheap; called as the dialog
