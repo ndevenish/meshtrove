@@ -23,7 +23,7 @@ import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, imageUrl } from '../api'
+import { api, imageUrl, sourceOrigin } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import { useSuppressGlobalDrop } from '../globalDrop'
@@ -313,24 +313,23 @@ export default function BundlePage() {
               </Stack>
             </>
           )}
-          {!editing && bundle.creator_name && (
+          {!editing && (bundle.creator_name || bundle.source_url) && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
-              by {bundle.creator_name}
+              {bundle.creator_name && <>by {bundle.creator_name}</>}
+              {bundle.creator_name && bundle.source_url && ', '}
+              {bundle.source_url && (
+                <>
+                  from{' '}
+                  <a href={bundle.source_url} target="_blank" rel="noreferrer">
+                    {sourceOrigin(bundle.source_url)}
+                  </a>
+                </>
+              )}
             </Typography>
           )}
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
             {!editing && bundle.tags.map((tag) => <Chip key={tag} label={tag} size="small" />)}
           </Stack>
-
-          {bundle.source_url && (
-            <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
-              <Typography variant="body2">
-                <a href={bundle.source_url} target="_blank" rel="noreferrer">
-                  Source page
-                </a>
-              </Typography>
-            </Paper>
-          )}
 
           {!editing && (
             <>

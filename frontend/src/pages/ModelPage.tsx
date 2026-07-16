@@ -23,7 +23,7 @@ import Inventory2Icon from '@mui/icons-material/Inventory2'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, imageUrl } from '../api'
+import { api, imageUrl, sourceOrigin } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
@@ -332,12 +332,25 @@ export default function ModelPage() {
               onBusyChange={setSaving}
             />
           )}
-          {!editing && model.creator_name && (
+          {!editing && (model.creator_name || model.source_url) && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
-              by{' '}
-              <Link to={`/creators?q=${encodeURIComponent(model.creator_name)}`}>
-                {model.creator_name}
-              </Link>
+              {model.creator_name && (
+                <>
+                  by{' '}
+                  <Link to={`/creators?q=${encodeURIComponent(model.creator_name)}`}>
+                    {model.creator_name}
+                  </Link>
+                </>
+              )}
+              {model.creator_name && model.source_url && ', '}
+              {model.source_url && (
+                <>
+                  from{' '}
+                  <a href={model.source_url} target="_blank" rel="noreferrer">
+                    {sourceOrigin(model.source_url)}
+                  </a>
+                </>
+              )}
             </Typography>
           )}
           {model.bundles.length > 0 && (
@@ -378,16 +391,9 @@ export default function ModelPage() {
               ))}
           </Stack>
 
-          {(model.license || model.purchase_price != null || model.source_url) && (
+          {(model.license || model.purchase_price != null) && (
             <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
               <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap', gap: 1 }}>
-                {model.source_url && (
-                  <Typography variant="body2">
-                    <a href={model.source_url} target="_blank" rel="noreferrer">
-                      Source page
-                    </a>
-                  </Typography>
-                )}
                 {model.license && <Typography variant="body2">License: {model.license}</Typography>}
                 {model.purchase_price != null && (
                   <Typography variant="body2">Purchased: {model.purchase_price}</Typography>

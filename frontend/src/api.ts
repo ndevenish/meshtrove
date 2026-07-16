@@ -594,6 +594,17 @@ export interface PatchApplyResult {
 export const imageUrl = (id: string) => `/api/images/${id}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 
+/// A short, human label for a source URL: just its origin (`https://host`), so
+/// "from https://www.myminifactory.com" reads next to the creator rather than
+/// dumping the whole object path. Falls back to the raw string if it won't parse.
+export function sourceOrigin(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return url
+  }
+}
+
 /// How to refer to a variant in prose: its label if it has one, else its tags,
 /// else the fact that it is the model's default (tagless) bucket of files.
 export function variantLabel(variant: VariantDetail): string {
