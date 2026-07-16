@@ -24,8 +24,7 @@ import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate'
 import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
-import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
-import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
+import DragHandleIcon from '@mui/icons-material/DragHandle'
 import CloseIcon from '@mui/icons-material/Close'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -474,6 +473,10 @@ function MembersSection({
   const [category, setCategory] = useState<string | null>(null)
   const [addValue, setAddValue] = useState('')
   const [savingCats, setSavingCats] = useState(false)
+  // Drag-to-reorder the category rows: the row being dragged, and the row the
+  // pointer is currently over (for the drop-line cue).
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [overIndex, setOverIndex] = useState<number | null>(null)
 
   const refreshAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
@@ -520,6 +523,14 @@ function MembersSection({
     }
   }
 
+  const dropAt = (to: number) => {
+    const from = dragIndex
+    setDragIndex(null)
+    setOverIndex(null)
+    if (from === null || from === to) return
+    void saveCategories(moveItem(categories, from, to))
+  }
+
   return (
     <Box>
       <Stack direction="row" sx={{ alignItems: 'center', mb: 1 }} spacing={1}>
@@ -534,23 +545,40 @@ function MembersSection({
           <Typography variant="subtitle2" sx={{ mb: 1 }}>
             Categories — the bundle's sections and their tab order
           </Typography>
-          <Stack spacing={0.5} sx={{ mb: 1.5 }}>
+          <Stack spacing={0} sx={{ mb: 1.5 }}>
             {categories.map((cat, i) => (
-              <Stack key={cat} direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
-                <IconButton
-                  size="small"
-                  disabled={i === 0 || savingCats}
-                  onClick={() => saveCategories(moveItem(categories, i, i - 1))}
-                >
-                  <ArrowUpwardIcon fontSize="small" />
-                </IconButton>
-                <IconButton
-                  size="small"
-                  disabled={i === categories.length - 1 || savingCats}
-                  onClick={() => saveCategories(moveItem(categories, i, i + 1))}
-                >
-                  <ArrowDownwardIcon fontSize="small" />
-                </IconButton>
+              <Stack
+                key={cat}
+                direction="row"
+                spacing={0.5}
+                draggable={!savingCats}
+                onDragStart={() => setDragIndex(i)}
+                onDragEnd={() => {
+                  setDragIndex(null)
+                  setOverIndex(null)
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  if (overIndex !== i) setOverIndex(i)
+                }}
+                onDrop={() => dropAt(i)}
+                sx={{
+                  alignItems: 'center',
+                  py: 0.25,
+                  opacity: dragIndex === i ? 0.4 : 1,
+                  // Drop-line cue on the row the pointer is over.
+                  borderTop: (t) =>
+                    overIndex === i && dragIndex !== null && dragIndex !== i
+                      ? `2px solid ${t.palette.primary.main}`
+                      : '2px solid transparent',
+                }}
+              >
+                <Tooltip title="Drag to reorder">
+                  <DragHandleIcon
+                    fontSize="small"
+                    sx={{ color: 'text.disabled', cursor: savingCats ? 'default' : 'grab' }}
+                  />
+                </Tooltip>
                 <Typography variant="body2" sx={{ flexGrow: 1, ml: 0.5 }}>
                   {cat}
                 </Typography>
