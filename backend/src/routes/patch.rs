@@ -875,9 +875,30 @@ async fn apply(
             None
         };
         if let Some(name) = renamed_to {
-            sqlx::query!("UPDATE models SET name = $2 WHERE id = $1", model_id, name)
-                .execute(&mut *tx)
-                .await?;
+            // The slug follows the name, like the model editor and the bundle
+            // rename above: regenerate it from the new name, carrying the current
+            // slug's token so the URL keeps its identity and old slugs/the UUID
+            // still redirect. Without this the slug stayed stale — "Bayul" kept
+            // `bayul-<token>` after being renamed to "Bayul Greytusk".
+            let current_slug =
+                sqlx::query_scalar!("SELECT slug FROM models WHERE id = $1", model_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let slug = crate::routes::models::unique_slug(
+                &state,
+                name,
+                Some(&current_slug),
+                Some(*model_id),
+            )
+            .await?;
+            sqlx::query!(
+                "UPDATE models SET name = $2, slug = $3 WHERE id = $1",
+                model_id,
+                name,
+                slug,
+            )
+            .execute(&mut *tx)
+            .await?;
             touched = true;
         }
 
