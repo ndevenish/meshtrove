@@ -1,6 +1,7 @@
 //! Shared API error type: handlers return `Result<T, ApiError>` and get
 //! consistent status codes without leaking internals.
 
+use axum::extract::multipart::MultipartError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
@@ -20,6 +21,11 @@ pub enum ApiError {
     /// tells the user nothing they can act on, and this one they can fix.
     #[error("the server has run out of disk space")]
     OutOfSpace,
+    /// The client's upload stopped part-way — it hung up mid-stream, or a flaky
+    /// connection dropped the body. Not our fault: a 400 the browser can surface,
+    /// logged as a warning rather than paging like an internal error would.
+    #[error("the upload was interrupted before it finished")]
+    UploadInterrupted,
     #[error(transparent)]
     Internal(anyhow::Error),
 }
@@ -29,6 +35,16 @@ const ENOSPC: i32 = 28;
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        // A failure streaming the multipart body up is the request's problem, not
+        // the server's — a MultipartError only ever comes from parsing the
+        // client's body, never from any server-internal path. So its presence in
+        // the chain means the upload broke on the way in: a truncated body multer
+        // calls IncompleteStream, a dropped connection it calls StreamReadFailed
+        // (which axum's own status() even maps to a 500). Either way it is the
+        // upload that failed, not us — don't log it as an internal error.
+        if error.chain().any(|cause| cause.is::<MultipartError>()) {
+            return ApiError::UploadInterrupted;
+        }
         let out_of_space = error
             .chain()
             .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
@@ -79,6 +95,17 @@ impl IntoResponse for ApiError {
                 )
                     .into_response()
             }
+            ApiError::UploadInterrupted => {
+                tracing::warn!(
+                    status = 400,
+                    "upload interrupted (client hung up mid-stream)"
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    "the upload was interrupted before it finished",
+                )
+                    .into_response()
+            }
             ApiError::Internal(error) => {
                 tracing::error!(%error, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
@@ -106,5 +133,37 @@ mod tests {
         let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
         let error = anyhow::Error::from(io).context("writing /store/tmp/abc");
         assert!(matches!(ApiError::from(error), ApiError::Internal(_)));
+    }
+
+    /// A body that breaks mid-upload reaches the handler as a MultipartError
+    /// buried under the blob store's context. It is the client hanging up, not a
+    /// server fault, so it must classify as UploadInterrupted (a 400) rather than
+    /// an internal 500 — which is what made a dropped connection page as an error.
+    #[tokio::test]
+    async fn interrupted_multipart_is_not_internal() {
+        use axum::extract::{FromRequest, Multipart};
+
+        // A real (truncated) multipart: a field opens but the body ends with no
+        // closing boundary, exactly as a client hanging up mid-upload leaves it —
+        // multer answers that with an incomplete-stream error (a 400).
+        let body = "--boundary\r\nContent-Disposition: form-data; name=\"file\"; \
+                    filename=\"a.stl\"\r\n\r\npartial data with no closing boundary";
+        let request = axum::http::Request::builder()
+            .header("content-type", "multipart/form-data; boundary=boundary")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let mut multipart = Multipart::from_request(request, &()).await.unwrap();
+        let field = multipart.next_field().await.unwrap().unwrap();
+        let err = field
+            .bytes()
+            .await
+            .expect_err("a body with no closing boundary must fail to parse");
+        assert!(err.status().is_client_error());
+
+        let wrapped = anyhow::Error::new(err).context("upload stream failed");
+        assert!(matches!(
+            ApiError::from(wrapped),
+            ApiError::UploadInterrupted
+        ));
     }
 }

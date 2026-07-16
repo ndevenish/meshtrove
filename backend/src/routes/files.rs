@@ -265,7 +265,13 @@ async fn consume_fields(
                     .first()
                     .map(|m| m.to_string());
 
-                let stream = field.map_err(|e| anyhow!("upload stream failed: {e}"));
+                // Keep the MultipartError itself in the chain (don't stringify
+                // it): a body that breaks mid-stream — the client hung up, a flaky
+                // connection dropped — is the client's fault, and error.rs reads
+                // this type to answer with the right status instead of a blanket
+                // 500 "internal error".
+                let stream =
+                    field.map_err(|e| anyhow::Error::new(e).context("upload stream failed"));
                 let blob = state.store.put(stream).await?;
 
                 let record = insert_file(
