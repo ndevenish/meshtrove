@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container,
@@ -11,6 +11,8 @@ import {
   IconButton,
   Tooltip,
   Divider,
+  Tab,
+  Tabs,
   Snackbar,
   Alert,
 } from '@mui/material'
@@ -350,24 +352,26 @@ export default function BundlePage() {
               </Box>
             </>
           )}
-
-          <Divider sx={{ mb: 2 }} />
-          <BundleUnsortedSection
-            bundle={bundle}
-            canEdit={!!canEdit}
-            editing={editing}
-            onChange={refresh}
-          />
-          <MembersSection
-            bundleId={bundle.id}
-            bundleCreatorId={bundle.creator_id}
-            models={bundle.models}
-            canEdit={!!canEdit}
-            editing={editing}
-            onChange={refresh}
-          />
         </Box>
       </Stack>
+
+      {/* Contents run the full width beneath the gallery/details block, so the
+          member grid gets every column it can and its category tabs have room. */}
+      <Divider sx={{ my: 3 }} />
+      <BundleUnsortedSection
+        bundle={bundle}
+        canEdit={!!canEdit}
+        editing={editing}
+        onChange={refresh}
+      />
+      <MembersSection
+        bundleId={bundle.id}
+        bundleCreatorId={bundle.creator_id}
+        models={bundle.models}
+        canEdit={!!canEdit}
+        editing={editing}
+        onChange={refresh}
+      />
 
       <DescriptionHistoryDialog
         open={historyOpen}
@@ -448,11 +452,37 @@ function MembersSection({
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
+  // Which category tab is active; null = "All Models".
+  const [category, setCategory] = useState<string | null>(null)
 
   const refreshAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
     onChange()
   }
+
+  // The bundle's primary categories are the import's section tags — the
+  // title-cased model tags (Heroes, Enemies, NPC…), as opposed to the lowercase
+  // descriptive tags a scrape adds (undead, medium, objects…). Derived from the
+  // members so each bundle offers its own sections, with a per-tab count. Ordered
+  // by size: the import's folder order (1 - Heroes, 2 - Enemies) isn't preserved.
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const m of models) {
+      for (const tag of m.tags) {
+        const first = tag[0]
+        if (first && first.toLowerCase() !== first) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+      }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  }, [models])
+
+  // A re-carve can retire the active category (its last model retagged or
+  // removed): fall back to All rather than leaving a dead tab over an empty grid.
+  useEffect(() => {
+    if (category && !categories.some(([name]) => name === category)) setCategory(null)
+  }, [categories, category])
+
+  const shown = category ? models.filter((m) => m.tags.includes(category)) : models
 
   return (
     <Box>
@@ -462,6 +492,21 @@ function MembersSection({
           {models.length}
         </Typography>
       </Stack>
+
+      {categories.length > 0 && (
+        <Tabs
+          value={category ?? 'all'}
+          onChange={(_, value) => setCategory(value === 'all' ? null : value)}
+          variant="scrollable"
+          scrollButtons="auto"
+          sx={{ mb: 2, borderBottom: (t) => `1px solid ${t.palette.divider}` }}
+        >
+          <Tab value="all" label={`All Models (${models.length})`} />
+          {categories.map(([name, count]) => (
+            <Tab key={name} value={name} label={`${name} (${count})`} />
+          ))}
+        </Tabs>
+      )}
 
       {models.length === 0 ? (
         <Typography color="text.secondary" variant="body2">
@@ -476,7 +521,7 @@ function MembersSection({
             gap: 2,
           }}
         >
-          {models.map((model) => (
+          {shown.map((model) => (
             <Box key={model.id} sx={{ position: 'relative' }}>
               <ModelCard model={model} hideCreator={model.creator_id === bundleCreatorId} />
               {canEdit && editing && (
