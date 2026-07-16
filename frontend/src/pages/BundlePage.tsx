@@ -533,13 +533,6 @@ function MembersSection({
 
   return (
     <Box>
-      <Stack direction="row" sx={{ alignItems: 'center', mb: 1 }} spacing={1}>
-        <Typography variant="h6">Models</Typography>
-        <Typography variant="body2" color="text.secondary">
-          {models.length}
-        </Typography>
-      </Stack>
-
       {editing ? (
         <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
           <Typography variant="subtitle2" sx={{ mb: 1 }}>
