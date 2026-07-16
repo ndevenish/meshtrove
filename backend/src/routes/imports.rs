@@ -7,7 +7,7 @@
 //! file onto exactly one destination — a new model, a new bundle, or an existing
 //! bundle — and drops the import row.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json, Router,
@@ -24,9 +24,6 @@ use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::bundles::{self, parse_kind as parse_bundle_kind};
 use crate::routes::models;
-use crate::routes::tags::upsert_tag;
-use crate::routes::variant_tags::upsert_variant_tag;
-use crate::routes::variants::{set_variant_tags, variant_with_tag_set};
 use crate::services::gc;
 use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan, PlanVariant};
 use crate::state::AppState;
@@ -506,6 +503,31 @@ async fn commit(
         None => None,
     };
 
+    // Resolve every tag name the carve and the typed metadata need in two bulk
+    // upserts (one per vocabulary), so the per-model work below is pure inserts
+    // against a name→id map rather than an INSERT-or-SELECT round trip per tag —
+    // the same handful of variant tags recur across every member of a big bundle.
+    let meta = match &input {
+        CommitInput::NewModel { meta, .. }
+        | CommitInput::NewBundle { meta, .. }
+        | CommitInput::Bundle { meta, .. } => meta,
+    };
+    let mut vtag_names: Vec<String> = Vec::new();
+    let mut mtag_names: Vec<String> = meta.tags.clone();
+    if let Some(plan) = &carve {
+        for planned in &plan.models {
+            mtag_names.extend(planned.tags.iter().cloned());
+            for variant in &planned.variants {
+                vtag_names.extend(variant.tags.iter().cloned());
+            }
+        }
+        mtag_names.extend(plan.model_tag_order.iter().cloned());
+    }
+    let tags = TagMaps {
+        variant: upsert_variant_tags_bulk(&mut tx, &vtag_names).await?,
+        model: upsert_tags_bulk(&mut tx, &mtag_names).await?,
+    };
+
     // Models whose browse thumbnail should render once the commit lands.
     let mut render_models: Vec<Uuid> = Vec::new();
 
@@ -523,17 +545,19 @@ async fn commit(
             )
             .fetch_one(&mut *tx)
             .await?;
-            apply_meta(&mut tx, model_id, meta, user.id).await?;
+            apply_meta_bulk(&mut tx, &[model_id], meta, user.id, &tags.model).await?;
             if let Some(plan) = &carve
                 && let Some(planned) = plan.models.first()
             {
-                add_model_tags(&mut tx, model_id, &planned.tags).await?;
+                add_model_tags(&mut tx, model_id, &planned.tags, &tags.model).await?;
                 carve_variants(
                     &mut tx,
                     model_id,
                     &planned.variants,
                     user.id,
                     Untagged::UnsortedBucket,
+                    &tags.variant,
+                    true,
                 )
                 .await?;
             }
@@ -579,14 +603,19 @@ async fn commit(
             if let Some(plan) = &carve {
                 // A brand-new bundle has no members yet, so no merge decision:
                 // every planned model is created fresh.
-                let created =
-                    carve_into_bundle(&mut tx, bundle_id, meta.creator_id, plan, user.id, &[])
-                        .await?;
+                let created = carve_into_bundle(
+                    &mut tx,
+                    bundle_id,
+                    meta.creator_id,
+                    plan,
+                    user.id,
+                    &[],
+                    &tags,
+                )
+                .await?;
                 // The box set was bought once: what was typed on the import page
                 // is true of every model the carve just pulled out of it.
-                for model_id in &created {
-                    apply_meta(&mut tx, *model_id, meta, user.id).await?;
-                }
+                apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model).await?;
                 render_models.extend(created);
             }
             sqlx::query!(
@@ -618,15 +647,20 @@ async fn commit(
             user.require_can_edit(target.created_by)?;
             if let Some(plan) = &carve {
                 let creator = meta.creator_id.or(target.creator_id);
-                let created =
-                    carve_into_bundle(&mut tx, *bundle_id, creator, plan, user.id, merge_targets)
-                        .await?;
+                let created = carve_into_bundle(
+                    &mut tx,
+                    *bundle_id,
+                    creator,
+                    plan,
+                    user.id,
+                    merge_targets,
+                    &tags,
+                )
+                .await?;
                 // Only the models this drop *created*: a member that was already
                 // in the bundle has its own metadata, and a later 75mm pack has no
                 // business rewriting it.
-                for model_id in &created {
-                    apply_meta(&mut tx, *model_id, meta, user.id).await?;
-                }
+                apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model).await?;
                 render_models.extend(created);
             }
             sqlx::query!(
@@ -747,6 +781,99 @@ async fn commit(
 }
 
 // ---------------------------------------------------------------------------
+// bulk tag get-or-create: resolve every tag name a commit needs in one round
+// trip each, keyed by lowercased name. A big bundle carve touches the same
+// handful of variant tags ("32mm", "supported") across dozens of models; doing
+// them one INSERT-or-SELECT at a time was the bulk of the commit's DB chatter.
+// ---------------------------------------------------------------------------
+
+/// The tag vocabularies a commit pre-resolves up front (name → id, keyed
+/// lowercased), so the per-model carve is map lookups rather than a round trip
+/// per tag.
+struct TagMaps {
+    variant: HashMap<String, Uuid>,
+    model: HashMap<String, Uuid>,
+}
+
+/// Get-or-create every `variant_tags` name, returning name (trimmed, lowercased)
+/// → id. `name` is citext, so the map is case-insensitive; trim in Rust so
+/// " 32mm" and "32mm" collapse the way the single-name upsert does.
+async fn upsert_variant_tags_bulk(
+    tx: &mut sqlx::PgConnection,
+    names: &[String],
+) -> Result<HashMap<String, Uuid>, ApiError> {
+    let cleaned: Vec<String> = names
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Pre-existing rows come from the table scan; rows this statement inserts are
+    // invisible to that scan (a data-modifying CTE's writes aren't seen by sibling
+    // reads), so they come from `ins` RETURNING instead — the same split the
+    // single-name upsert uses to dodge the DO NOTHING/SELECT race.
+    let rows = sqlx::query!(
+        r#"WITH input AS (SELECT DISTINCT unnest($1::text[]) AS name),
+                ins AS (
+                    INSERT INTO variant_tags (name)
+                    SELECT name FROM input
+                    ON CONFLICT (name) DO NOTHING
+                    RETURNING id, name
+                )
+           SELECT id AS "id!", name::text AS "name!" FROM ins
+           UNION ALL
+           SELECT vt.id, vt.name::text FROM variant_tags vt
+            WHERE vt.name IN (SELECT name FROM input)
+              AND vt.name NOT IN (SELECT name FROM ins)"#,
+        &cleaned,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.name.to_lowercase(), r.id))
+        .collect())
+}
+
+/// Same, for the model `tags` vocabulary.
+async fn upsert_tags_bulk(
+    tx: &mut sqlx::PgConnection,
+    names: &[String],
+) -> Result<HashMap<String, Uuid>, ApiError> {
+    let cleaned: Vec<String> = names
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query!(
+        r#"WITH input AS (SELECT DISTINCT unnest($1::text[]) AS name),
+                ins AS (
+                    INSERT INTO tags (name)
+                    SELECT name FROM input
+                    ON CONFLICT (name) DO NOTHING
+                    RETURNING id, name
+                )
+           SELECT id AS "id!", name::text AS "name!" FROM ins
+           UNION ALL
+           SELECT t.id, t.name::text FROM tags t
+            WHERE t.name IN (SELECT name FROM input)
+              AND t.name NOT IN (SELECT name FROM ins)"#,
+        &cleaned,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.name.to_lowercase(), r.id))
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // the carve: execute a plan inside the commit transaction
 // ---------------------------------------------------------------------------
 
@@ -763,55 +890,148 @@ enum Untagged {
 /// (the existing merge-by-tag-set semantics). Files that resolved no variant
 /// tags go either into the model's unsorted bucket or into its anonymous
 /// variant (the empty-tag-set variant), per `untagged`.
+///
+/// Batched: variant tag names are pre-resolved (`vtag_ids`), variants and their
+/// tag assignments are bulk-inserted, and every file moves in one UPDATE — so a
+/// model with a dozen variants costs a handful of queries, not dozens. The
+/// merge-by-tag-set rule is preserved in memory: planned variants that resolve
+/// to the same tag set are folded together (two would otherwise collide on the
+/// deferred `UNIQUE (model_id, tag_key)`), and for an existing member its
+/// current variants are read once so a matching set reuses that variant.
 async fn carve_variants(
     tx: &mut sqlx::PgConnection,
     model_id: Uuid,
     variants: &[PlanVariant],
     user_id: Uuid,
     untagged: Untagged,
+    vtag_ids: &HashMap<String, Uuid>,
+    model_is_new: bool,
 ) -> Result<(), ApiError> {
+    // Fold planned variants by canonical (sorted, deduped) tag-id set. Set
+    // equality is tag_key equality, so this is exactly the merge the per-variant
+    // path got from the DB — done in memory, before anything is written.
+    let mut by_set: HashMap<Vec<Uuid>, Vec<Uuid>> = HashMap::new();
+    // A one-model carve leaves untagged files loose in the model's unsorted
+    // bucket — they are just the model's own files. A bundle carve instead gives
+    // each member its anonymous variant (empty tag set), a first-class sibling to
+    // its tagged variants (so it renders a preview and reads as a variant, not as
+    // leftovers the carve couldn't place).
+    let mut unsorted_files: Vec<Uuid> = Vec::new();
     for planned in variants {
-        // A one-model carve leaves untagged files loose in the model's unsorted
-        // bucket — they are just the model's own files. A bundle carve instead
-        // gives each member its anonymous variant, a first-class sibling to its
-        // tagged variants (so it renders a preview and reads as a variant, not
-        // as leftovers the carve couldn't place).
-        if planned.tags.is_empty() && untagged == Untagged::UnsortedBucket {
-            sqlx::query!(
-                "UPDATE files SET model_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
-                model_id,
-                &planned.files[..],
-            )
-            .execute(&mut *tx)
-            .await?;
-            continue;
-        }
-        // Empty `tag_ids` get-or-creates the anonymous variant (tag_key '').
         let mut tag_ids: Vec<Uuid> = Vec::new();
         for name in &planned.tags {
-            let tag_id = upsert_variant_tag(&mut *tx, name).await?;
-            if !tag_ids.contains(&tag_id) {
-                tag_ids.push(tag_id);
+            if let Some(id) = vtag_ids.get(&name.trim().to_lowercase())
+                && !tag_ids.contains(id)
+            {
+                tag_ids.push(*id);
             }
         }
-        let variant_id = match variant_with_tag_set(&mut *tx, model_id, &tag_ids).await? {
-            Some(existing) => existing,
+        tag_ids.sort();
+        if tag_ids.is_empty() && untagged == Untagged::UnsortedBucket {
+            unsorted_files.extend(planned.files.iter().copied());
+            continue;
+        }
+        by_set
+            .entry(tag_ids)
+            .or_default()
+            .extend(planned.files.iter().copied());
+    }
+
+    // A brand-new model has no variants to reuse; only an existing member (a
+    // bundle re-drop landing on it) does, so read those once and never for a
+    // model this commit just created.
+    let existing: HashMap<Vec<Uuid>, Uuid> = if model_is_new {
+        HashMap::new()
+    } else {
+        sqlx::query!(
+            r#"SELECT v.id,
+                      coalesce(array_agg(a.tag_id) FILTER (WHERE a.tag_id IS NOT NULL), '{}')
+                          AS "tags!: Vec<Uuid>"
+               FROM model_variants v
+               LEFT JOIN variant_tag_assignments a ON a.variant_id = v.id
+               WHERE v.model_id = $1
+               GROUP BY v.id"#,
+            model_id,
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|r| {
+            let mut tags = r.tags;
+            tags.sort();
+            tags.dedup();
+            (tags, r.id)
+        })
+        .collect()
+    };
+
+    // Resolve every set to a variant id, collecting the new variants to create,
+    // their tag assignments, and the file→variant moves — then flush each in one
+    // statement.
+    let mut new_variant_ids: Vec<Uuid> = Vec::new();
+    let mut assign_variants: Vec<Uuid> = Vec::new();
+    let mut assign_tags: Vec<Uuid> = Vec::new();
+    let mut move_files: Vec<Uuid> = Vec::new();
+    let mut move_variants: Vec<Uuid> = Vec::new();
+    for (tag_ids, files) in by_set {
+        let variant_id = match existing.get(&tag_ids) {
+            Some(id) => *id,
             None => {
-                let new_id: Uuid = sqlx::query_scalar!(
-                    "INSERT INTO model_variants (model_id, created_by) VALUES ($1, $2) RETURNING id",
-                    model_id,
-                    user_id,
-                )
-                .fetch_one(&mut *tx)
-                .await?;
-                set_variant_tags(&mut *tx, new_id, &tag_ids).await?;
-                new_id
+                let id = Uuid::new_v4();
+                new_variant_ids.push(id);
+                for tag_id in &tag_ids {
+                    assign_variants.push(id);
+                    assign_tags.push(*tag_id);
+                }
+                id
             }
         };
+        for file in files {
+            move_files.push(file);
+            move_variants.push(variant_id);
+        }
+    }
+
+    if !new_variant_ids.is_empty() {
         sqlx::query!(
-            "UPDATE files SET variant_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
-            variant_id,
-            &planned.files[..],
+            "INSERT INTO model_variants (id, model_id, created_by)
+             SELECT unnest($1::uuid[]), $2, $3",
+            &new_variant_ids,
+            model_id,
+            user_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !assign_variants.is_empty() {
+        // The tag_key trigger fires per assignment row, so each new variant lands
+        // with its canonical key (an empty-tag anonymous variant inserts no
+        // assignments and keeps its default '').
+        sqlx::query!(
+            "INSERT INTO variant_tag_assignments (variant_id, tag_id)
+             SELECT unnest($1::uuid[]), unnest($2::uuid[])",
+            &assign_variants,
+            &assign_tags,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !move_files.is_empty() {
+        sqlx::query!(
+            "UPDATE files SET variant_id = d.vid, import_id = NULL
+             FROM (SELECT unnest($1::uuid[]) AS fid, unnest($2::uuid[]) AS vid) d
+             WHERE files.id = d.fid",
+            &move_files,
+            &move_variants,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !unsorted_files.is_empty() {
+        sqlx::query!(
+            "UPDATE files SET model_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
+            model_id,
+            &unsorted_files,
         )
         .execute(&mut *tx)
         .await?;
@@ -819,16 +1039,22 @@ async fn carve_variants(
     Ok(())
 }
 
-/// Stamp the import's metadata onto one model. `coalesce` throughout: a blank
-/// field on the import page means "nothing to say", not "erase what the carve
-/// worked out" — so a member model keeps the creator its bundle gave it unless
-/// the import names a different one.
-async fn apply_meta(
+/// Stamp the import's metadata onto every model the carve created. `coalesce`
+/// throughout: a blank field on the import page means "nothing to say", not
+/// "erase what the carve worked out" — so a member model keeps the creator its
+/// bundle gave it unless the import names a different one. Batched across all
+/// created models, since a box set is bought once and its facts are identical
+/// for each.
+async fn apply_meta_bulk(
     tx: &mut sqlx::PgConnection,
-    model_id: Uuid,
+    model_ids: &[Uuid],
     meta: &ImportMeta,
     user_id: Uuid,
+    tag_ids: &HashMap<String, Uuid>,
 ) -> Result<(), ApiError> {
+    if model_ids.is_empty() {
+        return Ok(());
+    }
     sqlx::query!(
         r#"UPDATE models SET
              creator_id     = coalesce($2, creator_id),
@@ -837,8 +1063,8 @@ async fn apply_meta(
              purchase_price = coalesce($5::float8::numeric(10,2), purchase_price),
              purchase_date  = coalesce($6, purchase_date),
              order_ref      = coalesce($7, order_ref)
-           WHERE id = $1"#,
-        model_id,
+           WHERE id = ANY($1::uuid[])"#,
+        model_ids,
         meta.creator_id,
         meta.source_url,
         meta.license,
@@ -850,8 +1076,21 @@ async fn apply_meta(
     .await?;
 
     // Additive, like every other tagging path: the layout's captured tags and
-    // the ones typed on the import page both describe the model.
-    add_model_tags(tx, model_id, &meta.tags).await?;
+    // the ones typed on the import page both describe the model. Every created
+    // model gets the same typed tags, so cross-join the two into one insert.
+    let mtag_ids = mapped_ids(&meta.tags, tag_ids);
+    if !mtag_ids.is_empty() {
+        sqlx::query!(
+            "INSERT INTO model_tags (model_id, tag_id)
+             SELECT m.id, t.id
+               FROM unnest($1::uuid[]) AS m(id) CROSS JOIN unnest($2::uuid[]) AS t(id)
+             ON CONFLICT DO NOTHING",
+            model_ids,
+            &mtag_ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
 
     if let Some(body) = meta
         .description_md
@@ -861,8 +1100,8 @@ async fn apply_meta(
     {
         sqlx::query!(
             "INSERT INTO model_description_revisions (model_id, body_md, created_by)
-             VALUES ($1, $2, $3)",
-            model_id,
+             SELECT unnest($1::uuid[]), $2, $3",
+            model_ids,
             body,
             user_id,
         )
@@ -872,22 +1111,41 @@ async fn apply_meta(
     Ok(())
 }
 
+/// Resolve tag names to their (pre-upserted) ids via `map`, keyed by trimmed
+/// lowercase name, dropping unknowns and duplicates.
+fn mapped_ids(names: &[String], map: &HashMap<String, Uuid>) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = Vec::new();
+    for name in names {
+        if let Some(id) = map.get(&name.trim().to_lowercase())
+            && !ids.contains(id)
+        {
+            ids.push(*id);
+        }
+    }
+    ids
+}
+
 /// Additive model tagging — a carve never removes tags a model already has.
+/// Names are pre-resolved via `tag_ids` (see [`upsert_tags_bulk`]), so this is
+/// one insert regardless of how many tags the model carries.
 async fn add_model_tags(
     tx: &mut sqlx::PgConnection,
     model_id: Uuid,
-    tags: &[String],
+    names: &[String],
+    tag_ids: &HashMap<String, Uuid>,
 ) -> Result<(), ApiError> {
-    for name in tags {
-        let tag = upsert_tag(&mut *tx, name).await?;
-        sqlx::query!(
-            "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            model_id,
-            tag.id,
-        )
-        .execute(&mut *tx)
-        .await?;
+    let ids = mapped_ids(names, tag_ids);
+    if ids.is_empty() {
+        return Ok(());
     }
+    sqlx::query!(
+        "INSERT INTO model_tags (model_id, tag_id)
+         SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+        model_id,
+        &ids,
+    )
+    .execute(&mut *tx)
+    .await?;
     Ok(())
 }
 
@@ -905,6 +1163,7 @@ async fn carve_into_bundle(
     plan: &Plan,
     user_id: Uuid,
     overrides: &[Option<Uuid>],
+    tags: &TagMaps,
 ) -> Result<Vec<Uuid>, ApiError> {
     if !overrides.is_empty() && overrides.len() != plan.models.len() {
         return Err(ApiError::BadRequest(
@@ -931,6 +1190,9 @@ async fn carve_into_bundle(
                 "merge target is not a member of this bundle".into(),
             ));
         }
+        // A fresh member has no variants to reuse; a matched one might, so
+        // `carve_variants` reads its variants only when it isn't new.
+        let model_is_new = chosen.is_none();
         let model_id = match chosen {
             Some(member_id) => member_id,
             None => {
@@ -956,13 +1218,15 @@ async fn carve_into_bundle(
                 model_id
             }
         };
-        add_model_tags(&mut *tx, model_id, &planned.tags).await?;
+        add_model_tags(&mut *tx, model_id, &planned.tags, &tags.model).await?;
         carve_variants(
             &mut *tx,
             model_id,
             &planned.variants,
             user_id,
             Untagged::AnonymousVariant,
+            &tags.variant,
+            model_is_new,
         )
         .await?;
     }
@@ -978,12 +1242,14 @@ async fn carve_into_bundle(
     .fetch_one(&mut *tx)
     .await?;
     for name in &plan.model_tag_order {
-        let tag = upsert_tag(&mut *tx, name).await?;
+        let Some(&tag_id) = tags.model.get(&name.trim().to_lowercase()) else {
+            continue;
+        };
         let inserted = sqlx::query!(
             "INSERT INTO bundle_categories (bundle_id, tag_id, position) VALUES ($1, $2, $3)
              ON CONFLICT (bundle_id, tag_id) DO NOTHING",
             bundle_id,
-            tag.id,
+            tag_id,
             next_pos,
         )
         .execute(&mut *tx)
