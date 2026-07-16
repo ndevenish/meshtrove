@@ -199,6 +199,11 @@ pub struct PlanRequest {
     /// "bundle" (default) splits member models by model-name capture.
     #[serde(default)]
     pub target: CarveTarget,
+    /// The existing bundle a "bundle" carve is being merged into, if any. With
+    /// it the plan reports, per member model, which existing member it would
+    /// merge onto (`merge_target`) and the members available to retarget to.
+    #[serde(default)]
+    pub bundle_id: Option<Uuid>,
 }
 
 /// Everything the layout panel shows — coverage, the grouped tree, per-file
@@ -214,12 +219,92 @@ async fn plan(
     user.require_can_edit(staged.created_by)?;
     let files = plan_files(&state.db, id).await?;
     let vocab = variant_vocab(&state.db).await?;
-    Ok(Json(layout::analyze(
-        &request.spec,
-        request.target,
-        &files,
-        &vocab,
-    )?))
+    let mut plan = layout::analyze(&request.spec, request.target, &files, &vocab)?;
+
+    // Merging into an existing bundle: annotate each planned model with the
+    // member the carve would land it on (by name/alias + tag coverage), and list
+    // every member so the UI can offer a retarget dropdown. Same `match_member`
+    // the commit's carve uses, so the preview matches the result.
+    if request.target == CarveTarget::Bundle
+        && let Some(bundle_id) = request.bundle_id
+    {
+        let members = bundle_members(&state.db, bundle_id).await?;
+        for planned in &mut plan.models {
+            planned.merge_target = match_member(&members, planned).map(|m| m.id);
+        }
+        plan.members = members
+            .into_iter()
+            .map(|m| layout::MemberCandidate {
+                id: m.id,
+                name: m.name,
+                tags: m.tags,
+            })
+            .collect();
+    }
+
+    Ok(Json(plan))
+}
+
+/// One member model of a bundle, with everything the merge match needs: its
+/// name, the alternate names it answers to (aliases), and its model tags.
+struct MemberRow {
+    id: Uuid,
+    name: String,
+    tags: Vec<String>,
+    aliases: Vec<String>,
+}
+
+/// Every member model of a bundle. Reused by the plan endpoint (to preview merge
+/// targets) and the commit's carve (to actually reuse members).
+async fn bundle_members(
+    db: impl sqlx::PgExecutor<'_>,
+    bundle_id: Uuid,
+) -> Result<Vec<MemberRow>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT m.id, m.name::text as "name!",
+                  coalesce((SELECT array_agg(t.name::text) FROM model_tags mt
+                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}')
+                      as "tags!: Vec<String>",
+                  coalesce((SELECT array_agg(a.alias::text) FROM model_aliases a
+                            WHERE a.model_id = m.id), '{}')
+                      as "aliases!: Vec<String>"
+           FROM models m JOIN bundle_models bm ON bm.model_id = m.id
+           WHERE bm.bundle_id = $1
+           ORDER BY m.name"#,
+        bundle_id,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| MemberRow {
+            id: r.id,
+            name: r.name,
+            tags: r.tags,
+            aliases: r.aliases,
+        })
+        .collect())
+}
+
+/// The member a planned model merges onto by default: its name (or any alias)
+/// matches, and the member already carries every model tag the plan captured. A
+/// past import may have taught a member an alternate name, so a re-drop that
+/// spells it differently still finds it.
+fn match_member<'a>(
+    members: &'a [MemberRow],
+    planned: &layout::PlanModel,
+) -> Option<&'a MemberRow> {
+    let name = planned.name.to_lowercase();
+    let wanted: Vec<String> = planned.tags.iter().map(|t| t.to_lowercase()).collect();
+    members.iter().find(|m| {
+        let name_hit =
+            m.name.to_lowercase() == name || m.aliases.iter().any(|a| a.to_lowercase() == name);
+        if !name_hit {
+            return false;
+        }
+        let mtags: Vec<String> = m.tags.iter().map(|t| t.to_lowercase()).collect();
+        wanted.iter().all(|t| mtags.contains(t))
+    })
 }
 
 async fn plan_files(
@@ -324,6 +409,12 @@ pub enum CommitInput {
         meta: ImportMeta,
         #[serde(default)]
         layout: Option<LayoutSpec>,
+        /// Per planned-model retarget choices from the "Will become" dropdowns,
+        /// index-aligned to `plan.models`: `Some(member_id)` merges onto that
+        /// member, `null` creates a new one. Empty (the default) falls back to
+        /// the automatic name/alias match.
+        #[serde(default)]
+        merge_targets: Vec<Option<Uuid>>,
     },
 }
 
@@ -480,8 +571,11 @@ async fn commit(
             .fetch_one(&mut *tx)
             .await?;
             if let Some(plan) = &carve {
+                // A brand-new bundle has no members yet, so no merge decision:
+                // every planned model is created fresh.
                 let created =
-                    carve_into_bundle(&mut tx, bundle_id, meta.creator_id, plan, user.id).await?;
+                    carve_into_bundle(&mut tx, bundle_id, meta.creator_id, plan, user.id, &[])
+                        .await?;
                 // The box set was bought once: what was typed on the import page
                 // is true of every model the carve just pulled out of it.
                 for model_id in &created {
@@ -503,7 +597,10 @@ async fn commit(
             }
         }
         CommitInput::Bundle {
-            bundle_id, meta, ..
+            bundle_id,
+            meta,
+            merge_targets,
+            ..
         } => {
             let target = sqlx::query!(
                 "SELECT created_by, slug, creator_id FROM bundles WHERE id = $1",
@@ -516,7 +613,8 @@ async fn commit(
             if let Some(plan) = &carve {
                 let creator = meta.creator_id.or(target.creator_id);
                 let created =
-                    carve_into_bundle(&mut tx, *bundle_id, creator, plan, user.id).await?;
+                    carve_into_bundle(&mut tx, *bundle_id, creator, plan, user.id, merge_targets)
+                        .await?;
                 // Only the models this drop *created*: a member that was already
                 // in the bundle has its own metadata, and a later 75mm pack has no
                 // business rewriting it.
@@ -787,39 +885,48 @@ async fn add_model_tags(
     Ok(())
 }
 
-/// Carve a bundle-target plan: each planned (name + model-tag set) reuses a
-/// member model whose name matches and whose tags cover the group's, else
-/// creates one — which is how a later DownloadAll_75mm drop lands its files on
-/// the models the 32mm drop created. Returns newly created model ids.
+/// Carve a bundle-target plan: each planned (name + model-tag set) lands on a
+/// member model — the one the user retargeted it to (`overrides`), else the one
+/// [`match_member`] picks by name/alias + tag coverage, else a fresh member.
+/// This is how a later DownloadAll_75mm drop lands its files on the models the
+/// 32mm drop created. `overrides` is index-aligned to `plan.models`: `Some(id)`
+/// forces that member, `None` forces a new one; an empty slice means auto-match
+/// every model. Returns newly created model ids.
 async fn carve_into_bundle(
     tx: &mut sqlx::PgConnection,
     bundle_id: Uuid,
     bundle_creator: Option<Uuid>,
     plan: &Plan,
     user_id: Uuid,
+    overrides: &[Option<Uuid>],
 ) -> Result<Vec<Uuid>, ApiError> {
-    let members = sqlx::query!(
-        r#"SELECT m.id, m.name,
-                  coalesce((SELECT array_agg(lower(t.name::text)) FROM model_tags mt
-                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}')
-                      as "tags!: Vec<String>"
-           FROM models m JOIN bundle_models bm ON bm.model_id = m.id
-           WHERE bm.bundle_id = $1"#,
-        bundle_id,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    if !overrides.is_empty() && overrides.len() != plan.models.len() {
+        return Err(ApiError::BadRequest(
+            "merge_targets must have one entry per planned model".into(),
+        ));
+    }
+    let members = bundle_members(&mut *tx, bundle_id).await?;
+    let member_ids: HashSet<Uuid> = members.iter().map(|m| m.id).collect();
 
     let mut reserved_slugs: HashSet<String> = HashSet::new();
     let mut created = Vec::new();
-    for planned in &plan.models {
-        let wanted: Vec<String> = planned.tags.iter().map(|t| t.to_lowercase()).collect();
-        let existing = members.iter().find(|m| {
-            m.name.to_lowercase() == planned.name.to_lowercase()
-                && wanted.iter().all(|t| m.tags.contains(t))
-        });
-        let model_id = match existing {
-            Some(member) => member.id,
+    for (i, planned) in plan.models.iter().enumerate() {
+        // An explicit retarget choice wins; with none, fall back to the same
+        // name/alias match the plan previewed.
+        let chosen = if overrides.is_empty() {
+            match_member(&members, planned).map(|m| m.id)
+        } else {
+            overrides[i]
+        };
+        if let Some(member_id) = chosen
+            && !member_ids.contains(&member_id)
+        {
+            return Err(ApiError::BadRequest(
+                "merge target is not a member of this bundle".into(),
+            ));
+        }
+        let model_id = match chosen {
+            Some(member_id) => member_id,
             None => {
                 let slug = unique_member_slug(&mut *tx, &planned.name, &mut reserved_slugs).await?;
                 let model_id: Uuid = sqlx::query_scalar!(
@@ -882,5 +989,66 @@ async fn unique_member_slug(
             reserved.insert(candidate.clone());
             return Ok(candidate);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(id: u128, name: &str, tags: &[&str], aliases: &[&str]) -> MemberRow {
+        MemberRow {
+            id: Uuid::from_u128(id),
+            name: name.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn planned(name: &str, tags: &[&str]) -> layout::PlanModel {
+        layout::PlanModel {
+            name: name.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            file_count: 0,
+            variants: Vec::new(),
+            merge_target: None,
+        }
+    }
+
+    #[test]
+    fn matches_by_name_case_insensitively() {
+        let members = [member(1, "Gold", &[], &[])];
+        assert_eq!(
+            match_member(&members, &planned("gold", &[])).map(|m| m.id),
+            Some(members[0].id)
+        );
+    }
+
+    #[test]
+    fn matches_by_stored_alias() {
+        // A past import renamed the member; the drop still spells the old name.
+        let members = [member(1, "Gold_V2", &[], &["Gold"])];
+        assert_eq!(
+            match_member(&members, &planned("Gold", &[])).map(|m| m.id),
+            Some(members[0].id),
+            "an alias should resolve the member",
+        );
+    }
+
+    #[test]
+    fn requires_the_member_to_cover_captured_model_tags() {
+        // Same name, but the plan captured a Heroes tag the member lacks: no
+        // match, so a fresh member is made rather than polluting the wrong one.
+        let members = [member(1, "Gold", &["Enemies"], &[])];
+        assert!(match_member(&members, &planned("Gold", &["Heroes"])).is_none());
+        // The member that does carry it matches (extra member tags are fine).
+        let members = [member(1, "Gold", &["Heroes", "Set A"], &[])];
+        assert!(match_member(&members, &planned("Gold", &["heroes"])).is_some());
+    }
+
+    #[test]
+    fn a_different_name_does_not_match() {
+        let members = [member(1, "Gold", &[], &["Golden"])];
+        assert!(match_member(&members, &planned("Silver", &[])).is_none());
     }
 }

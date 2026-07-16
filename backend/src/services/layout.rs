@@ -130,6 +130,20 @@ pub struct PlanModel {
     pub tags: Vec<String>,
     pub file_count: usize,
     pub variants: Vec<PlanVariant>,
+    /// Carving into an *existing* bundle: the member model this planned model
+    /// would merge onto by default (null = a new member is created). `analyze`
+    /// never sets this — it has no DB; the plan endpoint fills it in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_target: Option<Uuid>,
+}
+
+/// A member model of the bundle being merged into, offered as a retarget option
+/// for each planned model. Filled by the plan endpoint (see imports.rs).
+#[derive(Serialize, ToSchema, Clone)]
+pub struct MemberCandidate {
+    pub id: Uuid,
+    pub name: String,
+    pub tags: Vec<String>,
 }
 
 /// A capture group, with example captures for the role-assignment table.
@@ -167,6 +181,11 @@ pub struct Plan {
     /// "this is really a bundle" signal.
     pub model_names: Vec<String>,
     pub annotations: Vec<FileAnnotation>,
+    /// Existing members of the bundle being merged into, so the UI can offer
+    /// each planned model a retarget dropdown. Empty unless the plan endpoint
+    /// is carving into an existing bundle.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<MemberCandidate>,
 }
 
 impl Plan {
@@ -450,6 +469,7 @@ pub fn analyze(
             name: acc.name,
             tags: acc.tags,
             variants: acc.variants.into_values().collect(),
+            merge_target: None,
         })
         .collect();
     if target == CarveTarget::Model
@@ -468,6 +488,7 @@ pub fn analyze(
         values: values.into_values().collect(),
         model_names: model_names.into_values().collect(),
         annotations,
+        members: Vec::new(),
     })
 }
 

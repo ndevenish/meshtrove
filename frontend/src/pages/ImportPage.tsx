@@ -47,6 +47,9 @@ export default function ImportPage() {
   const [dest, setDest] = useState<Destination>(params.get('bundle') ? 'bundle' : 'new_model')
   const [target, setTarget] = useState<BundleSummary | null>(null)
   const [layout, setLayout] = useState<{ spec: LayoutSpec; plan: LayoutPlan } | null>(null)
+  // Per member-model merge choices from the layout panel, index-aligned to the
+  // plan's models (a member id or null=new); null when not merging into a bundle.
+  const [mergeTargets, setMergeTargets] = useState<(string | null)[] | null>(null)
   const [committing, setCommitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -137,7 +140,13 @@ export default function ImportPage() {
       const spec = layout?.spec
       const body: CommitTarget =
         dest === 'bundle'
-          ? { target: 'bundle', bundle_id: target!.id, layout: spec, ...meta }
+          ? {
+              target: 'bundle',
+              bundle_id: target!.id,
+              layout: spec,
+              merge_targets: spec ? (mergeTargets ?? undefined) : undefined,
+              ...meta,
+            }
           : dest === 'new_bundle'
             ? {
                 target: 'new_bundle',
@@ -281,7 +290,9 @@ export default function ImportPage() {
           fileCount={(files ?? []).filter((f) => f.kind !== 'archive').length}
           unpacking={staged.unpacking}
           target={dest === 'new_model' ? 'model' : 'bundle'}
+          bundleId={dest === 'bundle' ? target?.id : undefined}
           onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
+          onMergeTargets={setMergeTargets}
         />
 
         {dest === 'new_model' && layout && layout.plan.model_names.length > 1 && (
