@@ -2,7 +2,7 @@ use axum::{Json, Router, routing::get};
 use serde::Serialize;
 use utoipa::{OpenApi, ToSchema};
 
-use crate::extractors::User;
+use crate::extractors::{AuthError, User};
 use crate::state::AppState;
 
 #[derive(OpenApi)]
@@ -15,10 +15,15 @@ pub fn router() -> Router<AppState> {
         .route("/api/me", get(me))
 }
 
-/// The currently logged-in user.
+/// The currently logged-in user. A caller with no session resolves to the
+/// anonymous guest viewer everywhere else, but here that is reported as 401 so
+/// the client can still tell "logged out" from "logged in as a viewer".
 #[utoipa::path(get, path = "/api/me", responses((status = 200, body = User), (status = 401)))]
-async fn me(user: User) -> Json<User> {
-    Json(user)
+async fn me(user: User) -> Result<Json<User>, AuthError> {
+    if user.is_guest() {
+        return Err(AuthError::Unauthenticated);
+    }
+    Ok(Json(user))
 }
 
 #[derive(Serialize, ToSchema)]

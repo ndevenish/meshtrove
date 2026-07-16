@@ -13,6 +13,7 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api, formatBytes, type GcReport } from '../api'
 import { useAuth } from '../main'
+import UsersPanel from '../components/UsersPanel'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
 /// affects new renders; "re-render stale" migrates existing images.
@@ -224,6 +225,8 @@ export default function AdminPage() {
           </Button>
         </Stack>
       </Paper>
+
+      <UsersPanel />
     </Container>
   )
 }

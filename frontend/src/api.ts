@@ -1,9 +1,19 @@
 // Thin typed fetch layer over the backend API (same origin, cookie auth).
 
+export type Role = 'admin' | 'editor' | 'viewer'
+
 export interface User {
   id: string
   username: string
-  role: 'admin' | 'editor' | 'viewer'
+  role: Role
+}
+
+/// A user account as the admin user-management screen sees it.
+export interface UserAccount {
+  id: string
+  username: string
+  role: Role
+  created_at: string
 }
 
 export interface Creator {
@@ -428,6 +438,11 @@ export const api = {
   register: (username: string, password: string) =>
     request<User>('/auth/register', json({ username, password })),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
+
+  // User administration (admin only).
+  users: () => request<UserAccount[]>('/api/users'),
+  setUserRole: (id: string, role: Role) =>
+    request<UserAccount>(`/api/users/${id}`, { ...json({ role }), method: 'PATCH' }),
 
   searchModels: (params: URLSearchParams) => request<SearchResults>(`/api/models?${params}`),
   model: (id: string) => request<ModelDetail>(`/api/models/${id}`),

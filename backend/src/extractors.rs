@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::PrivateCookieJar;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -14,7 +14,7 @@ use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "meshtrove_session";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, sqlx::Type, ToSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "user_role", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
@@ -31,6 +31,28 @@ pub struct User {
 }
 
 impl User {
+    /// The unauthenticated caller: read-only, no identity. A visitor who hasn't
+    /// logged in is treated as a viewer so browsing works without an account;
+    /// every mutating route still gates on `require_*`, which a viewer fails.
+    /// Kept distinct from a real viewer (which has a DB row and a non-nil id) by
+    /// the nil id, so `/api/me` can still report "not logged in" — see
+    /// [`User::is_guest`].
+    pub fn guest() -> Self {
+        User {
+            id: Uuid::nil(),
+            username: "guest".to_string(),
+            role: UserRole::Viewer,
+        }
+    }
+
+    /// A caller with no session (the [`guest`](User::guest) viewer), as opposed
+    /// to a logged-in viewer or the synthetic `--anonymous` admin (both of which
+    /// this returns false for — the anonymous admin shares the nil id but is not
+    /// a viewer).
+    pub fn is_guest(&self) -> bool {
+        self.id.is_nil() && self.role == UserRole::Viewer
+    }
+
     /// Viewer: read + personal marks. Editor: edit things they created.
     /// Admin: edit everything.
     pub fn can_edit(&self, created_by: Uuid) -> bool {
@@ -109,16 +131,22 @@ impl FromRequestParts<AppState> for User {
             });
         }
 
+        // No valid session → an anonymous viewer, not a rejection: browsing is
+        // open, and writes still fail on their own `require_*` gate.
         let jar =
             <PrivateCookieJar as FromRequestParts<AppState>>::from_request_parts(parts, state)
                 .await
-                .map_err(|_| AuthError::Unauthenticated)?;
-        let user_id: Uuid = jar
+                .expect("PrivateCookieJar extraction is infallible");
+        let Some(user_id) = jar
             .get(SESSION_COOKIE)
-            .and_then(|c| c.value().parse().ok())
-            .ok_or(AuthError::Unauthenticated)?;
+            .and_then(|c| c.value().parse::<Uuid>().ok())
+        else {
+            return Ok(User::guest());
+        };
 
-        sqlx::query_as!(
+        // A session cookie pointing at a user that no longer exists is stale, not
+        // hostile — fall back to the guest viewer rather than 500/401.
+        Ok(sqlx::query_as!(
             User,
             r#"SELECT id, username as "username: String", role as "role: UserRole"
                FROM users WHERE id = $1"#,
@@ -127,6 +155,6 @@ impl FromRequestParts<AppState> for User {
         .fetch_optional(&state.db)
         .await
         .map_err(|e| AuthError::Internal(e.into()))?
-        .ok_or(AuthError::Unauthenticated)
+        .unwrap_or_else(User::guest))
     }
 }
