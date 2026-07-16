@@ -29,7 +29,8 @@ import CloseIcon from '@mui/icons-material/Close'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, imageUrl, sourceOrigin } from '../api'
+import DownloadIcon from '@mui/icons-material/Download'
+import { api, imageUrl, sourceOrigin, exportBundleUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import { useSuppressGlobalDrop } from '../globalDrop'
@@ -239,9 +240,18 @@ export default function BundlePage() {
               <Chip label={bundle.kind} size="small" color="primary" variant="outlined" />
             </Stack>
             {canEdit && !editing && (
-              <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
-                Edit
-              </Button>
+              <>
+                <Button
+                  component="a"
+                  href={exportBundleUrl(bundle.id)}
+                  startIcon={<DownloadIcon />}
+                >
+                  Export
+                </Button>
+                <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
+                  Edit
+                </Button>
+              </>
             )}
             {canEdit && editing && (
               <Stack direction="row" spacing={1}>

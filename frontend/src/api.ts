@@ -522,6 +522,15 @@ export const api = {
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
 
+  /// Upload an export archive and get back what it holds (flagging entities that
+  /// already exist here). The token is handed to `commitImportArchive`.
+  previewImportArchive: (form: FormData, onProgress: (f: number) => void) =>
+    uploadWithProgress<ImportArchivePreview>('/api/import/preview', form, onProgress),
+  /// Restore a previewed archive. `fresh` names the manifest-local ids of
+  /// already-present entities to import as a fresh copy anyway.
+  commitImportArchive: (token: string, fresh: string[]) =>
+    request<RestoreSummary>('/api/import/commit', json({ token, fresh })),
+
   previewBundlePatch: (bundleId: string, zip: File) => {
     const form = new FormData()
     form.append('file', zip)
@@ -602,6 +611,45 @@ export interface PatchApplyResult {
 
 export const imageUrl = (id: string) => `/api/images/${id}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
+
+// --- Export / import archives ----------------------------------------------
+
+/// The browser downloads these by navigating to the URL (a GET that streams a
+/// zip with a Content-Disposition attachment), rather than through fetch.
+export const exportModelUrl = (id: string) => `/api/models/${id}/export`
+export const exportBundleUrl = (id: string) => `/api/bundles/${id}/export`
+
+/// One model or bundle inside an uploaded archive.
+export interface ImportArchiveEntity {
+  /** manifest-local id — pass to `fresh` to force a fresh copy of an existing one */
+  id: string
+  name: string
+  slug: string
+  /** an entity with this slug already exists here (skipped unless fresh-copied) */
+  exists: boolean
+  /** member count, for bundles */
+  members?: number
+}
+
+export interface ImportArchivePreview {
+  token: string
+  schema: string
+  exported_at: string
+  models: ImportArchiveEntity[]
+  bundles: ImportArchiveEntity[]
+  blob_count: number
+  total_size: number
+}
+
+export interface RestoreSummary {
+  models_created: number
+  models_skipped: number
+  bundles_created: number
+  bundles_skipped: number
+  files: number
+  images: number
+  blobs: number
+}
 
 /// A short, human label for a source URL: just its origin (`https://host`), so
 /// "from https://www.myminifactory.com" reads next to the creator rather than

@@ -48,6 +48,7 @@ async fn main() -> Result<()> {
         .merge(routes::models::router())
         .merge(routes::patch::router())
         .merge(routes::tags::router())
+        .merge(routes::transfer::router())
         .merge(routes::variants::router())
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/docs")

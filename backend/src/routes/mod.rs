@@ -13,5 +13,6 @@ pub mod jobs;
 pub mod models;
 pub mod patch;
 pub mod tags;
+pub mod transfer;
 pub mod variant_tags;
 pub mod variants;

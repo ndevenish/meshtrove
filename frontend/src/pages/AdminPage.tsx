@@ -13,6 +13,7 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api } from '../api'
 import { useAuth } from '../main'
+import ImportRestoreDialog from '../components/ImportRestoreDialog'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
 /// affects new renders; "re-render stale" migrates existing images.
@@ -24,6 +25,7 @@ export default function AdminPage() {
   const [mode, setMode] = useState<'add' | 'replace'>('replace')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [importOpen, setImportOpen] = useState(false)
 
   const { data: config, refetch } = useQuery({
     queryKey: ['renderer-config'],
@@ -154,6 +156,22 @@ export default function AdminPage() {
           </Button>
         </Stack>
       </Paper>
+
+      <Paper variant="outlined" sx={{ p: 3, mt: 3 }}>
+        <Typography variant="h6" sx={{ mb: 0.5 }}>
+          Import archive
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Restore models and bundles from a MeshTrove export (produced by the{' '}
+          <strong>Export</strong> button on a model or bundle). You&rsquo;ll preview the contents
+          before anything is written.
+        </Typography>
+        <Button variant="contained" onClick={() => setImportOpen(true)}>
+          Import archive…
+        </Button>
+      </Paper>
+
+      <ImportRestoreDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </Container>
   )
 }

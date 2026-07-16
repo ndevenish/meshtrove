@@ -23,7 +23,8 @@ import Inventory2Icon from '@mui/icons-material/Inventory2'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, imageUrl, sourceOrigin } from '../api'
+import DownloadIcon from '@mui/icons-material/Download'
+import { api, imageUrl, sourceOrigin, exportModelUrl } from '../api'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
@@ -298,9 +299,14 @@ export default function ModelPage() {
               {model.name}
             </Typography>
             {canEdit && !editing && (
-              <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
-                Edit
-              </Button>
+              <>
+                <Button component="a" href={exportModelUrl(model.id)} startIcon={<DownloadIcon />}>
+                  Export
+                </Button>
+                <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
+                  Edit
+                </Button>
+              </>
             )}
             {canEdit && editing && (
               <Stack direction="row" spacing={1}>
