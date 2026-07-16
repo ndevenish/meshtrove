@@ -44,9 +44,8 @@ export default function ExportDialog({
   const queryClient = useQueryClient()
 
   const members = bundle?.models ?? []
-  // Default to nothing selected: the count then always matches what's ticked,
-  // with no hidden selections lurking behind the tag filter.
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+  // Default to everything selected; the tag filter then narrows what's in play.
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(members.map((m) => m.id)))
   const [tagFilter, setTagFilter] = useState<string[]>([])
   const [include, setInclude] = useState<string[]>([])
   const [exclude, setExclude] = useState<string[]>([])
@@ -75,7 +74,13 @@ export default function ExportDialog({
     [members, tagFilter],
   )
 
-  const modelIds = bundle ? [...selected].sort() : model ? [model.id] : []
+  // Only members that are both ticked and currently shown count — a selection
+  // hidden behind the tag filter is neither counted nor exported.
+  const visibleSelectedIds = useMemo(
+    () => visible.filter((m) => selected.has(m.id)).map((m) => m.id),
+    [visible, selected],
+  )
+  const modelIds = bundle ? [...visibleSelectedIds].sort() : model ? [model.id] : []
 
   // Live preview of what the selection + variant filter keeps. File-kind counts
   // are pre-exclusion, so toggling a kind doesn't need a refetch.
@@ -192,7 +197,7 @@ export default function ExportDialog({
               )}
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Typography variant="body2" sx={{ flexGrow: 1 }}>
-                  {selected.size} of {members.length} selected
+                  {visibleSelectedIds.length} of {visible.length} selected
                 </Typography>
                 <Button size="small" onClick={() => setAllVisible(true)}>
                   Select {scope}
