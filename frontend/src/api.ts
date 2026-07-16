@@ -189,6 +189,8 @@ export interface ImportSummary {
   file_count: number
   /** its archive is still unpacking; committing is refused until this clears */
   unpacking: boolean
+  /** the dropped archive is a MeshTrove export — restore it rather than carve it */
+  is_export: boolean
 }
 
 // --- Import layout templates (regex-driven carve; see docs/plan.md) ---------
@@ -522,14 +524,14 @@ export const api = {
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
 
-  /// Upload an export archive and get back what it holds (flagging entities that
-  /// already exist here). The token is handed to `commitImportArchive`.
-  previewImportArchive: (form: FormData, onProgress: (f: number) => void) =>
-    uploadWithProgress<ImportArchivePreview>('/api/import/preview', form, onProgress),
+  /// What a dropped export archive holds (flagging entities already present).
+  /// Reads only the manifest, so it is instant even for a huge archive.
+  restorePreview: (importId: string) =>
+    request<RestorePreview>(`/api/imports/${importId}/restore/preview`),
   /// Restore a previewed archive. `fresh` names the manifest-local ids of
   /// already-present entities to import as a fresh copy anyway.
-  commitImportArchive: (token: string, fresh: string[]) =>
-    request<RestoreSummary>('/api/import/commit', json({ token, fresh })),
+  restoreCommit: (importId: string, fresh: string[]) =>
+    request<RestoreSummary>(`/api/imports/${importId}/restore/commit`, json({ fresh })),
 
   previewBundlePatch: (bundleId: string, zip: File) => {
     const form = new FormData()
@@ -619,8 +621,8 @@ export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 export const exportModelUrl = (id: string) => `/api/models/${id}/export`
 export const exportBundleUrl = (id: string) => `/api/bundles/${id}/export`
 
-/// One model or bundle inside an uploaded archive.
-export interface ImportArchiveEntity {
+/// One model or bundle inside a dropped export archive.
+export interface RestoreEntity {
   /** manifest-local id — pass to `fresh` to force a fresh copy of an existing one */
   id: string
   name: string
@@ -631,12 +633,11 @@ export interface ImportArchiveEntity {
   members?: number
 }
 
-export interface ImportArchivePreview {
-  token: string
+export interface RestorePreview {
   schema: string
   exported_at: string
-  models: ImportArchiveEntity[]
-  bundles: ImportArchiveEntity[]
+  models: RestoreEntity[]
+  bundles: RestoreEntity[]
   blob_count: number
   total_size: number
 }

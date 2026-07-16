@@ -56,6 +56,10 @@ pub struct ImportSummary {
     /// An unpack job for one of this import's archives is queued or running:
     /// the contents aren't final yet, so committing is refused.
     pub unpacking: bool,
+    /// The dropped archive is a MeshTrove export: it is restored (recreating the
+    /// models/bundles it holds), not carved. The Import page shows a restore
+    /// panel rather than the layout UI.
+    pub is_export: bool,
 }
 
 /// An import's files are listed via `GET /api/imports/{id}/files` (files.rs),
@@ -66,7 +70,7 @@ async fn list(
 ) -> Result<Json<Vec<ImportSummary>>, ApiError> {
     user.require_editor()?;
     let rows = sqlx::query!(
-        r#"SELECT i.id, i.name, i.created_by, i.created_at,
+        r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
                   EXISTS (
                     SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
@@ -88,6 +92,7 @@ async fn list(
                 created_at: r.created_at,
                 file_count: r.file_count,
                 unpacking: r.unpacking,
+                is_export: r.is_export,
             })
             .collect(),
     ))
@@ -95,7 +100,7 @@ async fn list(
 
 async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, ApiError> {
     let r = sqlx::query!(
-        r#"SELECT i.id, i.name, i.created_by, i.created_at,
+        r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
                   EXISTS (
                     SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
@@ -116,6 +121,7 @@ async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, ApiEr
         created_at: r.created_at,
         file_count: r.file_count,
         unpacking: r.unpacking,
+        is_export: r.is_export,
     })
 }
 

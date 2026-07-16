@@ -311,15 +311,37 @@ async fn consume_fields(
                 // an import's staging bucket. The archive itself only lives as
                 // long as the import does — committing one drops the original and
                 // keeps a `source_archives` row in its place (services/gc.rs).
+                //
+                // One exception: a zip dropped into an import that turns out to be
+                // a MeshTrove export (it carries a manifest.json) is *restored*,
+                // not carved. Peek its central directory — a cheap read that never
+                // unpacks the rest — and if it is one, flag the import and skip the
+                // unpack; the Import page then offers "restore" (routes/transfer).
                 if matches!(record.kind, FileKind::Archive)
                     && filename.to_lowercase().ends_with(".zip")
                 {
-                    crate::services::jobs::enqueue(
-                        &state.db,
-                        "import_archive",
-                        serde_json::json!({ "archive_file_id": record.id }),
-                    )
-                    .await?;
+                    let is_export = matches!(owner, Owner::Import(_))
+                        && crate::services::transfer::read_manifest_from_blob(
+                            &state.store,
+                            &blob.sha256,
+                        )
+                        .await?
+                        .is_some();
+                    if let (true, Owner::Import(import_id)) = (is_export, owner) {
+                        sqlx::query!(
+                            "UPDATE imports SET is_export = true, updated_at = now() WHERE id = $1",
+                            import_id,
+                        )
+                        .execute(&state.db)
+                        .await?;
+                    } else {
+                        crate::services::jobs::enqueue(
+                            &state.db,
+                            "import_archive",
+                            serde_json::json!({ "archive_file_id": record.id }),
+                        )
+                        .await?;
+                    }
                 }
                 records.push(record);
             }

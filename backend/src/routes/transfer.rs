@@ -1,53 +1,47 @@
-//! Export and import a slice of the collection as a downloadable archive.
+//! Export a model or a bundle as a downloadable archive, and restore one that
+//! was dropped into an import.
 //!
-//! Export streams a zip built from a manifest (see `services::transfer`): a
-//! model, a bundle (with its members), or the whole library. Import is a
-//! two-step, like `patch.rs`: `preview` stages the uploaded archive's blobs into
-//! the store and reports what it holds (flagging entities already present);
-//! `commit` then writes the entities, honouring the caller's per-entity
-//! skip/fresh-copy choices.
+//! Export streams a zip built from a manifest (see `services::transfer`).
+//!
+//! Import reuses the ordinary drop-an-archive pipeline: a dropped zip is stored
+//! as an archive blob and, if it carries a `manifest.json`, the upload flags the
+//! import as an export (`files.rs`) instead of queueing the usual unpack. These
+//! two endpoints then work off that already-stored blob — `preview` reads just
+//! the manifest (cheap; flags entities already present), `commit` streams the
+//! blobs into the store and restores the entities, then discards the import.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 
 use anyhow::anyhow;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{Path, State},
     http::header,
     response::Response,
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
-use crate::services::blobstore::{BlobStore, FsBlobStore};
-use crate::services::transfer::{
-    self, Export, Manifest, RestoreOptions, RestoreSummary, SCHEMA, StagedImport,
-};
+use crate::routes::imports::import_created_by;
+use crate::services::blobstore::FsBlobStore;
+use crate::services::transfer::{self, Export, RestoreOptions, RestoreSummary};
 use crate::state::AppState;
-
-/// Staged imports older than this are pruned — an abandoned preview should not
-/// pin its manifest in memory forever.
-const STAGING_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/models/{id}/export", get(export_model))
         .route("/api/bundles/{id}/export", get(export_bundle))
-        .route("/api/import/preview", post(import_preview))
-        .route("/api/import/commit", post(import_commit))
-        // The archive carries every blob; the store streams, so no body cap.
-        .layer(DefaultBodyLimit::disable())
+        .route("/api/imports/{id}/restore/preview", get(restore_preview))
+        .route("/api/imports/{id}/restore/commit", post(restore_commit))
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +137,7 @@ fn build_zip(store: &FsBlobStore, path: &FsPath, export: &Export) -> Result<(), 
 
     // One entry per distinct archive_path (a path maps to exactly one sha).
     let mut written: HashSet<&str> = HashSet::new();
-    for (archive_path, sha) in blob_entries(&export.manifest) {
+    for (archive_path, sha) in transfer::blob_entries(&export.manifest) {
         if !written.insert(archive_path) {
             continue;
         }
@@ -158,49 +152,16 @@ fn build_zip(store: &FsBlobStore, path: &FsPath, export: &Export) -> Result<(), 
     Ok(())
 }
 
-/// Every (archive_path, blob_sha256) an export writes, across models, their
-/// variants, and bundles.
-fn blob_entries(manifest: &Manifest) -> Vec<(&str, &str)> {
-    let mut out = Vec::new();
-    for m in &manifest.models {
-        for f in &m.files {
-            out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
-        }
-        for img in &m.images {
-            out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
-        }
-        for v in &m.variants {
-            for f in &v.files {
-                out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
-            }
-            for img in &v.images {
-                out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
-            }
-        }
-    }
-    for b in &manifest.bundles {
-        for f in &b.files {
-            out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
-        }
-        for img in &b.images {
-            out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
-        }
-    }
-    out
-}
-
 fn zip_err(e: zip::result::ZipError) -> ApiError {
     ApiError::Internal(anyhow!("zip error: {e}"))
 }
 
 // ---------------------------------------------------------------------------
-// Import — preview.
+// Restore (an import whose dropped archive is a MeshTrove export).
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, ToSchema)]
-struct ImportPreview {
-    /// Hand back to `commit` to apply this import.
-    token: Uuid,
+struct RestorePreview {
     schema: String,
     exported_at: DateTime<Utc>,
     models: Vec<EntityRow>,
@@ -223,83 +184,16 @@ struct EntityRow {
     members: Option<usize>,
 }
 
-async fn import_preview(
+async fn restore_preview(
     State(state): State<AppState>,
     user: User,
-    mut multipart: Multipart,
-) -> Result<Json<ImportPreview>, ApiError> {
-    user.require_admin()?;
-
-    let tmp_dir = state.config.store_dir.join("tmp");
-    tokio::fs::create_dir_all(&tmp_dir)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    let upload_path = tmp_dir.join(format!("import-{}.zip", Uuid::new_v4()));
-
-    // Stream the upload straight to disk — an archive can be many gigabytes, so
-    // it must never sit in memory whole.
-    let mut got_file = false;
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("bad multipart body: {e}")))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-        let mut file = tokio::fs::File::create(&upload_path)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|e| ApiError::BadRequest(format!("reading upload: {e}")))?
-        {
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-        got_file = true;
-    }
-    if !got_file {
-        return Err(ApiError::BadRequest("no file field in upload".into()));
-    }
-
-    // Parse the manifest and carve out one temp file per needed blob.
-    let up = upload_path.clone();
-    let staging_dir = tmp_dir.clone();
-    let (manifest, blob_temps) =
-        tokio::task::spawn_blocking(move || read_manifest_and_stage_blobs(&up, &staging_dir))
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))??;
-    let _ = tokio::fs::remove_file(&upload_path).await;
-
-    // Move each staged blob into the content-addressed store, verifying its hash.
-    for (expected, tmp) in &blob_temps {
-        let f = tokio::fs::File::open(tmp)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-        let stream = ReaderStream::new(f).map_err(anyhow::Error::from);
-        let stored = state.store.put(Box::pin(stream)).await?;
-        let _ = tokio::fs::remove_file(tmp).await;
-        if &stored.sha256 != expected {
-            return Err(ApiError::BadRequest(format!(
-                "archive blob content does not match its hash ({expected})"
-            )));
-        }
-    }
-    // Every blob the manifest names must now be resolvable.
-    for blob in &manifest.blobs {
-        if state.store.open(&blob.sha256).await?.is_none() {
-            return Err(ApiError::BadRequest(format!(
-                "archive is missing blob {}",
-                blob.sha256
-            )));
-        }
-    }
+    Path(import_id): Path<Uuid>,
+) -> Result<Json<RestorePreview>, ApiError> {
+    user.require_editor()?;
+    let (archive_sha, _) = import_archive(&state, import_id).await?;
+    let manifest = transfer::read_manifest_from_blob(&state.store, &archive_sha)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("this import is not a MeshTrove export".into()))?;
 
     // Which slugs already exist here.
     let model_slugs: Vec<String> = manifest.models.iter().map(|m| m.slug.clone()).collect();
@@ -342,140 +236,75 @@ async fn import_preview(
         })
         .collect();
 
-    let preview = ImportPreview {
-        token: Uuid::new_v4(),
+    Ok(Json(RestorePreview {
         schema: manifest.schema.clone(),
         exported_at: manifest.exported_at,
         models,
         bundles,
         blob_count: manifest.blobs.len(),
         total_size: manifest.blobs.iter().map(|b| b.size).sum(),
-    };
-
-    let mut staging = state
-        .import_staging
-        .lock()
-        .expect("import staging lock poisoned");
-    prune_staging(&mut staging);
-    staging.insert(
-        preview.token,
-        StagedImport {
-            manifest,
-            staged_at: std::time::Instant::now(),
-        },
-    );
-
-    Ok(Json(preview))
+    }))
 }
-
-/// On a blocking thread: read `manifest.json`, then extract one entry per blob
-/// the manifest references into its own temp file. Returns the manifest and the
-/// (expected sha, temp path) pairs for the caller to move into the store.
-fn read_manifest_and_stage_blobs(
-    upload: &FsPath,
-    tmp_dir: &FsPath,
-) -> Result<(Manifest, Vec<(String, PathBuf)>), ApiError> {
-    let file = std::fs::File::open(upload).map_err(|e| ApiError::Internal(e.into()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| ApiError::BadRequest(format!("not a zip archive: {e}")))?;
-
-    let manifest: Manifest = {
-        let entry = zip
-            .by_name("manifest.json")
-            .map_err(|_| ApiError::BadRequest("no manifest.json in the archive".into()))?;
-        serde_json::from_reader(entry)
-            .map_err(|e| ApiError::BadRequest(format!("bad manifest.json: {e}")))?
-    };
-    if manifest.schema != SCHEMA {
-        return Err(ApiError::BadRequest(format!(
-            "unsupported archive schema {:?} (expected {SCHEMA})",
-            manifest.schema
-        )));
-    }
-
-    // A blob's bytes can be read from any file/image entry that references it.
-    let mut sha_to_path: HashMap<&str, &str> = HashMap::new();
-    for (archive_path, sha) in blob_entries(&manifest) {
-        sha_to_path.entry(sha).or_insert(archive_path);
-    }
-
-    let mut out = Vec::with_capacity(manifest.blobs.len());
-    // Collect the (sha, path) list first so the immutable borrow of `manifest`
-    // is released before we borrow `zip` mutably.
-    let plan: Vec<(String, String)> = manifest
-        .blobs
-        .iter()
-        .map(|b| {
-            sha_to_path
-                .get(b.sha256.as_str())
-                .map(|p| (b.sha256.clone(), p.to_string()))
-                .ok_or_else(|| {
-                    ApiError::BadRequest(format!(
-                        "manifest blob {} is referenced by no file",
-                        b.sha256
-                    ))
-                })
-        })
-        .collect::<Result<_, _>>()?;
-
-    for (sha, archive_path) in plan {
-        let mut entry = zip
-            .by_name(&archive_path)
-            .map_err(|_| ApiError::BadRequest(format!("archive is missing {archive_path}")))?;
-        let tmp = tmp_dir.join(format!("blob-{}", Uuid::new_v4()));
-        let mut w = std::fs::File::create(&tmp).map_err(|e| ApiError::Internal(e.into()))?;
-        std::io::copy(&mut entry, &mut w).map_err(|e| ApiError::Internal(e.into()))?;
-        out.push((sha, tmp));
-    }
-    Ok((manifest, out))
-}
-
-// ---------------------------------------------------------------------------
-// Import — commit.
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct CommitBody {
-    token: Uuid,
+struct RestoreBody {
     /// Manifest-local ids of entities to import as a fresh copy even though one
     /// with the same slug already exists.
     #[serde(default)]
     fresh: Vec<Uuid>,
 }
 
-async fn import_commit(
+async fn restore_commit(
     State(state): State<AppState>,
     user: User,
-    Json(body): Json<CommitBody>,
+    Path(import_id): Path<Uuid>,
+    Json(body): Json<RestoreBody>,
 ) -> Result<Json<RestoreSummary>, ApiError> {
-    user.require_admin()?;
+    user.require_can_edit(import_created_by(&state, import_id).await?)?;
 
-    let staged = {
-        let mut staging = state
-            .import_staging
-            .lock()
-            .expect("import staging lock poisoned");
-        prune_staging(&mut staging);
-        staging.remove(&body.token)
-    };
-    let staged = staged.ok_or_else(|| {
-        ApiError::BadRequest("import session expired or unknown; re-upload the archive".into())
-    })?;
+    let (archive_sha, _) = import_archive(&state, import_id).await?;
+    let manifest = transfer::read_manifest_from_blob(&state.store, &archive_sha)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("this import is not a MeshTrove export".into()))?;
+
+    // Stream the archive's blobs into the store, then write the entities.
+    let tmp_dir = state.config.store_dir.join("tmp");
+    tokio::fs::create_dir_all(&tmp_dir)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    transfer::stage_blobs(&state.store, &archive_sha, &manifest, &tmp_dir).await?;
 
     let options = RestoreOptions {
         fresh: body.fresh.into_iter().collect(),
     };
-    let summary = transfer::restore(&state, &user, &staged.manifest, &options).await?;
-    Ok(Json(summary))
-}
+    let summary = transfer::restore(&state, &user, &manifest, &options).await?;
 
-fn prune_staging(staging: &mut HashMap<Uuid, StagedImport>) {
-    staging.retain(|_, s| s.staged_at.elapsed() < STAGING_TTL);
+    // The staging import (and its now-redundant archive blob) has served its
+    // purpose; drop it. The archive blob stays in the store for orphan GC.
+    sqlx::query!("DELETE FROM imports WHERE id = $1", import_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(summary))
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// The archive blob an import is holding: its sha and filename.
+async fn import_archive(state: &AppState, import_id: Uuid) -> Result<(String, String), ApiError> {
+    sqlx::query!(
+        "SELECT blob_sha256, filename FROM files
+         WHERE import_id = $1 AND kind = 'archive'::file_kind
+         ORDER BY created_at DESC LIMIT 1",
+        import_id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .map(|r| (r.blob_sha256, r.filename))
+    .ok_or(ApiError::NotFound)
+}
 
 /// Resolve a model key (uuid or slug) to (id, slug).
 async fn resolve_model(state: &AppState, key: &str) -> Result<(Uuid, String), ApiError> {

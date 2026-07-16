@@ -31,6 +31,7 @@ import {
 } from '../api'
 import { FileTree } from '../components/VariantSection'
 import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayoutPanel'
+import ImportRestorePanel from '../components/ImportRestorePanel'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
 
@@ -172,6 +173,45 @@ export default function ImportPage() {
     await api.deleteImport(staged.id)
     await queryClient.invalidateQueries({ queryKey: ['imports'] })
     navigate('/imports')
+  }
+
+  // A dropped MeshTrove export is restored, not carved: skip the whole
+  // model/bundle/layout question and show what the archive holds.
+  if (staged.is_export) {
+    return (
+      <Container maxWidth="md" sx={{ py: 3 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 2 }}>
+          <Box sx={{ flexGrow: 1 }}>
+            <Typography variant="h5">Restore export</Typography>
+            <Typography color="text.secondary" variant="body2">
+              A MeshTrove export archive — restore the models and bundles it holds.
+            </Typography>
+          </Box>
+          <Button color="error" startIcon={<DeleteIcon />} onClick={discard}>
+            Discard
+          </Button>
+        </Stack>
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <ImportRestorePanel
+            importId={staged.id}
+            onImported={async () => {
+              await queryClient.invalidateQueries()
+              navigate('/')
+            }}
+          />
+        </Paper>
+        <Snackbar
+          open={!!error}
+          autoHideDuration={8000}
+          onClose={() => setError('')}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert severity="error" onClose={() => setError('')}>
+            {error}
+          </Alert>
+        </Snackbar>
+      </Container>
+    )
   }
 
   return (

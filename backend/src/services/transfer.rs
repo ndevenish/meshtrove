@@ -18,15 +18,19 @@
 //! how `patch.rs` stages images before opening its transaction.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path as FsPath, PathBuf};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::tags::upsert_tag;
+use crate::services::blobstore::{BlobStore, FsBlobStore};
 use crate::state::AppState;
 
 pub const SCHEMA: &str = "meshtrove.export/1";
@@ -234,14 +238,6 @@ pub struct Category {
 pub struct Export {
     pub manifest: Manifest,
     pub texts: Vec<(String, Vec<u8>)>,
-}
-
-/// A parsed import awaiting the user's confirmation. Held in [`AppState`] between
-/// the preview and commit steps; the blob bytes it needs are already in the
-/// store by the time it is stashed.
-pub struct StagedImport {
-    pub manifest: Manifest,
-    pub staged_at: std::time::Instant,
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1125,139 @@ async fn gather_source_archive_bundle(
         size: r.size,
         imported_at: r.imported_at,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// reading an archive blob back: peek the manifest, stage the blobs.
+// ---------------------------------------------------------------------------
+
+/// Every (archive_path, blob_sha256) an export writes, across models, their
+/// variants, and bundles.
+pub fn blob_entries(manifest: &Manifest) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    for m in &manifest.models {
+        for f in &m.files {
+            out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
+        }
+        for img in &m.images {
+            out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
+        }
+        for v in &m.variants {
+            for f in &v.files {
+                out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
+            }
+            for img in &v.images {
+                out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
+            }
+        }
+    }
+    for b in &manifest.bundles {
+        for f in &b.files {
+            out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
+        }
+        for img in &b.images {
+            out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
+        }
+    }
+    out
+}
+
+/// Read just `manifest.json` from a stored zip blob. A zip's directory is at the
+/// tail and one named entry is a direct seek, so this never unpacks the rest of
+/// a (possibly enormous) archive. Returns `None` when the blob is missing, is not
+/// a zip, has no manifest, or the manifest is not a MeshTrove export we speak.
+pub async fn read_manifest_from_blob(
+    store: &FsBlobStore,
+    sha256: &str,
+) -> Result<Option<Manifest>, ApiError> {
+    let path = store.path_for(sha256);
+    tokio::task::spawn_blocking(move || {
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(ApiError::Internal(e.into())),
+        };
+        let mut zip = match zip::ZipArchive::new(file) {
+            Ok(z) => z,
+            Err(_) => return Ok(None),
+        };
+        let Ok(entry) = zip.by_name("manifest.json") else {
+            return Ok(None);
+        };
+        let Ok(manifest) = serde_json::from_reader::<_, Manifest>(entry) else {
+            return Ok(None);
+        };
+        Ok((manifest.schema == SCHEMA).then_some(manifest))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))?
+}
+
+/// Stream every blob a manifest references out of the archive blob and into the
+/// content-addressed store, verifying each hash. Reads one entry per distinct
+/// blob (the readable tree may repeat bytes; the store dedups them anyway).
+pub async fn stage_blobs(
+    store: &FsBlobStore,
+    archive_sha: &str,
+    manifest: &Manifest,
+    tmp_dir: &FsPath,
+) -> Result<(), ApiError> {
+    // Each blob's bytes can be read from any file/image entry referencing it.
+    let mut sha_to_path: HashMap<&str, &str> = HashMap::new();
+    for (archive_path, sha) in blob_entries(manifest) {
+        sha_to_path.entry(sha).or_insert(archive_path);
+    }
+    let plan: Vec<(String, String)> = manifest
+        .blobs
+        .iter()
+        .map(|b| {
+            sha_to_path
+                .get(b.sha256.as_str())
+                .map(|p| (b.sha256.clone(), p.to_string()))
+                .ok_or_else(|| {
+                    ApiError::BadRequest(format!(
+                        "manifest blob {} is referenced by no file",
+                        b.sha256
+                    ))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let archive_path = store.path_for(archive_sha);
+    let tmp_dir = tmp_dir.to_path_buf();
+    let temps = tokio::task::spawn_blocking(move || -> Result<Vec<(String, PathBuf)>, ApiError> {
+        let file = std::fs::File::open(&archive_path).map_err(|e| ApiError::Internal(e.into()))?;
+        let mut zip = zip::ZipArchive::new(file)
+            .map_err(|e| ApiError::BadRequest(format!("archive is not a zip: {e}")))?;
+        let mut out = Vec::with_capacity(plan.len());
+        for (sha, entry_path) in plan {
+            let mut entry = zip
+                .by_name(&entry_path)
+                .map_err(|_| ApiError::BadRequest(format!("archive is missing {entry_path}")))?;
+            let tmp = tmp_dir.join(format!("blob-{}", Uuid::new_v4()));
+            let mut w = std::fs::File::create(&tmp).map_err(|e| ApiError::Internal(e.into()))?;
+            std::io::copy(&mut entry, &mut w).map_err(|e| ApiError::Internal(e.into()))?;
+            out.push((sha, tmp));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))??;
+
+    for (expected, tmp) in temps {
+        let f = tokio::fs::File::open(&tmp)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        let stream = ReaderStream::new(f).map_err(anyhow::Error::from);
+        let stored = store.put(Box::pin(stream)).await?;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        if stored.sha256 != expected {
+            return Err(ApiError::BadRequest(format!(
+                "archive blob content does not match its hash ({expected})"
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
