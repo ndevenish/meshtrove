@@ -103,7 +103,9 @@ export default function ImportPage() {
   useEffect(() => {
     const wanted = params.get('bundle')
     if (wanted && !target && bundles) {
-      setTarget(bundles.bundles.find((b) => b.id === wanted) ?? null)
+      // `?bundle=` may carry the id (the bundle page's inline merge box) or the
+      // slug (the global page drop, whose URL is the canonical slug) — take either.
+      setTarget(bundles.bundles.find((b) => b.id === wanted || b.slug === wanted) ?? null)
     }
   }, [params, bundles, target])
 

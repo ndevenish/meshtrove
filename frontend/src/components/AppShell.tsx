@@ -120,10 +120,15 @@ export default function AppShell() {
               await queryClient.invalidateQueries()
               // Dropped while standing on a bundle? Then that is where it is
               // going, and the import page opens preset to "add to this bundle" —
-              // which is why the bundle page needs no drop target of its own.
-              const onBundle = pathRef.current.match(/^\/bundles\/([0-9a-fA-F-]{36})/)
+              // which is why the bundle page needs no drop target of its own. The
+              // canonical bundle URL is the slug (a UUID only briefly, before it
+              // redirects), so match whatever segment is there — slug or id — and
+              // let the import page resolve it.
+              const onBundle = pathRef.current.match(/^\/bundles\/([^/]+)/)
               navigate(
-                onBundle ? `/imports/${staged.id}?bundle=${onBundle[1]}` : `/imports/${staged.id}`,
+                onBundle
+                  ? `/imports/${staged.id}?bundle=${encodeURIComponent(onBundle[1])}`
+                  : `/imports/${staged.id}`,
               )
             })
             .finally(() => setImporting(false))
