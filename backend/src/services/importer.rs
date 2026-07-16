@@ -77,9 +77,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
                     continue;
                 };
                 let logical = name.to_string_lossy().replace('\\', "/");
-                // Skip OS junk
-                let basename = logical.rsplit('/').next().unwrap_or("");
-                if basename == ".DS_Store" || logical.starts_with("__MACOSX/") {
+                if crate::routes::files::is_os_junk(&logical) {
                     continue;
                 }
                 let tmp_file = tmp_dir.join(format!("{i}"));

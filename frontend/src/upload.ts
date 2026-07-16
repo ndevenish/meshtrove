@@ -12,6 +12,14 @@ export type StagedFile = { file: File; path: string }
 /// was actually dropped (the folder, or the single file).
 export type Drop = { name: string; files: StagedFile[] }
 
+/// Mac/Windows filesystem cruft that rides along inside dropped folders but is
+/// never a model file. Mirrors the server's own skip (backend routes/files.rs
+/// `is_os_junk`), so junk never wastes an upload — and never lingers "pending"
+/// in a batch retry, which reconciles against what actually staged.
+function isOsJunk({ file, path }: StagedFile): boolean {
+  return file.name === '.DS_Store' || path.split('/').includes('__MACOSX')
+}
+
 /// Derive a human name: strip a leading "DownloadAll_" prefix, split camel case,
 /// turn separators into spaces, and Title Case. Seeds the import's name, and
 /// through it the model/bundle it becomes. Folders keep their dots (a `v1.2`
@@ -71,13 +79,14 @@ export async function readDrop(dataTransfer: DataTransfer): Promise<Drop> {
     .filter((entry): entry is FileSystemEntry => !!entry)
   const bare = Array.from(dataTransfer.files)
 
-  const files: StagedFile[] = []
+  const all: StagedFile[] = []
   if (entries.length) {
-    for (const entry of entries) await walk(entry, '', files)
+    for (const entry of entries) await walk(entry, '', all)
   } else {
     // No entry API (rare): can't recurse, but these are all plain files anyway.
-    for (const file of bare) files.push({ file, path: '' })
+    for (const file of bare) all.push({ file, path: '' })
   }
+  const files = all.filter((f) => !isOsJunk(f))
 
   const folder = entries.length === 1 && entries[0].isDirectory ? entries[0].name : null
   const name = folder ? deriveModelName(folder, false) : deriveModelName(files[0]?.file.name ?? '')
@@ -88,10 +97,12 @@ export async function readDrop(dataTransfer: DataTransfer): Promise<Drop> {
 /// picker (`webkitdirectory`) sets `webkitRelativePath`; a plain file leaves it
 /// empty. Either way the folder is everything but the last segment.
 export function readFileList(list: FileList): Drop {
-  const files: StagedFile[] = Array.from(list).map((file) => ({
-    file,
-    path: file.webkitRelativePath.split('/').slice(0, -1).join('/'),
-  }))
+  const files: StagedFile[] = Array.from(list)
+    .map((file) => ({
+      file,
+      path: file.webkitRelativePath.split('/').slice(0, -1).join('/'),
+    }))
+    .filter((f) => !isOsJunk(f))
   const root = files[0]?.path.split('/')[0]
   const name = root ? deriveModelName(root, false) : deriveModelName(files[0]?.file.name ?? '')
   return { name, files }

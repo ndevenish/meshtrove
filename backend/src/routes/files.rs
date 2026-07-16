@@ -95,6 +95,15 @@ pub fn guess_kind(filename: &str) -> FileKind {
     }
 }
 
+/// Mac/Windows filesystem cruft that rides along inside archives and dropped
+/// folders but is never a model file: skip it on the way in. `logical` is the
+/// file's full logical path (`path/filename`). Matches at any depth, so a
+/// `.DS_Store` buried three folders down or a nested `__MACOSX/` is caught too.
+pub fn is_os_junk(logical: &str) -> bool {
+    logical.rsplit('/').next() == Some(".DS_Store")
+        || logical.split('/').any(|seg| seg == "__MACOSX")
+}
+
 fn parse_kind(value: &str) -> Result<FileKind, ApiError> {
     match value {
         "model" => Ok(FileKind::Model),
@@ -257,6 +266,17 @@ async fn consume_fields(
                     .file_name()
                     .ok_or_else(|| ApiError::BadRequest("file field needs a filename".into()))?
                     .to_string();
+                // Drop OS cruft (.DS_Store, __MACOSX) the same way the zip
+                // importer does — a dropped folder carries it just as an archive
+                // does. The field goes unread; next_field drains it for us.
+                let logical = if path.is_empty() {
+                    filename.clone()
+                } else {
+                    format!("{path}/{filename}")
+                };
+                if is_os_junk(&logical) {
+                    continue;
+                }
                 let kind = match &kind_override {
                     Some(k) => parse_kind(k)?,
                     None => guess_kind(&filename),
@@ -906,7 +926,7 @@ fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileKind, guess_kind, parse_range};
+    use super::{FileKind, guess_kind, is_os_junk, parse_range};
 
     /// The 'model' kind is geometry, and only geometry. What a slicer or CAD
     /// tool *works in* is a project; what it spits out for one printer is raw.
@@ -923,6 +943,20 @@ mod tests {
         }
         assert!(matches!(guess_kind("readme.pdf"), FileKind::Document));
         assert!(matches!(guess_kind("pack.zip"), FileKind::Archive));
+    }
+
+    #[test]
+    fn os_junk_is_skipped_at_any_depth() {
+        // .DS_Store anywhere, and __MACOSX as any path segment.
+        assert!(is_os_junk(".DS_Store"));
+        assert!(is_os_junk("Heroes/32mm/.DS_Store"));
+        assert!(is_os_junk("__MACOSX/._Gold.stl"));
+        assert!(is_os_junk("Pack/__MACOSX/._Gold.stl"));
+        // Real files, including names that merely resemble the markers.
+        assert!(!is_os_junk("Gold.stl"));
+        assert!(!is_os_junk("Heroes/Gold_32mm/Gold.stl"));
+        assert!(!is_os_junk("notes_about_DS_Store.txt"));
+        assert!(!is_os_junk("__MACOSX_backup/Gold.stl"));
     }
 
     #[test]
