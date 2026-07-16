@@ -2,6 +2,8 @@
 //! model management. Mirrors `models.rs` (bundles have no variants or purchase
 //! fields, but add a `kind` and a `bundle_models` membership m2m).
 
+use std::collections::HashSet;
+
 use anyhow::Context;
 use axum::{
     Json, Router,
@@ -37,6 +39,7 @@ pub fn router() -> Router<AppState> {
             "/api/bundles/{id}/description/revisions/{rev}/label",
             put(label_revision),
         )
+        .route("/api/bundles/{id}/categories", put(set_categories))
         .route("/api/bundles/{id}/models", axum::routing::post(add_model))
         .route(
             "/api/bundles/{id}/models/{model_id}",
@@ -191,6 +194,9 @@ pub struct BundleDetail {
     pub description_md: Option<String>,
     pub models: Vec<ModelSummary>,
     pub images: Vec<ImageSummary>,
+    /// The bundle's primary categories (import sections), in tab order. A
+    /// category is a model tag; a member belongs to it by carrying that tag.
+    pub categories: Vec<String>,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -372,6 +378,15 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiErr
 
     let models = fetch_members(state, id).await?;
 
+    let categories: Vec<String> = sqlx::query_scalar!(
+        r#"SELECT t.name::text as "name!" FROM bundle_categories bc
+           JOIN tags t ON t.id = bc.tag_id
+           WHERE bc.bundle_id = $1 ORDER BY bc.position"#,
+        id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
     Ok(BundleDetail {
         id: row.id,
         name: row.name,
@@ -396,6 +411,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiErr
                 variant_id: None,
             })
             .collect(),
+        categories,
         created_by: row.created_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -533,6 +549,61 @@ async fn remove_model(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// categories (the bundle's ordered sections)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, ToSchema)]
+pub struct CategoriesInput {
+    /// The full ordered list of category (model-tag) names. Replaces whatever
+    /// the bundle had — so reorder, add and remove all come through as one array.
+    pub categories: Vec<String>,
+}
+
+/// Rewrite a bundle's category list from the curation UI. Each name resolves to
+/// a model tag (created if new); `position` follows the array. A category is a
+/// tag a member may carry — this endpoint only records *which* tags are sections
+/// and in what order, it never tags or untags any model.
+async fn set_categories(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CategoriesInput>,
+) -> Result<Json<BundleDetail>, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query!("DELETE FROM bundle_categories WHERE bundle_id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    let mut position: i32 = 0;
+    for name in &input.categories {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let tag = upsert_tag(&mut *tx, name).await?;
+        // Two spellings of one tag collapse to a single section (keep the first).
+        if !seen.insert(tag.id) {
+            continue;
+        }
+        sqlx::query!(
+            "INSERT INTO bundle_categories (bundle_id, tag_id, position) VALUES ($1, $2, $3)",
+            id,
+            tag.id,
+            position,
+        )
+        .execute(&mut *tx)
+        .await?;
+        position += 1;
+    }
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    fetch_detail(&state, id).await.map(Json)
 }
 
 // ---------------------------------------------------------------------------

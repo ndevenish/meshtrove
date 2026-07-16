@@ -186,6 +186,12 @@ pub struct Plan {
     /// is carving into an existing bundle.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<MemberCandidate>,
+    /// Distinct model-tag captures in the order they first appear in the tree
+    /// (files arrive in path order), i.e. the bundle's section/category order as
+    /// the folders present it — `1 - Heroes` before `2 - Enemies`. The carve
+    /// records these as the bundle's ordered categories.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_tag_order: Vec<String>,
 }
 
 impl Plan {
@@ -295,6 +301,9 @@ pub fn analyze(
         })
         .collect();
     let mut values: BTreeMap<String, CapturedValue> = BTreeMap::new();
+    // Model tags in first-seen (file/path) order — the bundle's category order.
+    let mut model_tag_order: Vec<String> = Vec::new();
+    let mut seen_model_tags: HashSet<String> = HashSet::new();
     // (folded name, folded tag set) -> model; BTreeMaps keep the output stable.
     type VariantKey = Vec<String>;
     struct ModelAcc {
@@ -385,6 +394,9 @@ pub fn analyze(
                 Role::ModelTag => {
                     if !model_tags.iter().any(|t| fold(t) == fold(raw)) {
                         model_tags.push(raw.to_string());
+                    }
+                    if seen_model_tags.insert(fold(raw)) {
+                        model_tag_order.push(raw.to_string());
                     }
                 }
                 Role::VariantTag => {
@@ -489,6 +501,7 @@ pub fn analyze(
         model_names: model_names.into_values().collect(),
         annotations,
         members: Vec::new(),
+        model_tag_order,
     })
 }
 

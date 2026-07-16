@@ -960,6 +960,33 @@ async fn carve_into_bundle(
         )
         .await?;
     }
+
+    // Record the bundle's sections (categories) from the carve's model tags, in
+    // the order the folders present them. New ones append after any the bundle
+    // already has (a later 75mm drop adds its sections at the end); ones already
+    // recorded keep their position. The user can reorder/curate on the bundle page.
+    let mut next_pos: i32 = sqlx::query_scalar!(
+        r#"SELECT coalesce(max(position) + 1, 0) as "next!" FROM bundle_categories WHERE bundle_id = $1"#,
+        bundle_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    for name in &plan.model_tag_order {
+        let tag = upsert_tag(&mut *tx, name).await?;
+        let inserted = sqlx::query!(
+            "INSERT INTO bundle_categories (bundle_id, tag_id, position) VALUES ($1, $2, $3)
+             ON CONFLICT (bundle_id, tag_id) DO NOTHING",
+            bundle_id,
+            tag.id,
+            next_pos,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() > 0 {
+            next_pos += 1;
+        }
+    }
+
     Ok(created)
 }
 

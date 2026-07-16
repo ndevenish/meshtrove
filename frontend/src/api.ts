@@ -143,6 +143,9 @@ export interface BundleDetail {
   description_md: string | null
   models: ModelSummary[]
   images: ImageRecord[]
+  /** primary categories (import sections), in tab order; each is a model tag a
+      member may carry */
+  categories: string[]
   created_by: string
 }
 
@@ -444,6 +447,12 @@ export const api = {
     request<void>(`/api/bundles/${bundleId}/models`, json({ model_id: modelId })),
   removeModelFromBundle: (bundleId: string, modelId: string) =>
     request<void>(`/api/bundles/${bundleId}/models/${modelId}`, { method: 'DELETE' }),
+  /** replace a bundle's ordered category list (reorder/add/remove in one call) */
+  setBundleCategories: (id: string, categories: string[]) =>
+    request<BundleDetail>(`/api/bundles/${id}/categories`, {
+      ...json({ categories }),
+      method: 'PUT',
+    }),
   bundleFiles: (id: string) => request<FileRecord[]>(`/api/bundles/${id}/files`),
   uploadBundleFiles: (id: string, form: FormData) =>
     request<FileRecord[]>(`/api/bundles/${id}/files`, { method: 'POST', body: form }),

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
+  Autocomplete,
   Container,
   Box,
   Typography,
@@ -9,6 +10,7 @@ import {
   Button,
   Paper,
   IconButton,
+  TextField,
   Tooltip,
   Divider,
   Tab,
@@ -22,6 +24,9 @@ import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate'
 import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
+import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
+import CloseIcon from '@mui/icons-material/Close'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -368,6 +373,7 @@ export default function BundlePage() {
         bundleId={bundle.id}
         bundleCreatorId={bundle.creator_id}
         models={bundle.models}
+        categories={bundle.categories}
         canEdit={!!canEdit}
         editing={editing}
         onChange={refresh}
@@ -431,6 +437,14 @@ export default function BundlePage() {
 
 /// A bundle's members. Deliberately *not* a place to add a model: membership is
 /// something a carve decides, on the way in from an import — picking an existing
+/// Return a copy of `arr` with the item at `from` moved to index `to`.
+function moveItem<T>(arr: T[], from: number, to: number): T[] {
+  const next = [...arr]
+  const [item] = next.splice(from, 1)
+  next.splice(to, 0, item)
+  return next
+}
+
 /// model out of a search box and dropping it in a box set is how a model ends up
 /// in two collections it was never sold with. Removing one stays, because a bad
 /// carve has to be undoable.
@@ -438,6 +452,7 @@ function MembersSection({
   bundleId,
   bundleCreatorId,
   models,
+  categories,
   canEdit,
   editing,
   onChange,
@@ -446,43 +461,64 @@ function MembersSection({
   /** The bundle's creator: a member sharing it doesn't repeat it on its card. */
   bundleCreatorId: string | null
   models: import('../api').ModelSummary[]
+  /** The bundle's defined categories (import sections), in tab order. */
+  categories: string[]
   canEdit: boolean
-  /** Edit mode: only here can a model be pulled out of the bundle. */
+  /** Edit mode: only here can a model be pulled out of the bundle, or its
+      categories curated. */
   editing: boolean
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
   // Which category tab is active; null = "All Models".
   const [category, setCategory] = useState<string | null>(null)
+  const [addValue, setAddValue] = useState('')
+  const [savingCats, setSavingCats] = useState(false)
 
   const refreshAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
     onChange()
   }
 
-  // The bundle's primary categories are the import's section tags — the
-  // title-cased model tags (Heroes, Enemies, NPC…), as opposed to the lowercase
-  // descriptive tags a scrape adds (undead, medium, objects…). Derived from the
-  // members so each bundle offers its own sections, with a per-tab count. Ordered
-  // by size: the import's folder order (1 - Heroes, 2 - Enemies) isn't preserved.
-  const categories = useMemo(() => {
+  // Members carrying each tag — for per-category counts (and the add picker).
+  const tagCounts = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const m of models) {
-      for (const tag of m.tags) {
-        const first = tag[0]
-        if (first && first.toLowerCase() !== first) counts.set(tag, (counts.get(tag) ?? 0) + 1)
-      }
-    }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    for (const m of models) for (const tag of m.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    return counts
   }, [models])
 
-  // A re-carve can retire the active category (its last model retagged or
-  // removed): fall back to All rather than leaving a dead tab over an empty grid.
+  // For a bundle with no categories defined yet, fall back to the old heuristic
+  // so it still gets tabs: the title-cased member tags (Heroes, Enemies…) rather
+  // than the lowercase descriptive ones (undead, medium…), ordered by size.
+  const derived = useMemo(
+    () =>
+      [...tagCounts.entries()]
+        .filter(([tag]) => {
+          const first = tag[0]
+          return first && first.toLowerCase() !== first
+        })
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([tag]) => tag),
+    [tagCounts],
+  )
+  const tabList = categories.length ? categories : derived
+
+  // Reset the active tab if its category is gone (removed, or retired by a carve).
   useEffect(() => {
-    if (category && !categories.some(([name]) => name === category)) setCategory(null)
-  }, [categories, category])
+    if (category && !tabList.includes(category)) setCategory(null)
+  }, [tabList, category])
 
   const shown = category ? models.filter((m) => m.tags.includes(category)) : models
+
+  const saveCategories = async (next: string[]) => {
+    setSavingCats(true)
+    try {
+      await api.setBundleCategories(bundleId, next)
+      await refreshAll()
+    } finally {
+      setSavingCats(false)
+    }
+  }
 
   return (
     <Box>
@@ -493,19 +529,86 @@ function MembersSection({
         </Typography>
       </Stack>
 
-      {categories.length > 0 && (
-        <Tabs
-          value={category ?? 'all'}
-          onChange={(_, value) => setCategory(value === 'all' ? null : value)}
-          variant="scrollable"
-          scrollButtons="auto"
-          sx={{ mb: 2, borderBottom: (t) => `1px solid ${t.palette.divider}` }}
-        >
-          <Tab value="all" label={`All Models (${models.length})`} />
-          {categories.map(([name, count]) => (
-            <Tab key={name} value={name} label={`${name} (${count})`} />
-          ))}
-        </Tabs>
+      {editing ? (
+        <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Categories — the bundle's sections and their tab order
+          </Typography>
+          <Stack spacing={0.5} sx={{ mb: 1.5 }}>
+            {categories.map((cat, i) => (
+              <Stack key={cat} direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+                <IconButton
+                  size="small"
+                  disabled={i === 0 || savingCats}
+                  onClick={() => saveCategories(moveItem(categories, i, i - 1))}
+                >
+                  <ArrowUpwardIcon fontSize="small" />
+                </IconButton>
+                <IconButton
+                  size="small"
+                  disabled={i === categories.length - 1 || savingCats}
+                  onClick={() => saveCategories(moveItem(categories, i, i + 1))}
+                >
+                  <ArrowDownwardIcon fontSize="small" />
+                </IconButton>
+                <Typography variant="body2" sx={{ flexGrow: 1, ml: 0.5 }}>
+                  {cat}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {tagCounts.get(cat) ?? 0} model{(tagCounts.get(cat) ?? 0) === 1 ? '' : 's'}
+                </Typography>
+                <Tooltip title="Remove this category (doesn't untag any model)">
+                  <IconButton
+                    size="small"
+                    disabled={savingCats}
+                    onClick={() => saveCategories(categories.filter((c) => c !== cat))}
+                  >
+                    <CloseIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ))}
+            {categories.length === 0 && (
+              <Typography variant="body2" color="text.secondary">
+                No categories defined — add one below to give this bundle section tabs.
+              </Typography>
+            )}
+          </Stack>
+          <Autocomplete
+            freeSolo
+            size="small"
+            options={[...tagCounts.keys()].filter((t) => !categories.includes(t)).sort()}
+            value={null}
+            inputValue={addValue}
+            disabled={savingCats}
+            onInputChange={(_, v) => setAddValue(v)}
+            onChange={(_, v) => {
+              const name = (typeof v === 'string' ? v : '').trim()
+              if (!name || categories.some((c) => c.toLowerCase() === name.toLowerCase())) return
+              setAddValue('')
+              void saveCategories([...categories, name])
+            }}
+            renderInput={(props) => (
+              <TextField {...props} placeholder="Add a category (a model tag)…" />
+            )}
+            sx={{ maxWidth: 340 }}
+          />
+        </Paper>
+      ) : (
+        tabList.length > 0 && (
+          <Tabs
+            value={category ?? 'all'}
+            onChange={(_, value) => setCategory(value === 'all' ? null : value)}
+            variant="scrollable"
+            scrollButtons="auto"
+            sx={{ mb: 2, borderBottom: (t) => `1px solid ${t.palette.divider}` }}
+          >
+            <Tab value="all" label={`All Models (${models.length})`} />
+            {tabList.map((name) => (
+              <Tab key={name} value={name} label={`${name} (${tagCounts.get(name) ?? 0})`} />
+            ))}
+          </Tabs>
+        )
       )}
 
       {models.length === 0 ? (
