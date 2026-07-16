@@ -875,12 +875,24 @@ pub async fn stream_blob(
     attachment_name: Option<&str>,
     range: Option<&str>,
 ) -> Result<Response, ApiError> {
-    let (mut file, size) = state
+    let (file, size) = state
         .store
         .open(sha256)
         .await?
         .ok_or_else(|| ApiError::Internal(anyhow!("blob {sha256} missing from store")))?;
+    serve_file(file, size, mime, attachment_name, range).await
+}
 
+/// Stream an already-open file, honouring a single `bytes=start-end` range.
+/// Shared by blob/image serving and by export-artifact downloads (which live
+/// outside the content-addressed store).
+pub async fn serve_file(
+    mut file: tokio::fs::File,
+    size: u64,
+    mime: &str,
+    attachment_name: Option<&str>,
+    range: Option<&str>,
+) -> Result<Response, ApiError> {
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, mime)
         .header(header::ACCEPT_RANGES, "bytes");

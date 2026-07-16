@@ -1,4 +1,5 @@
 pub mod blobstore;
+pub mod export_job;
 pub mod gc;
 pub mod importer;
 pub mod jobs;

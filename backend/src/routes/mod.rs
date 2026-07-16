@@ -4,6 +4,7 @@ pub mod auth;
 pub mod browse;
 pub mod bundles;
 pub mod creators;
+pub mod exports;
 pub mod files;
 pub mod frontend;
 pub mod images;

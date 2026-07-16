@@ -17,7 +17,7 @@
 //! streamed into the store by the route layer before `restore` runs, mirroring
 //! how `patch.rs` stages images before opening its transaction.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf};
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -375,183 +375,149 @@ struct Placement {
     bundle_base: HashMap<Uuid, String>,
 }
 
-/// Export one model: the model as a CamelCase folder at the archive root.
-pub async fn gather_model(
+/// Which variants of a model to export. A variant passes if it carries every
+/// `include` tag and none of the `exclude` tags (case-insensitive) — so
+/// `exclude = ["supported"]` is "unsupported only", the anonymous variant
+/// included. Empty include = no positive constraint.
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct VariantFilter {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+impl VariantFilter {
+    fn matches(&self, tags: &[String]) -> bool {
+        let have: HashSet<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+        self.include
+            .iter()
+            .all(|t| have.contains(&t.to_lowercase()))
+            && self
+                .exclude
+                .iter()
+                .all(|t| !have.contains(&t.to_lowercase()))
+    }
+}
+
+/// What an export gathers: an optional bundle (for nesting and its own
+/// metadata), the models to include, and which of their variants.
+#[derive(Serialize, Deserialize)]
+pub struct ExportSpec {
+    #[serde(default)]
+    pub bundle_id: Option<Uuid>,
+    #[serde(default)]
+    pub model_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub filter: VariantFilter,
+}
+
+/// Gather an export from its spec: the chosen models (their filtered variants),
+/// and — if a bundle is named — that bundle's metadata with the members nested
+/// inside it under its category tabs.
+pub async fn gather_export(
     db: &PgPool,
-    model_id: Uuid,
+    spec: &ExportSpec,
     exported_at: DateTime<Utc>,
 ) -> Result<Export, ApiError> {
-    let name = sqlx::query_scalar!("SELECT name FROM models WHERE id = $1", model_id)
+    let placement = match spec.bundle_id {
+        Some(bundle_id) => bundle_placement(db, bundle_id, &spec.model_ids).await?,
+        None => {
+            // Each selected model as a CamelCase folder at the archive root.
+            let mut p = Placement::default();
+            for r in sqlx::query!(
+                "SELECT id, name FROM models WHERE id = ANY($1)",
+                &spec.model_ids
+            )
+            .fetch_all(db)
+            .await?
+            {
+                p.model_base.insert(r.id, camel(&r.name));
+            }
+            p
+        }
+    };
+    let bundle_ids: Vec<Uuid> = spec.bundle_id.into_iter().collect();
+    gather_core(
+        db,
+        &spec.model_ids,
+        &bundle_ids,
+        &placement,
+        &spec.filter,
+        exported_at,
+    )
+    .await
+}
+
+/// Placement for a bundle export: the bundle folder holds each selected member,
+/// nested under its first matching category tab (or directly under the bundle).
+async fn bundle_placement(
+    db: &PgPool,
+    bundle_id: Uuid,
+    members: &[Uuid],
+) -> Result<Placement, ApiError> {
+    let bname = sqlx::query_scalar!("SELECT name FROM bundles WHERE id = $1", bundle_id)
         .fetch_optional(db)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let mut placement = Placement::default();
-    placement.model_base.insert(model_id, camel(&name));
-    gather_core(db, &[model_id], &[], &placement, exported_at).await
-}
+    let base = camel(&bname);
+    let mut p = Placement::default();
+    p.bundle_base.insert(bundle_id, base.clone());
 
-/// Export one bundle: the bundle folder holds its members, nested under its
-/// category tabs, and any child bundles nest under the parent. Pulls in every
-/// member and child so the archive restores stand-alone.
-pub async fn gather_bundle(
-    db: &PgPool,
-    bundle_id: Uuid,
-    exported_at: DateTime<Utc>,
-) -> Result<Export, ApiError> {
-    let exists = sqlx::query_scalar!("SELECT 1 as x FROM bundles WHERE id = $1", bundle_id)
-        .fetch_optional(db)
-        .await?
-        .is_some();
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
-
-    // Expand the bundle set over bundle_children (breadth-first, cycle-safe),
-    // remembering the parent→children edges for placement.
-    let mut bundle_ids: Vec<Uuid> = Vec::new();
-    let mut seen: HashSet<Uuid> = HashSet::new();
-    let mut edges: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    let mut frontier: VecDeque<Uuid> = VecDeque::from([bundle_id]);
-    seen.insert(bundle_id);
-    while let Some(id) = frontier.pop_front() {
-        bundle_ids.push(id);
-        let children = sqlx::query_scalar!(
-            "SELECT child_bundle_id FROM bundle_children WHERE parent_bundle_id = $1
-             ORDER BY child_bundle_id",
-            id
-        )
-        .fetch_all(db)
-        .await?;
-        for c in &children {
-            if seen.insert(*c) {
-                frontier.push_back(*c);
-            }
-        }
-        edges.insert(id, children);
-    }
-
-    // Names, members, categories for every bundle in the set.
-    let names: HashMap<Uuid, String> = sqlx::query!(
-        "SELECT id, name FROM bundles WHERE id = ANY($1)",
-        &bundle_ids
-    )
-    .fetch_all(db)
-    .await?
-    .into_iter()
-    .map(|r| (r.id, r.name))
-    .collect();
-
-    let mut members_of: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    for r in sqlx::query!(
-        "SELECT bundle_id, model_id FROM bundle_models WHERE bundle_id = ANY($1)
-         ORDER BY model_id",
-        &bundle_ids
-    )
-    .fetch_all(db)
-    .await?
-    {
-        members_of.entry(r.bundle_id).or_default().push(r.model_id);
-    }
-
-    let mut categories_of: HashMap<Uuid, Vec<String>> = HashMap::new();
-    for r in sqlx::query!(
-        r#"SELECT bc.bundle_id, t.name::text as "name!" FROM bundle_categories bc
+    let cats: Vec<String> = sqlx::query_scalar!(
+        r#"SELECT t.name::text as "name!" FROM bundle_categories bc
            JOIN tags t ON t.id = bc.tag_id
-           WHERE bc.bundle_id = ANY($1) ORDER BY bc.position"#,
-        &bundle_ids
+           WHERE bc.bundle_id = $1 ORDER BY bc.position"#,
+        bundle_id
     )
     .fetch_all(db)
-    .await?
-    {
-        categories_of.entry(r.bundle_id).or_default().push(r.name);
-    }
+    .await?;
 
-    // Every member model, its name and the (lowercased) tags it carries.
-    let all_members: Vec<Uuid> = {
-        let mut set: HashSet<Uuid> = HashSet::new();
-        for v in members_of.values() {
-            set.extend(v.iter().copied());
-        }
-        set.into_iter().collect()
-    };
-    let member_names: HashMap<Uuid, String> = sqlx::query!(
-        "SELECT id, name FROM models WHERE id = ANY($1)",
-        &all_members
-    )
-    .fetch_all(db)
-    .await?
-    .into_iter()
-    .map(|r| (r.id, r.name))
-    .collect();
-    let mut member_tags: HashMap<Uuid, HashSet<String>> = HashMap::new();
+    let names: HashMap<Uuid, String> =
+        sqlx::query!("SELECT id, name FROM models WHERE id = ANY($1)", members)
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.name))
+            .collect();
+    let mut mtags: HashMap<Uuid, HashSet<String>> = HashMap::new();
     for r in sqlx::query!(
         r#"SELECT mt.model_id, t.name::text as "name!" FROM model_tags mt
            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = ANY($1)"#,
-        &all_members
+        members
     )
     .fetch_all(db)
     .await?
     {
-        member_tags
+        mtags
             .entry(r.model_id)
             .or_default()
             .insert(r.name.to_lowercase());
     }
 
-    // Bundle folders, parent first; each child nests under its (first) parent.
-    let mut placement = Placement::default();
-    placement
-        .bundle_base
-        .insert(bundle_id, camel(names.get(&bundle_id).map_or("", |s| s)));
-    let mut order: Vec<Uuid> = Vec::new();
-    let mut queue: VecDeque<Uuid> = VecDeque::from([bundle_id]);
-    let mut placed_bundle: HashSet<Uuid> = HashSet::from([bundle_id]);
-    order.push(bundle_id);
-    while let Some(parent) = queue.pop_front() {
-        let parent_base = placement.bundle_base[&parent].clone();
-        for child in edges.get(&parent).into_iter().flatten() {
-            if placed_bundle.insert(*child) {
-                let child_name = names.get(child).map_or("", |s| s);
-                placement
-                    .bundle_base
-                    .insert(*child, format!("{parent_base}/{}", camel(child_name)));
-                order.push(*child);
-                queue.push_back(*child);
-            }
-        }
+    for m in members {
+        let empty = HashSet::new();
+        let tags = mtags.get(m).unwrap_or(&empty);
+        let category = cats.iter().find(|c| tags.contains(&c.to_lowercase()));
+        let name = names.get(m).map_or("", |s| s);
+        let model_base = match category {
+            Some(c) => format!("{base}/{}/{}", seg(c), camel(name)),
+            None => format!("{base}/{}", camel(name)),
+        };
+        p.model_base.insert(*m, model_base);
     }
-
-    // Members: the first bundle (parent-first) to list a model claims it, under
-    // its first matching category tab (or directly under the bundle if none).
-    for b in &order {
-        let base = placement.bundle_base[b].clone();
-        let cats = categories_of.get(b).cloned().unwrap_or_default();
-        for m in members_of.get(b).into_iter().flatten() {
-            if placement.model_base.contains_key(m) {
-                continue;
-            }
-            let empty = HashSet::new();
-            let tags = member_tags.get(m).unwrap_or(&empty);
-            let category = cats.iter().find(|c| tags.contains(&c.to_lowercase()));
-            let name = member_names.get(m).map_or("", |s| s);
-            let model_base = match category {
-                Some(c) => format!("{base}/{}/{}", seg(c), camel(name)),
-                None => format!("{base}/{}", camel(name)),
-            };
-            placement.model_base.insert(*m, model_base);
-        }
-    }
-
-    gather_core(db, &all_members, &bundle_ids, &placement, exported_at).await
+    Ok(p)
 }
 
 /// The shared body: read every model and bundle in the set into the manifest,
-/// laying files out under the folders `placement` assigns.
+/// laying files out under the folders `placement` assigns, keeping only the
+/// variants that pass `filter`.
 async fn gather_core(
     db: &PgPool,
     model_ids: &[Uuid],
     bundle_ids: &[Uuid],
     placement: &Placement,
+    filter: &VariantFilter,
     exported_at: DateTime<Utc>,
 ) -> Result<Export, ApiError> {
     let mut assigner = PathAssigner::default();
@@ -562,6 +528,7 @@ async fn gather_core(
         db,
         model_ids,
         placement,
+        filter,
         &mut assigner,
         &mut blobs,
         &mut texts,
@@ -695,10 +662,12 @@ struct RawImage {
     size: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn gather_models(
     db: &PgPool,
     model_ids: &[Uuid],
     placement: &Placement,
+    filter: &VariantFilter,
     assigner: &mut PathAssigner,
     blobs: &mut HashMap<String, i64>,
     texts: &mut Vec<(String, Vec<u8>)>,
@@ -764,6 +733,10 @@ async fn gather_models(
             )
             .fetch_all(db)
             .await?;
+            // Skip variants the export's filter rules out (e.g. "unsupported").
+            if !filter.matches(&vtags) {
+                continue;
+            }
             let vbase = format!("{base}/variants/{}", variant_dir(&vtags));
             let files = build_files(variant_files(db, v.id).await?, &vbase, assigner, blobs);
             let images = build_images(variant_images(db, v.id).await?, &vbase, assigner, blobs);
@@ -1258,6 +1231,52 @@ pub async fn stage_blobs(
         }
     }
     Ok(())
+}
+
+/// Write an export to `path` as a zip: the manifest, the readable text files,
+/// then each blob streamed byte-for-byte out of the store. Stored (uncompressed)
+/// so already-packed model data streams straight through, and zip64
+/// (`large_file`) keeps a multi-gigabyte member legal.
+pub fn build_zip(store: &FsBlobStore, path: &FsPath, export: &Export) -> Result<(), ApiError> {
+    use std::io::Write;
+    let file = std::fs::File::create(path).map_err(|e| ApiError::Internal(e.into()))?;
+    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .large_file(true);
+
+    let manifest_json =
+        serde_json::to_vec_pretty(&export.manifest).map_err(|e| ApiError::Internal(e.into()))?;
+    zip.start_file("manifest.json", opts).map_err(zip_err)?;
+    zip.write_all(&manifest_json)
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    for (name, bytes) in &export.texts {
+        zip.start_file(name, opts).map_err(zip_err)?;
+        zip.write_all(bytes)
+            .map_err(|e| ApiError::Internal(e.into()))?;
+    }
+
+    // One entry per distinct archive_path (a path maps to exactly one sha).
+    let mut written: HashSet<&str> = HashSet::new();
+    for (archive_path, sha) in blob_entries(&export.manifest) {
+        if !written.insert(archive_path) {
+            continue;
+        }
+        let blob_path = store.path_for(sha);
+        let mut reader = std::fs::File::open(&blob_path).map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!("blob {sha} missing from store: {e}"))
+        })?;
+        zip.start_file(archive_path, opts).map_err(zip_err)?;
+        std::io::copy(&mut reader, &mut zip).map_err(|e| ApiError::Internal(e.into()))?;
+    }
+
+    zip.finish().map_err(zip_err)?;
+    Ok(())
+}
+
+fn zip_err(e: zip::result::ZipError) -> ApiError {
+    ApiError::Internal(anyhow::anyhow!("zip error: {e}"))
 }
 
 // ---------------------------------------------------------------------------

@@ -214,6 +214,11 @@ export default function AppShell() {
               </Badge>
             </Button>
           )}
+          {canCreate && (
+            <Button component={Link} to="/exports" color="inherit">
+              Exports
+            </Button>
+          )}
           <Button component={Link} to="/creators" color="inherit">
             Creators
           </Button>

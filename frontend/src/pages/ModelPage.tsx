@@ -24,7 +24,8 @@ import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import DownloadIcon from '@mui/icons-material/Download'
-import { api, imageUrl, sourceOrigin, exportModelUrl } from '../api'
+import { api, imageUrl, sourceOrigin } from '../api'
+import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
@@ -48,6 +49,7 @@ export default function ModelPage() {
   const editorRef = useRef<DetailsEditorHandle>(null)
   const [saving, setSaving] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
 
@@ -300,7 +302,7 @@ export default function ModelPage() {
             </Typography>
             {canEdit && !editing && (
               <>
-                <Button component="a" href={exportModelUrl(model.id)} startIcon={<DownloadIcon />}>
+                <Button startIcon={<DownloadIcon />} onClick={() => setExportOpen(true)}>
                   Export
                 </Button>
                 <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
@@ -442,6 +444,7 @@ export default function ModelPage() {
         canEdit={!!canEdit}
         onChange={refresh}
       />
+      <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} model={model} />
       <Snackbar
         open={!!toast}
         autoHideDuration={4000}

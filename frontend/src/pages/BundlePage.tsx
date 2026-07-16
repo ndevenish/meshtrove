@@ -30,7 +30,8 @@ import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import DownloadIcon from '@mui/icons-material/Download'
-import { api, imageUrl, sourceOrigin, exportBundleUrl } from '../api'
+import { api, imageUrl, sourceOrigin } from '../api'
+import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
 import { usePasteImage } from '../usePasteImage'
 import { useSuppressGlobalDrop } from '../globalDrop'
@@ -56,6 +57,7 @@ export default function BundlePage() {
   // Save and Cancel take the Edit button's place in the header.
   const editorRef = useRef<DetailsEditorHandle>(null)
   const [saving, setSaving] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   const [patchOpen, setPatchOpen] = useState(false)
   // The zip dropped on the inline importer box, handed to the dialog to preview.
   const [patchFile, setPatchFile] = useState<File | null>(null)
@@ -241,11 +243,7 @@ export default function BundlePage() {
             </Stack>
             {canEdit && !editing && (
               <>
-                <Button
-                  component="a"
-                  href={exportBundleUrl(bundle.id)}
-                  startIcon={<DownloadIcon />}
-                >
+                <Button startIcon={<DownloadIcon />} onClick={() => setExportOpen(true)}>
                   Export
                 </Button>
                 <Button startIcon={<EditIcon />} onClick={() => setEditing(true)}>
@@ -396,6 +394,7 @@ export default function BundlePage() {
         canEdit={!!canEdit}
         onChange={refresh}
       />
+      <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} bundle={bundle} />
       <BundlePatchDialog
         bundleId={bundle.id}
         open={patchOpen}

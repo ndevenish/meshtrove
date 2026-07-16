@@ -13,6 +13,7 @@ import ModelPage from './pages/ModelPage'
 import BundlePage from './pages/BundlePage'
 import ImportsPage from './pages/ImportsPage'
 import ImportPage from './pages/ImportPage'
+import ExportsPage from './pages/ExportsPage'
 import CreatorsPage from './pages/CreatorsPage'
 import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
@@ -84,6 +85,7 @@ function App() {
               <Route path="/bundles/:id" element={<BundlePage />} />
               <Route path="/imports" element={<ImportsPage />} />
               <Route path="/imports/:id" element={<ImportPage />} />
+              <Route path="/exports" element={<ExportsPage />} />
               <Route path="/creators" element={<CreatorsPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/admin" element={<AdminPage />} />

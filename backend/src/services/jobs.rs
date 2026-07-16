@@ -158,6 +158,7 @@ pub async fn worker(state: AppState) {
 async fn dispatch(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
     match kind {
         "import_archive" => crate::services::importer::import_archive(state, payload).await,
+        "export_archive" => crate::services::export_job::export_archive(state, payload).await,
         "render_preview" => crate::services::renderer::render_preview(state, payload).await,
         other => Err(anyhow!("unknown job kind {other:?}")),
     }

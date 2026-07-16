@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         .merge(routes::bundles::router())
         .merge(routes::jobs::router())
         .merge(routes::creators::router())
+        .merge(routes::exports::router())
         .merge(routes::files::router())
         .merge(routes::images::router())
         .merge(routes::import_layouts::router())

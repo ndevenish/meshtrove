@@ -524,6 +524,12 @@ export const api = {
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
 
+  /// Queue building an export archive; returns immediately with a building row.
+  createExport: (body: ExportRequest) => request<ExportSummary>('/api/exports', json(body)),
+  exports: () => request<ExportSummary[]>('/api/exports'),
+  export: (id: string) => request<ExportSummary>(`/api/exports/${id}`),
+  deleteExport: (id: string) => request<void>(`/api/exports/${id}`, { method: 'DELETE' }),
+
   /// What a dropped export archive holds (flagging entities already present).
   /// Reads only the manifest, so it is instant even for a huge archive.
   restorePreview: (importId: string) =>
@@ -616,10 +622,32 @@ export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 
 // --- Export / import archives ----------------------------------------------
 
-/// The browser downloads these by navigating to the URL (a GET that streams a
-/// zip with a Content-Disposition attachment), rather than through fetch.
-export const exportModelUrl = (id: string) => `/api/models/${id}/export`
-export const exportBundleUrl = (id: string) => `/api/bundles/${id}/export`
+/// A finished export is downloaded by navigating to this URL (a GET that streams
+/// the zip with a Content-Disposition attachment), rather than through fetch.
+export const exportDownloadUrl = (id: string) => `/api/exports/${id}/download`
+
+/// What to build. `model_ids` is the selected set; `variant_exclude` carries the
+/// negative variant-tag filters (e.g. `["supported"]` = unsupported only).
+export interface ExportRequest {
+  name?: string
+  bundle_id?: string
+  model_ids: string[]
+  variant_include?: string[]
+  variant_exclude?: string[]
+}
+
+export interface ExportSummary {
+  id: string
+  name: string
+  /** building | ready | failed */
+  status: string
+  model_count: number
+  size: number | null
+  filename: string | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
 
 /// One model or bundle inside a dropped export archive.
 export interface RestoreEntity {
