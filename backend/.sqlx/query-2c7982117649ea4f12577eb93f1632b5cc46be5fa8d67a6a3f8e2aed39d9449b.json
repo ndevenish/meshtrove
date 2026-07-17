@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.name::text as \"tag!\", bc.position FROM bundle_categories bc\n               JOIN tags t ON t.id = bc.tag_id\n               WHERE bc.bundle_id = $1 ORDER BY bc.position",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tag!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "bundle_categories",
+            "name": "position"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      false
+    ]
+  },
+  "hash": "2c7982117649ea4f12577eb93f1632b5cc46be5fa8d67a6a3f8e2aed39d9449b"
+}

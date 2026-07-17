@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE model_description_revisions SET created_by = $2 WHERE created_by = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5b460bf98c10db30ecac20161258ddf749f1c83bf5c73fc5e68a19d586ce0efb"
+}

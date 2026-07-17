@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bundles (name, slug, creator_id, source_url, kind, created_by)\n           VALUES ($1, $2, $3, $4, $5::bundle_kind, $6)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundles",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        {
+          "Custom": {
+            "name": "bundle_kind",
+            "kind": {
+              "Enum": [
+                "purchased",
+                "collection"
+              ]
+            }
+          }
+        },
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b4476b27288b5583f2f2c78b73096bc3b610fd01b313e1d2db8db625da0a10ae"
+}

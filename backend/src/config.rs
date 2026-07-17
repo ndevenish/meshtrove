@@ -111,6 +111,10 @@ impl Configuration {
         let create_admin = args
             .create_admin
             .as_deref()
+            .map(str::trim)
+            // An empty value (e.g. an unset-but-present env var in a compose file)
+            // is treated as "no admin to create" rather than a malformed spec.
+            .filter(|spec| !spec.is_empty())
             .map(|spec| {
                 spec.split_once(':')
                     .map(|(u, p)| (u.to_string(), p.to_string()))

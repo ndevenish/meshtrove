@@ -1,0 +1,104 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.kind::text as \"kind!\", i.is_primary, i.width, i.height,\n                  i.variant_id,\n                  (i.model_id IS NULL) as \"from_variant!\",\n                  coalesce(\n                      (SELECT count(*) FROM variant_tag_assignments a\n                       WHERE a.variant_id = i.variant_id), 0) as \"tag_count!\",\n                  coalesce(length(f.filename), 0) as \"name_len!\"\n           FROM images i\n           LEFT JOIN model_variants v ON v.id = i.variant_id\n           LEFT JOIN files f ON f.id = i.source_file_id\n           WHERE (i.model_id = $1 OR v.model_id = $1)\n             -- A promoted picture is the model's now; don't also show the\n             -- variant's copy of the identical blob back at the user.\n             AND NOT (i.model_id IS NULL AND EXISTS (\n                 SELECT 1 FROM images own\n                 WHERE own.model_id = $1 AND own.blob_sha256 = i.blob_sha256))\n           ORDER BY \"from_variant!\", i.is_primary DESC, \"tag_count!\", \"name_len!\",\n                    i.sort_order, i.created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "is_primary",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "is_primary"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "width",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "width"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "height",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "height"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "variant_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "variant_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "from_variant!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "tag_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "name_len!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      true,
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "db832e1213529c4974f33ff5fb41e00d4ec380d74cf14413eb94aeb34d69145b"
+}

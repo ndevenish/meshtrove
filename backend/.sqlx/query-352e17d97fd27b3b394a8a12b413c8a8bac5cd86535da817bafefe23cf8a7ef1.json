@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id as image_id, i.source_file_id as \"file_id!\"\n           FROM images i\n           WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL\n             AND ($1 = 'all' OR i.renderer_config IS DISTINCT FROM $2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "image_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "file_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "source_file_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "352e17d97fd27b3b394a8a12b413c8a8bac5cd86535da817bafefe23cf8a7ef1"
+}

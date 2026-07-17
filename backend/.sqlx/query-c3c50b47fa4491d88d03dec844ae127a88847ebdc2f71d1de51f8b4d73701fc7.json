@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.name::text as \"name!\" FROM model_tags mt\n               JOIN tags t ON t.id = mt.tag_id\n               WHERE mt.model_id = $1 ORDER BY t.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c3c50b47fa4491d88d03dec844ae127a88847ebdc2f71d1de51f8b4d73701fc7"
+}

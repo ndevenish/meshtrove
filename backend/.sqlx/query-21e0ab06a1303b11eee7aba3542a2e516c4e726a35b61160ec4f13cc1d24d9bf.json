@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE model_variants\n                    SET name = coalesce($2, name), print_notes = coalesce($3, print_notes)\n                  WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "21e0ab06a1303b11eee7aba3542a2e516c4e726a35b61160ec4f13cc1d24d9bf"
+}

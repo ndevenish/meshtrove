@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO model_variants (id, model_id, created_by)\n             SELECT unnest($1::uuid[]), $2, $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0011f779e92a2800de023250fc91bd6cc282dbe41f6852d376ff639b1c14d96d"
+}

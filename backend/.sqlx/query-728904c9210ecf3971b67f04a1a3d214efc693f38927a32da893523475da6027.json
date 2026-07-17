@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             coalesce(f.model_id, v.model_id) as \"model_id?\",\n             f.bundle_id,\n             f.import_id,\n             coalesce(mm.created_by, vm.created_by) as \"model_created_by?\",\n             bb.created_by as \"bundle_created_by?\",\n             ii.created_by as \"import_created_by?\"\n           FROM files f\n           LEFT JOIN models mm ON mm.id = f.model_id\n           LEFT JOIN model_variants v ON v.id = f.variant_id\n           LEFT JOIN models vm ON vm.id = v.model_id\n           LEFT JOIN bundles bb ON bb.id = f.bundle_id\n           LEFT JOIN imports ii ON ii.id = f.import_id\n           WHERE f.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_id?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "bundle_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "bundle_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "import_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "import_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "model_created_by?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "bundle_created_by?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundles",
+            "name": "created_by"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "import_created_by?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "imports",
+            "name": "created_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      true,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "728904c9210ecf3971b67f04a1a3d214efc693f38927a32da893523475da6027"
+}

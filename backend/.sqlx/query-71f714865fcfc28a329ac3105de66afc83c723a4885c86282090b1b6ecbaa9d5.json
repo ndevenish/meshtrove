@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT b.sha256, b.size FROM blobs b\n           WHERE NOT EXISTS (SELECT 1 FROM files WHERE blob_sha256 = b.sha256)\n             AND NOT EXISTS (SELECT 1 FROM images WHERE blob_sha256 = b.sha256)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sha256",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "blobs",
+            "name": "sha256"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "size",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "blobs",
+            "name": "size"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "71f714865fcfc28a329ac3105de66afc83c723a4885c86282090b1b6ecbaa9d5"
+}

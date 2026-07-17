@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mt.model_id, t.name::text as \"name!\" FROM model_tags mt\n           JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "model_tags",
+            "name": "model_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "5841dac9a82ca0a5ff2b4e3e6f5dc9fc7a7013a78fbaf488bb76faaa326c3754"
+}

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT v.id,\n                      coalesce(array_agg(a.tag_id) FILTER (WHERE a.tag_id IS NOT NULL), '{}')\n                          AS \"tags!: Vec<Uuid>\"\n               FROM model_variants v\n               LEFT JOIN variant_tag_assignments a ON a.variant_id = v.id\n               WHERE v.model_id = $1\n               GROUP BY v.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "model_variants",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "tags!: Vec<Uuid>",
+        "type_info": "UuidArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "dd0f4517327e299f266654aacb4133a86b67cf2a65f5d445c57e496a89fd6f05"
+}

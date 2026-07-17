@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH ins AS (\n               INSERT INTO variant_tags (name) VALUES ($1)\n               ON CONFLICT (name) DO NOTHING RETURNING id\n           )\n           SELECT id as \"id!\" FROM ins\n           UNION ALL SELECT id FROM variant_tags WHERE name = $1\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "citext",
+            "kind": "Simple"
+          }
+        }
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "31c249360f0347a4da2619eca6d96efcef6c6c3f1566fb3bff10433fb389cb53"
+}

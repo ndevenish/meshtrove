@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM images WHERE id = $1 AND kind = 'rendered'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ee9341176c4bf500e46c88572fe419382198fe1331cf6170f15d22ef90934ae9"
+}

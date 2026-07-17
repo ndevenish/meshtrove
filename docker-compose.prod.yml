@@ -1,0 +1,52 @@
+# Production deployment: Postgres + the MeshTrove app, both persisted to named
+# volumes. This is separate from docker-compose.yml (dev, Postgres only).
+#
+#   cp .env.prod.example .env.prod    # then fill it in
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+#
+# See docs/deploy.md for the full walkthrough.
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: meshtrove
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: meshtrove
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meshtrove"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-docker}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # The app applies migrations itself at startup (sqlx::migrate!).
+      DATABASE_URL: postgres://meshtrove:${POSTGRES_PASSWORD}@postgres:5432/meshtrove
+      # REQUIRED: signing key for session cookies. Sessions are invalidated if it
+      # changes, so keep it stable. Generate: openssl rand -base64 64 | tr -d '\n'
+      MESHTROVE_COOKIE_KEY: ${MESHTROVE_COOKIE_KEY:?set MESHTROVE_COOKIE_KEY in .env.prod (openssl rand -base64 64 | tr -d '\n')}
+      # Optional: bootstrap an admin on first start (username:password). Empty = skip.
+      MESHTROVE_CREATE_ADMIN: ${MESHTROVE_CREATE_ADMIN:-}
+      MESHTROVE_BIND_ADDR: 0.0.0.0:3000
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${MESHTROVE_PORT:-3000}:3000"
+    volumes:
+      - store:/app/store
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  store:

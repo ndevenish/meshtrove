@@ -1,14 +1,22 @@
 use std::process::Command;
 
 fn main() {
-    let version = Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
-        .output()
+    // A build environment (e.g. the Docker image build) with no .git can inject
+    // the version directly; otherwise derive it from git, falling back to unknown.
+    let version = std::env::var("APP_VERSION")
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| {
+            Command::new("git")
+                .args(["describe", "--tags", "--always", "--dirty"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        });
     println!("cargo:rustc-env=APP_VERSION={version}");
+    println!("cargo:rerun-if-env-changed=APP_VERSION");
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
 }

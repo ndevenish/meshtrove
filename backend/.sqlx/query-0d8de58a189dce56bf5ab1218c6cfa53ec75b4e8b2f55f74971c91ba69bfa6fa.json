@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bundle_description_revisions SET created_by = $2 WHERE created_by = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0d8de58a189dce56bf5ab1218c6cfa53ec75b4e8b2f55f74971c91ba69bfa6fa"
+}

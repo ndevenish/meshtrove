@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT merge_duplicate_variants()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "merge_duplicate_variants",
+        "type_info": "Void",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0a8ef7fc68527d8ecdeb18ed7c4773f2ea173eae9dfa46fba42aec6cbf8c2a8f"
+}

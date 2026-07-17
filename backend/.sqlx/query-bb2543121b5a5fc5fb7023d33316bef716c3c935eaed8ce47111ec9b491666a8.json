@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT child_bundle_id FROM bundle_children WHERE parent_bundle_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "child_bundle_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundle_children",
+            "name": "child_bundle_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bb2543121b5a5fc5fb7023d33316bef716c3c935eaed8ce47111ec9b491666a8"
+}

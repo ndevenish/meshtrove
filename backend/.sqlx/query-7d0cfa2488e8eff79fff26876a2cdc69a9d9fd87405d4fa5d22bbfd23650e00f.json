@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT body_md, label::text as \"label?\", created_at\n           FROM bundle_description_revisions\n           WHERE bundle_id = $1 ORDER BY created_at, id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body_md",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "bundle_description_revisions",
+            "name": "body_md"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "label?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "bundle_description_revisions",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "7d0cfa2488e8eff79fff26876a2cdc69a9d9fd87405d4fa5d22bbfd23650e00f"
+}

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE import_layouts\n            SET name = $2, pattern = $3, roles = $4, value_map = $5, flatten = $6,\n                creator_id = $7, updated_at = now()\n          WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "citext",
+            "kind": "Simple"
+          }
+        },
+        "Text",
+        "Jsonb",
+        "Jsonb",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0aafd3a94eb97a963d8f0f60774e71031fa49a842e068e572fb7acf857930206"
+}

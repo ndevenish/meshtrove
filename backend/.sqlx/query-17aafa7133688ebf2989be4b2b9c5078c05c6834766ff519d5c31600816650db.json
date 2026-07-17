@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO models (name, slug, creator_id, source_url, license,\n                               purchase_price, purchase_date, order_ref, created_by)\n           VALUES ($1, $2, $3, $4, $5, $6::float8::numeric(10,2), $7, $8, $9)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Float8",
+        "Date",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "17aafa7133688ebf2989be4b2b9c5078c05c6834766ff519d5c31600816650db"
+}

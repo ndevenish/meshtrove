@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (id, username, password_hash, role)\n               VALUES ($1, 'anonymous', '!login-disabled', 'admin')\n               ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fd8b681ac9b8044949c8970f01383d8d91b90f8adf3c40a46f52d1a1f112ffd"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bundle_description_revisions (bundle_id, body_md, created_by)\n             VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1cec8c42b9f64d9d5b257d76bc67b7b49154cc88a0b74d9c0da486f65f97a53"
+}

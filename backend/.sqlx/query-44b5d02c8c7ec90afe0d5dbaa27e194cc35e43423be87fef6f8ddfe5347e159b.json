@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM bundle_tags WHERE bundle_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "44b5d02c8c7ec90afe0d5dbaa27e194cc35e43423be87fef6f8ddfe5347e159b"
+}

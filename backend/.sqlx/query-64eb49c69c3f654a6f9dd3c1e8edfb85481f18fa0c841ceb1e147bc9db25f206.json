@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n                 SELECT 1 FROM images\n                 WHERE ($1::uuid IS NOT NULL AND model_id = $1)\n                    OR ($2::uuid IS NOT NULL AND variant_id = $2)\n               ) as \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "64eb49c69c3f654a6f9dd3c1e8edfb85481f18fa0c841ceb1e147bc9db25f206"
+}

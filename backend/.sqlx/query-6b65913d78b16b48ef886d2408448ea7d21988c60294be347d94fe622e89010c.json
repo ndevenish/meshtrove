@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO model_description_revisions (model_id, body_md, created_by)\n             SELECT unnest($1::uuid[]), $2, $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b65913d78b16b48ef886d2408448ea7d21988c60294be347d94fe622e89010c"
+}

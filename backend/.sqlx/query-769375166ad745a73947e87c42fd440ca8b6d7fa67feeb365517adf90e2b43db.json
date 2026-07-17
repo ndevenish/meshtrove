@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT f.id FROM files f\n                   WHERE f.model_id = $1 AND f.filename ILIKE '%.stl'\n                   ORDER BY length(f.filename), f.filename LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "769375166ad745a73947e87c42fd440ca8b6d7fa67feeb365517adf90e2b43db"
+}

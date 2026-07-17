@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE models SET name = $2, slug = $9, creator_id = $3, source_url = $4,\n               license = coalesce($5, license),\n               purchase_price = coalesce($6::float8::numeric(10,2), purchase_price),\n               purchase_date = coalesce($7, purchase_date),\n               order_ref = coalesce($8, order_ref),\n               updated_at = now()\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Float8",
+        "Date",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf74a47e0379b9ab70644b682fa4bf87c90ff9dec8fc29b80e98a2c60dc6b097"
+}

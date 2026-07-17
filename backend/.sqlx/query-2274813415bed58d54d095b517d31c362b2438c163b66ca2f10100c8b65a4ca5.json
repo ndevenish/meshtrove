@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.id, m.name::text as \"name!\",\n                  coalesce((SELECT array_agg(t.name::text) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}')\n                      as \"tags!: Vec<String>\",\n                  coalesce((SELECT array_agg(a.alias::text) FROM model_aliases a\n                            WHERE a.model_id = m.id), '{}')\n                      as \"aliases!: Vec<String>\"\n           FROM models m JOIN bundle_models bm ON bm.model_id = m.id\n           WHERE bm.bundle_id = $1\n           ORDER BY m.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "tags!: Vec<String>",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "aliases!: Vec<String>",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "2274813415bed58d54d095b517d31c362b2438c163b66ca2f10100c8b65a4ca5"
+}

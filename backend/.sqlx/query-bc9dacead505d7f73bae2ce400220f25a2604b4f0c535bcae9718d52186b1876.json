@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bundles SET\n                 creator_id = coalesce($2::uuid, creator_id),\n                 source_url = coalesce($3::text, source_url)\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bc9dacead505d7f73bae2ce400220f25a2604b4f0c535bcae9718d52186b1876"
+}

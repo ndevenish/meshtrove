@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE model_variants SET derived_from_variant_id = $2\n          WHERE derived_from_variant_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5719398c1b86dadbc699ebd6b9beabbd9a04fb54696816734db07d2596c24554"
+}

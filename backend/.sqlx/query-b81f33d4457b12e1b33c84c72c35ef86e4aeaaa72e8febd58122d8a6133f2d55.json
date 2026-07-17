@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bundle_categories (bundle_id, tag_id, position) VALUES ($1, $2, $3)\n             ON CONFLICT (bundle_id, tag_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b81f33d4457b12e1b33c84c72c35ef86e4aeaaa72e8febd58122d8a6133f2d55"
+}

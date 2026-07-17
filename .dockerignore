@@ -1,0 +1,15 @@
+# Keep the build context small and reproducible. NOTE: backend/.sqlx is NOT
+# ignored — the offline query cache is required for the SQLX_OFFLINE build.
+**/target
+**/node_modules
+frontend/dist
+backend/store
+store
+.git
+.env
+.env.*
+!.env.prod.example
+.claude
+.DS_Store
+tools
+docs

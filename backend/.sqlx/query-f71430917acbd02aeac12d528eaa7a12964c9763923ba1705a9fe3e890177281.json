@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE model_variants\n                    SET name = $2, print_notes = $3, derived_from_variant_id = $4\n                  WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f71430917acbd02aeac12d528eaa7a12964c9763923ba1705a9fe3e890177281"
+}

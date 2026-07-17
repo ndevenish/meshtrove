@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET is_primary = true\n             WHERE model_id = $1 AND blob_sha256 = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "590e5f241b7c0dcda3b7d704863730ee71c1d6c5f5db891832cfd8f0aa857e0d"
+}

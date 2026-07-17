@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET is_primary = false\n           WHERE is_primary AND (\n               (model_id = $1 AND $1 IS NOT NULL) OR\n               (variant_id = $2 AND $2 IS NOT NULL) OR\n               (bundle_id = $3 AND $3 IS NOT NULL))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ef0e5b60b8fe4c921aa5f9546bca1b8a619c42da890f37f726ee32540fc7fd2"
+}

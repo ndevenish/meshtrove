@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM blobs b\n           WHERE b.sha256 = $1\n             AND NOT EXISTS (SELECT 1 FROM files WHERE blob_sha256 = b.sha256)\n             AND NOT EXISTS (SELECT 1 FROM images WHERE blob_sha256 = b.sha256)\n           RETURNING b.size",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "size",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "blobs",
+            "name": "size"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bpchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fcda6d2837b15ed772cf82acff0e0e35ad6741b84056bd351ba22a599a3ee593"
+}

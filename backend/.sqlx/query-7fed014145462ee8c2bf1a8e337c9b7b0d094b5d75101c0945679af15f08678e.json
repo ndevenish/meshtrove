@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT vt.name::text as \"name!\" FROM variant_tag_assignments a\n                   JOIN variant_tags vt ON vt.id = a.tag_id\n                   WHERE a.variant_id = $1 ORDER BY vt.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7fed014145462ee8c2bf1a8e337c9b7b0d094b5d75101c0945679af15f08678e"
+}
