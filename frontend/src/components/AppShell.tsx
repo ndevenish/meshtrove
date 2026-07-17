@@ -222,9 +222,11 @@ export default function AppShell() {
           <Button component={Link} to="/creators" color="inherit">
             Creators
           </Button>
-          <Button component={Link} to="/jobs" color="inherit">
-            Jobs
-          </Button>
+          {canCreate && (
+            <Button component={Link} to="/jobs" color="inherit">
+              Jobs
+            </Button>
+          )}
           <Tooltip title={mode === 'light' ? 'Dark mode' : 'Light mode'}>
             <IconButton onClick={toggle} color="inherit">
               {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}
