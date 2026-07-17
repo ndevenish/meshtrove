@@ -27,7 +27,12 @@ import AddIcon from '@mui/icons-material/Add'
 import DownloadIcon from '@mui/icons-material/Download'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import FolderIcon from '@mui/icons-material/Folder'
+import CreateNewFolderIcon from '@mui/icons-material/CreateNewFolder'
+import EditIcon from '@mui/icons-material/Edit'
+import CheckIcon from '@mui/icons-material/Check'
+import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
+import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -124,6 +129,7 @@ function VariantRow({
   const [expanded, setExpanded] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [rendering, setRendering] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const { data: files } = useQuery({
     queryKey: ['variant-files', variant.id],
     queryFn: () => api.variantFiles(variant.id),
@@ -141,6 +147,35 @@ function VariantRow({
     } finally {
       setUploading(false)
     }
+  }
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+
+  const invalidate = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['variant-files', variant.id] })
+    // The unsorted bucket and variant counts both shift when files move out.
+    await queryClient.invalidateQueries({ queryKey: ['model-files', variant.model_id] })
+    onChange()
+  }
+
+  // Move the selected files back to the model's unsorted bucket. A variant-owned
+  // file resolves to model context on the backend, so `unsorted: true` returns it
+  // to the model root (see routes/files.rs update_file).
+  const moveToUnsorted = async () => {
+    await Promise.all([...selected].map((id) => api.updateFile(id, { unsorted: true })))
+    setSelected(new Set())
+    await invalidate()
+  }
+
+  // Fold a folder's files into a new path (empty = strip the folder).
+  const renameFolder = async (fileIds: string[], newPath: string) => {
+    await Promise.all(fileIds.map((id) => api.updateFile(id, { path: newPath })))
+    await queryClient.invalidateQueries({ queryKey: ['variant-files', variant.id] })
   }
 
   return (
@@ -178,15 +213,41 @@ function VariantRow({
           </Alert>
         )}
         {(uploading || rendering) && <LinearProgress sx={{ mb: 1 }} />}
+        {editing && files && files.length > 0 && (
+          <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center' }}>
+            <Button
+              size="small"
+              startIcon={<DriveFileMoveIcon />}
+              disabled={selected.size === 0}
+              onClick={moveToUnsorted}
+            >
+              Move {selected.size || ''} to unsorted
+            </Button>
+            <Box sx={{ flexGrow: 1 }} />
+            <Button
+              size="small"
+              onClick={() =>
+                setSelected(
+                  selected.size === files.length ? new Set() : new Set(files.map((f) => f.id)),
+                )
+              }
+            >
+              {selected.size === files.length ? 'Clear' : 'Select all'}
+            </Button>
+          </Stack>
+        )}
         {expanded && files && (
           <FileTree
             files={files}
+            selectable={editing}
+            selected={selected}
+            onToggle={toggle}
+            onFolderRename={editing ? renameFolder : undefined}
             onDelete={
               editing
                 ? async (fileId) => {
                     await api.deleteFile(fileId)
-                    await queryClient.invalidateQueries({ queryKey: ['variant-files', variant.id] })
-                    onChange()
+                    await invalidate()
                   }
                 : undefined
             }
@@ -274,6 +335,7 @@ export function FileTree({
   onKindChange,
   onDelete,
   onRender,
+  onFolderRename,
 }: {
   files: FileRecord[]
   selectable?: boolean
@@ -283,7 +345,39 @@ export function FileTree({
   onDelete?: (id: string) => void
   /** Force a preview render from this file; it joins the model's images. */
   onRender?: (id: string) => void
+  /** Rename (or, with an empty path, remove) a folder: rewrites the `path` of
+      every file in the group. When set, folder headers become editable and the
+      unfoldered root group gains an "Add folder" control. */
+  onFolderRename?: (fileIds: string[], newPath: string) => void | Promise<void>
 }) {
+  const [editingDir, setEditingDir] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  const [savingDir, setSavingDir] = useState(false)
+
+  const startFolder = (dir: string) => {
+    setEditingDir(dir)
+    setDraft(dir === '/' ? '' : dir)
+  }
+  const cancelFolder = () => {
+    setEditingDir(null)
+    setDraft('')
+  }
+  const commitFolder = async (entries: FileRecord[]) => {
+    if (!onFolderRename) return
+    // Match the backend's sanitiser: trim surrounding slashes; empty = root.
+    const next = draft.trim().replace(/^\/+|\/+$/g, '')
+    setSavingDir(true)
+    try {
+      await onFolderRename(
+        entries.map((f) => f.id),
+        next,
+      )
+      cancelFolder()
+    } finally {
+      setSavingDir(false)
+    }
+  }
+
   const groups = useMemo(() => {
     const byDir = new Map<string, FileRecord[]>()
     for (const file of files) {
@@ -304,12 +398,71 @@ export function FileTree({
     <Box>
       {groups.map(([dir, entries]) => (
         <Box key={dir} sx={{ mb: 1 }}>
-          {dir !== '/' && (
-            <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', mb: 0.25 }}>
+          {(dir !== '/' || !!onFolderRename) && (
+            <Stack
+              direction="row"
+              spacing={0.75}
+              sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}
+            >
               <FolderIcon sx={{ fontSize: 18, opacity: 0.6 }} />
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {dir}
-              </Typography>
+              {editingDir === dir ? (
+                <>
+                  <TextField
+                    size="small"
+                    variant="standard"
+                    autoFocus
+                    value={draft}
+                    disabled={savingDir}
+                    placeholder="(no folder — leave empty for root)"
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void commitFolder(entries)
+                      if (e.key === 'Escape') cancelFolder()
+                    }}
+                    sx={{ maxWidth: 340, flexGrow: 1 }}
+                  />
+                  <Tooltip title="Save">
+                    <span>
+                      <IconButton
+                        size="small"
+                        disabled={savingDir}
+                        onClick={() => void commitFolder(entries)}
+                      >
+                        <CheckIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Cancel">
+                    <span>
+                      <IconButton size="small" disabled={savingDir} onClick={cancelFolder}>
+                        <CloseIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </>
+              ) : dir === '/' ? (
+                <Button
+                  size="small"
+                  startIcon={<CreateNewFolderIcon sx={{ fontSize: 18 }} />}
+                  onClick={() => startFolder('/')}
+                  sx={{ textTransform: 'none' }}
+                >
+                  Add folder
+                </Button>
+              ) : (
+                <>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {dir}
+                  </Typography>
+                  {onFolderRename && (
+                    <Tooltip title="Rename or remove folder">
+                      <IconButton size="small" onClick={() => startFolder(dir)}>
+                        <EditIcon sx={{ fontSize: 15 }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </>
+              )}
             </Stack>
           )}
           {entries.map((file) => (
