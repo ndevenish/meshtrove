@@ -7,7 +7,8 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    http::StatusCode,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,11 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/users", get(list))
-        .route("/api/users/{id}", axum::routing::patch(set_role))
+        .route(
+            "/api/users/{id}",
+            axum::routing::patch(set_role).delete(remove),
+        )
+        .route("/api/users/{id}/password", post(reset_password))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -87,4 +92,139 @@ async fn set_role(
     .await?
     .map(Json)
     .ok_or(ApiError::NotFound)
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct PasswordReset {
+    pub new_password: String,
+}
+
+/// Admin resets another user's password outright — no old-password check, since
+/// the point is to recover an account whose password is lost. Use the
+/// self-service `/auth/password` for your own; the anonymous user has none.
+async fn reset_password(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PasswordReset>,
+) -> Result<StatusCode, ApiError> {
+    user.require_admin()?;
+    if id.is_nil() {
+        return Err(ApiError::BadRequest(
+            "the anonymous user can't be modified".into(),
+        ));
+    }
+    if body.new_password.len() < 8 {
+        return Err(ApiError::BadRequest(
+            "password must be at least 8 characters".into(),
+        ));
+    }
+    let hash = crate::routes::auth::hash_password(body.new_password).await?;
+    let result = sqlx::query!(
+        "UPDATE users SET password_hash = $2 WHERE id = $1",
+        id,
+        hash,
+    )
+    .execute(&state.db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete a user. Admin-only, and you can't delete yourself (that guards against
+/// removing the last admin) or the anonymous user.
+///
+/// Several tables carry a `NOT NULL created_by` back to `users`, so the account's
+/// content is first reassigned to the acting admin in one transaction — nothing
+/// is lost, and no dangling reference is left. Rows with `ON DELETE CASCADE`
+/// (personal marks, exports) or `SET NULL` (import layouts) are left to the DB.
+async fn remove(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    user.require_admin()?;
+    if id == user.id {
+        return Err(ApiError::BadRequest(
+            "you can't delete your own account".into(),
+        ));
+    }
+    if id.is_nil() {
+        return Err(ApiError::BadRequest(
+            "the anonymous user can't be deleted".into(),
+        ));
+    }
+
+    let mut tx = state.db.begin().await?;
+    let heir = user.id;
+    // Reassign every owned row to the acting admin so NOT NULL created_by holds.
+    sqlx::query!(
+        "UPDATE models SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE model_description_revisions SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE model_variants SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE bundles SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE bundle_description_revisions SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE imports SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Nullable references: hand them to the heir too rather than nulling history.
+    sqlx::query!(
+        "UPDATE images SET created_by = $2 WHERE created_by = $1",
+        id,
+        heir
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE settings SET updated_by = $2 WHERE updated_by = $1",
+        id,
+        heir
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let deleted = sqlx::query!("DELETE FROM users WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    if deleted.rows_affected() == 0 {
+        // Nothing deleted → unknown user. Dropping tx rolls back the reassigns.
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }

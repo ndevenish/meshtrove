@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
+        .route("/auth/password", post(change_password))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -33,7 +34,9 @@ pub struct Credentials {
     password: String,
 }
 
-async fn hash_password(password: String) -> Result<String> {
+/// Hash a password with argon2id off the async runtime. `pub(crate)` so the
+/// admin password-reset in routes/users.rs can reuse the same parameters.
+pub(crate) async fn hash_password(password: String) -> Result<String> {
     tokio::task::spawn_blocking(move || {
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
@@ -169,6 +172,81 @@ async fn login(
         return (jar, Json(user)).into_response();
     }
     (StatusCode::UNAUTHORIZED, "invalid username or password").into_response()
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct PasswordChange {
+    current_password: String,
+    new_password: String,
+}
+
+/// Self-service password change: confirm the caller's current password, then set
+/// the new one. Requires a real logged-in account — a guest (not logged in) and
+/// the synthetic `--anonymous` admin (which has no real password) are both
+/// refused. The session cookie is unaffected, so the caller stays logged in.
+async fn change_password(
+    State(state): State<AppState>,
+    user: User,
+    Json(body): Json<PasswordChange>,
+) -> Response {
+    if user.is_guest() {
+        return (StatusCode::UNAUTHORIZED, "not logged in").into_response();
+    }
+    if user.id.is_nil() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the anonymous user has no password",
+        )
+            .into_response();
+    }
+    if body.new_password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters",
+        )
+            .into_response();
+    }
+
+    let current_hash =
+        match sqlx::query_scalar!("SELECT password_hash FROM users WHERE id = $1", user.id,)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(Some(hash)) => hash,
+            // Session pointing at a since-deleted account: treat as not logged in.
+            Ok(None) => return (StatusCode::UNAUTHORIZED, "not logged in").into_response(),
+            Err(error) => {
+                tracing::error!(%error, "password lookup failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+    if !verify_password(body.current_password, current_hash).await {
+        return (StatusCode::UNAUTHORIZED, "current password is incorrect").into_response();
+    }
+
+    let new_hash = match hash_password(body.new_password).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::error!(%error, "password hashing failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    match sqlx::query!(
+        "UPDATE users SET password_hash = $2 WHERE id = $1",
+        user.id,
+        new_hash,
+    )
+    .execute(&state.db)
+    .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "password update failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn logout(jar: PrivateCookieJar) -> Response {

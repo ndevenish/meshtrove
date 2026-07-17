@@ -28,6 +28,11 @@ import { api } from '../api'
 import { readDrop, startImport } from '../upload'
 import { GlobalDropContext } from '../globalDrop'
 import ImportErrorDialog from './ImportErrorDialog'
+import ChangePasswordDialog from './ChangePasswordDialog'
+
+/// The synthetic --anonymous / guest user carries the nil UUID and has no real
+/// password to change.
+const NIL_USER_ID = '00000000-0000-0000-0000-000000000000'
 
 export default function AppShell() {
   const { user, refresh } = useAuth()
@@ -37,6 +42,7 @@ export default function AppShell() {
   const [params] = useSearchParams()
   const [search, setSearch] = useState(params.get('q') ?? '')
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
+  const [passwordOpen, setPasswordOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [importing, setImporting] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -246,6 +252,16 @@ export default function AppShell() {
                 <MenuItem disabled>
                   {user.username} ({user.role})
                 </MenuItem>
+                {user.id !== NIL_USER_ID && (
+                  <MenuItem
+                    onClick={() => {
+                      setMenuAnchor(null)
+                      setPasswordOpen(true)
+                    }}
+                  >
+                    Change password
+                  </MenuItem>
+                )}
                 {user.role === 'admin' && (
                   <MenuItem
                     onClick={() => {
@@ -335,6 +351,7 @@ export default function AppShell() {
       )}
 
       <ImportErrorDialog error={dropError} onClose={() => setDropError('')} />
+      <ChangePasswordDialog open={passwordOpen} onClose={() => setPasswordOpen(false)} />
     </Box>
   )
 }

@@ -438,11 +438,18 @@ export const api = {
   register: (username: string, password: string) =>
     request<User>('/auth/register', json({ username, password })),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
+  /** Self-service: verify the current password, then set a new one. */
+  changePassword: (current_password: string, new_password: string) =>
+    request<void>('/auth/password', json({ current_password, new_password })),
 
   // User administration (admin only).
   users: () => request<UserAccount[]>('/api/users'),
   setUserRole: (id: string, role: Role) =>
     request<UserAccount>(`/api/users/${id}`, { ...json({ role }), method: 'PATCH' }),
+  /** Admin resets another user's password (no old-password check). */
+  resetUserPassword: (id: string, new_password: string) =>
+    request<void>(`/api/users/${id}/password`, json({ new_password })),
+  deleteUser: (id: string) => request<void>(`/api/users/${id}`, { method: 'DELETE' }),
 
   searchModels: (params: URLSearchParams) => request<SearchResults>(`/api/models?${params}`),
   model: (id: string) => request<ModelDetail>(`/api/models/${id}`),
