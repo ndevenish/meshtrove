@@ -377,6 +377,19 @@ export function FileTree({
       setSavingDir(false)
     }
   }
+  // Strip the folder outright (files fall back to the root), no edit step.
+  const removeFolder = async (entries: FileRecord[]) => {
+    if (!onFolderRename) return
+    setSavingDir(true)
+    try {
+      await onFolderRename(
+        entries.map((f) => f.id),
+        '',
+      )
+    } finally {
+      setSavingDir(false)
+    }
+  }
 
   const groups = useMemo(() => {
     const byDir = new Map<string, FileRecord[]>()
@@ -455,11 +468,24 @@ export function FileTree({
                     {dir}
                   </Typography>
                   {onFolderRename && (
-                    <Tooltip title="Rename or remove folder">
-                      <IconButton size="small" onClick={() => startFolder(dir)}>
-                        <EditIcon sx={{ fontSize: 15 }} />
-                      </IconButton>
-                    </Tooltip>
+                    <>
+                      <Tooltip title="Remove folder">
+                        <span>
+                          <IconButton
+                            size="small"
+                            disabled={savingDir}
+                            onClick={() => void removeFolder(entries)}
+                          >
+                            <CloseIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                      <Tooltip title="Rename folder">
+                        <IconButton size="small" onClick={() => startFolder(dir)}>
+                          <EditIcon sx={{ fontSize: 15 }} />
+                        </IconButton>
+                      </Tooltip>
+                    </>
                   )}
                 </>
               )}
