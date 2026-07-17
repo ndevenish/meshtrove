@@ -259,6 +259,9 @@ export default function AppShell() {
                     setMenuAnchor(null)
                     await api.logout()
                     refresh()
+                    // Land back on the main browse page rather than lingering on a
+                    // now-forbidden page (admin, imports) as an anonymous viewer.
+                    navigate('/')
                   }}
                 >
                   Log out
