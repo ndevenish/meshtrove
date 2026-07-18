@@ -249,7 +249,9 @@ export default function BundlePage() {
                 )}
               </Box>
             ))}
-            {canEdit && (
+            {/* As on a model: adding a picture is an edit, so the tile waits for
+                edit mode. Drop and paste are page-wide and unaffected. */}
+            {canEdit && editing && (
               <Button
                 component="label"
                 variant="outlined"
@@ -271,8 +273,10 @@ export default function BundlePage() {
           </Stack>
         </Box>
 
-        {/* Details */}
-        <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+        {/* Details. A flex column so the unsorted files can be pushed to its
+            foot — the row stretches both columns to the taller of the two, which
+            is normally the gallery, and that slack is what the gap eats. */}
+        <Box sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
           <Stack sx={{ alignItems: 'flex-start' }} direction="row" spacing={1}>
             <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexGrow: 1 }}>
               <Typography variant="h4" sx={{ fontWeight: 700 }}>
@@ -415,13 +419,17 @@ export default function BundlePage() {
 
           {/* Loose files sit with the description rather than full-width below:
               they are a property of the bundle itself, like its tags and its
-              text, and the full width beneath belongs to the member grid. */}
-          <BundleUnsortedSection
-            bundle={bundle}
-            canEdit={!!canEdit}
-            editing={editing}
-            onChange={refresh}
-          />
+              text, and the full width beneath belongs to the member grid.
+              `mt: auto` sinks them to the bottom of the column, so a short
+              description leaves a gap rather than stranding them mid-air. */}
+          <Box sx={{ mt: 'auto' }}>
+            <BundleUnsortedSection
+              bundle={bundle}
+              canEdit={!!canEdit}
+              editing={editing}
+              onChange={refresh}
+            />
+          </Box>
         </Box>
       </Stack>
 
