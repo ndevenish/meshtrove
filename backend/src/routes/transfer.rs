@@ -141,17 +141,41 @@ async fn restore_commit(
         .await?
         .ok_or_else(|| ApiError::BadRequest("this import is not a MeshTrove export".into()))?;
 
-    // Stream the archive's blobs into the store, then write the entities.
-    let tmp_dir = state.config.store_dir.join("tmp");
-    tokio::fs::create_dir_all(&tmp_dir)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    transfer::stage_blobs(&state.store, &archive_sha, &manifest, &tmp_dir).await?;
+    // Stream the archive's blobs into the store, then write the entities. Both
+    // halves are logged with their timings: a restore is minutes of work on a
+    // large archive, and until it finished there was nothing at all in the log to
+    // say whether it was moving.
+    tracing::info!(
+        blobs = manifest.blobs.len(),
+        bytes = manifest.blobs.iter().map(|b| b.size).sum::<i64>(),
+        models = manifest.models.len(),
+        bundles = manifest.bundles.len(),
+        "restore: staging blobs"
+    );
+    let started = std::time::Instant::now();
+    let staged = transfer::stage_blobs(&state.store, &archive_sha, &manifest).await?;
+    tracing::info!(
+        staged = staged.staged,
+        already_held = staged.skipped,
+        bytes = staged.bytes,
+        elapsed_ms = started.elapsed().as_millis(),
+        "restore: blobs staged"
+    );
 
     let options = RestoreOptions {
         fresh: body.fresh.into_iter().collect(),
     };
+    let entities = std::time::Instant::now();
     let summary = transfer::restore(&state, &user, &manifest, &options).await?;
+    tracing::info!(
+        models = summary.models_created,
+        bundles = summary.bundles_created,
+        files = summary.files,
+        images = summary.images,
+        elapsed_ms = entities.elapsed().as_millis(),
+        total_ms = started.elapsed().as_millis(),
+        "restore: complete"
+    );
 
     // The staging import (and its now-redundant archive blob) has served its
     // purpose; drop it. The archive blob stays in the store for orphan GC.

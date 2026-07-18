@@ -20,19 +20,17 @@
 //! how `patch.rs` stages images before opening its transaction.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::tags::upsert_tag;
-use crate::services::blobstore::{BlobStore, FsBlobStore};
+use crate::services::blobstore::FsBlobStore;
 use crate::state::AppState;
 
 pub const SCHEMA: &str = "meshtrove.export/1";
@@ -1211,15 +1209,26 @@ pub async fn read_manifest_from_blob(
     .map_err(|e| ApiError::Internal(e.into()))?
 }
 
+/// What a staging pass did, for the log line and the caller's timing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StageStats {
+    /// Blobs extracted from the archive into the store.
+    pub staged: usize,
+    /// Blobs the store already held, so never read out of the archive at all.
+    pub skipped: usize,
+    /// Bytes actually written.
+    pub bytes: i64,
+}
+
 /// Stream every blob a manifest references out of the archive blob and into the
 /// content-addressed store, verifying each hash. Reads one entry per distinct
-/// blob (the readable tree may repeat bytes; the store dedups them anyway).
+/// blob (the readable tree may repeat bytes; the store dedups them anyway),
+/// skips blobs already held, and writes each byte exactly once.
 pub async fn stage_blobs(
     store: &FsBlobStore,
     archive_sha: &str,
     manifest: &Manifest,
-    tmp_dir: &FsPath,
-) -> Result<(), ApiError> {
+) -> Result<StageStats, ApiError> {
     // Each blob's bytes can be read from any file/image entry referencing it.
     let mut sha_to_path: HashMap<&str, &str> = HashMap::new();
     for (archive_path, sha) in blob_entries(manifest) {
@@ -1242,40 +1251,59 @@ pub async fn stage_blobs(
         .collect::<Result<_, _>>()?;
 
     let archive_path = store.path_for(archive_sha);
-    let tmp_dir = tmp_dir.to_path_buf();
-    let temps = tokio::task::spawn_blocking(move || -> Result<Vec<(String, PathBuf)>, ApiError> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || -> Result<StageStats, ApiError> {
+        let mut stats = StageStats::default();
+        // Blobs we already hold need no work at all: the store is
+        // content-addressed, so the bytes under a sha are that sha's bytes. This
+        // is what makes re-restoring an export into the library it came from —
+        // or any export overlapping one already here — near-instant instead of a
+        // full rewrite of every byte.
+        let todo: Vec<(String, String)> = plan
+            .into_iter()
+            .filter(|(sha, _)| {
+                let held = store.has(sha);
+                if held {
+                    stats.skipped += 1;
+                }
+                !held
+            })
+            .collect();
+        if todo.is_empty() {
+            return Ok(stats);
+        }
+
         let file = std::fs::File::open(&archive_path).map_err(|e| ApiError::Internal(e.into()))?;
         let mut zip = zip::ZipArchive::new(file)
             .map_err(|e| ApiError::BadRequest(format!("archive is not a zip: {e}")))?;
-        let mut out = Vec::with_capacity(plan.len());
-        for (sha, entry_path) in plan {
+        let mut written: Vec<String> = Vec::with_capacity(todo.len());
+        for (expected, entry_path) in todo {
             let mut entry = zip
                 .by_name(&entry_path)
                 .map_err(|_| ApiError::BadRequest(format!("archive is missing {entry_path}")))?;
-            let tmp = tmp_dir.join(format!("blob-{}", Uuid::new_v4()));
-            let mut w = std::fs::File::create(&tmp).map_err(|e| ApiError::Internal(e.into()))?;
-            std::io::copy(&mut entry, &mut w).map_err(|e| ApiError::Internal(e.into()))?;
-            out.push((sha, tmp));
+            // Straight from the zip into the store: hashed as it is written, then
+            // renamed into place. The fsync is deferred to one pass below.
+            let stored = store
+                .put_blocking(&mut entry, false)
+                .map_err(ApiError::Internal)?;
+            if stored.sha256 != expected {
+                // Whatever it was, it isn't what the manifest promised. It landed
+                // under its own (unreferenced) hash, so drop it rather than leave
+                // bytes nobody asked for.
+                let _ = std::fs::remove_file(store.path_for(&stored.sha256));
+                return Err(ApiError::BadRequest(format!(
+                    "archive blob content does not match its hash ({expected})"
+                )));
+            }
+            stats.staged += 1;
+            stats.bytes += stored.size;
+            written.push(stored.sha256);
         }
-        Ok(out)
+        store.sync_blobs(&written).map_err(ApiError::Internal)?;
+        Ok(stats)
     })
     .await
-    .map_err(|e| ApiError::Internal(e.into()))??;
-
-    for (expected, tmp) in temps {
-        let f = tokio::fs::File::open(&tmp)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-        let stream = ReaderStream::new(f).map_err(anyhow::Error::from);
-        let stored = store.put(Box::pin(stream)).await?;
-        let _ = tokio::fs::remove_file(&tmp).await;
-        if stored.sha256 != expected {
-            return Err(ApiError::BadRequest(format!(
-                "archive blob content does not match its hash ({expected})"
-            )));
-        }
-    }
-    Ok(())
+    .map_err(|e| ApiError::Internal(e.into()))?
 }
 
 /// Write an export to `path` as a zip: the manifest, the readable text files,
@@ -1347,6 +1375,264 @@ pub struct RestoreSummary {
     pub blobs: usize,
 }
 
+/// The high-cardinality rows of a restore, accumulated in memory and written one
+/// statement per table at the end. A real export is tens of thousands of files
+/// and images; a round-trip each is what turns a restore into a coffee break —
+/// the same problem, and the same fix, as the import carve in `routes/imports`.
+///
+/// Ids are generated here rather than read back from `RETURNING`, so a file's
+/// new id is known before it is inserted and an image can reference it without
+/// the insert order having to mean anything.
+#[derive(Default)]
+struct Batches {
+    variants: Vec<VariantRow>,
+    /// (variant id, its derived-from variant id) — applied after the variants
+    /// themselves exist.
+    derived: Vec<(Uuid, Uuid)>,
+    variant_tags: Vec<(Uuid, Uuid)>,
+    files: Vec<FileRow>,
+    images: Vec<ImageRow>,
+}
+
+struct VariantRow {
+    id: Uuid,
+    model_id: Uuid,
+    name: Option<String>,
+    print_notes: Option<String>,
+    created_by: Uuid,
+    created_at: DateTime<Utc>,
+}
+
+struct FileRow {
+    id: Uuid,
+    blob_sha256: String,
+    model_id: Option<Uuid>,
+    variant_id: Option<Uuid>,
+    bundle_id: Option<Uuid>,
+    path: String,
+    filename: String,
+    mime: Option<String>,
+    kind: String,
+    created_at: DateTime<Utc>,
+}
+
+struct ImageRow {
+    blob_sha256: String,
+    model_id: Option<Uuid>,
+    variant_id: Option<Uuid>,
+    bundle_id: Option<Uuid>,
+    kind: String,
+    source_file_id: Option<Uuid>,
+    renderer: Option<String>,
+    renderer_config: Option<serde_json::Value>,
+    mime: Option<String>,
+    width: Option<i32>,
+    height: Option<i32>,
+    is_primary: bool,
+    sort_order: i32,
+    created_by: Uuid,
+    created_at: DateTime<Utc>,
+}
+
+impl Batches {
+    /// Queue a file and hand back the id it will have, so images referencing it
+    /// can be queued in the same pass.
+    fn push_file(&mut self, target: FileTarget, f: &File) -> Uuid {
+        let (model_id, variant_id, bundle_id) = target.columns();
+        let id = Uuid::new_v4();
+        self.files.push(FileRow {
+            id,
+            blob_sha256: f.blob_sha256.clone(),
+            model_id,
+            variant_id,
+            bundle_id,
+            path: f.path.clone(),
+            filename: f.filename.clone(),
+            mime: f.mime.clone(),
+            kind: f.kind.as_str().to_string(),
+            created_at: f.created_at,
+        });
+        id
+    }
+
+    fn push_image(
+        &mut self,
+        target: ImageTarget,
+        img: &Image,
+        file_map: &HashMap<Uuid, Uuid>,
+        user_id: Uuid,
+    ) {
+        let (model_id, variant_id, bundle_id) = target.columns();
+        self.images.push(ImageRow {
+            blob_sha256: img.blob_sha256.clone(),
+            model_id,
+            variant_id,
+            bundle_id,
+            kind: img.kind.as_str().to_string(),
+            source_file_id: img.source_file_id.and_then(|id| file_map.get(&id).copied()),
+            renderer: img.renderer.clone(),
+            renderer_config: img.renderer_config.clone(),
+            mime: img.mime.clone(),
+            width: img.width,
+            height: img.height,
+            is_primary: img.is_primary,
+            sort_order: img.sort_order,
+            created_by: user_id,
+            created_at: img.created_at,
+        });
+    }
+
+    /// Write everything, in dependency order: variants before the files that sit
+    /// on them, files before the images that cite them as a source.
+    async fn flush(self, tx: &mut sqlx::PgConnection) -> Result<(), ApiError> {
+        if !self.variants.is_empty() {
+            sqlx::query!(
+                "INSERT INTO model_variants (id, model_id, name, print_notes, created_by, created_at)
+                 SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::text[],
+                                      $5::uuid[], $6::timestamptz[])",
+                &self.variants.iter().map(|v| v.id).collect::<Vec<_>>(),
+                &self.variants.iter().map(|v| v.model_id).collect::<Vec<_>>(),
+                &self.variants.iter().map(|v| v.name.clone()).collect::<Vec<_>>() as &[Option<String>],
+                &self.variants.iter().map(|v| v.print_notes.clone()).collect::<Vec<_>>() as &[Option<String>],
+                &self.variants.iter().map(|v| v.created_by).collect::<Vec<_>>(),
+                &self.variants.iter().map(|v| v.created_at).collect::<Vec<_>>(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if !self.derived.is_empty() {
+            sqlx::query!(
+                "UPDATE model_variants v SET derived_from_variant_id = d.src
+                   FROM unnest($1::uuid[], $2::uuid[]) AS d(id, src)
+                  WHERE v.id = d.id",
+                &self.derived.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                &self.derived.iter().map(|(_, src)| *src).collect::<Vec<_>>(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if !self.variant_tags.is_empty() {
+            sqlx::query!(
+                "INSERT INTO variant_tag_assignments (variant_id, tag_id)
+                 SELECT * FROM unnest($1::uuid[], $2::uuid[]) ON CONFLICT DO NOTHING",
+                &self
+                    .variant_tags
+                    .iter()
+                    .map(|(v, _)| *v)
+                    .collect::<Vec<_>>(),
+                &self
+                    .variant_tags
+                    .iter()
+                    .map(|(_, t)| *t)
+                    .collect::<Vec<_>>(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if !self.files.is_empty() {
+            sqlx::query!(
+                r#"INSERT INTO files
+                     (id, blob_sha256, model_id, variant_id, bundle_id, path, filename,
+                      mime, kind, created_at)
+                   SELECT * FROM unnest($1::uuid[], $2::text[], $3::uuid[], $4::uuid[],
+                                        $5::uuid[], $6::text[], $7::text[], $8::text[],
+                                        $9::text[]::file_kind[], $10::timestamptz[])"#,
+                &self.files.iter().map(|f| f.id).collect::<Vec<_>>(),
+                &self
+                    .files
+                    .iter()
+                    .map(|f| f.blob_sha256.clone())
+                    .collect::<Vec<_>>(),
+                &self.files.iter().map(|f| f.model_id).collect::<Vec<_>>() as &[Option<Uuid>],
+                &self.files.iter().map(|f| f.variant_id).collect::<Vec<_>>() as &[Option<Uuid>],
+                &self.files.iter().map(|f| f.bundle_id).collect::<Vec<_>>() as &[Option<Uuid>],
+                &self
+                    .files
+                    .iter()
+                    .map(|f| f.path.clone())
+                    .collect::<Vec<_>>(),
+                &self
+                    .files
+                    .iter()
+                    .map(|f| f.filename.clone())
+                    .collect::<Vec<_>>(),
+                &self
+                    .files
+                    .iter()
+                    .map(|f| f.mime.clone())
+                    .collect::<Vec<_>>() as &[Option<String>],
+                &self
+                    .files
+                    .iter()
+                    .map(|f| f.kind.clone())
+                    .collect::<Vec<_>>(),
+                &self.files.iter().map(|f| f.created_at).collect::<Vec<_>>(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if !self.images.is_empty() {
+            sqlx::query!(
+                r#"INSERT INTO images
+                     (blob_sha256, model_id, variant_id, bundle_id, kind, source_file_id,
+                      renderer, renderer_config, mime, width, height, is_primary,
+                      sort_order, created_by, created_at)
+                   SELECT * FROM unnest($1::text[], $2::uuid[], $3::uuid[], $4::uuid[],
+                                        $5::text[]::image_kind[], $6::uuid[], $7::text[],
+                                        $8::jsonb[], $9::text[], $10::int[], $11::int[],
+                                        $12::bool[], $13::int[], $14::uuid[],
+                                        $15::timestamptz[])"#,
+                &self
+                    .images
+                    .iter()
+                    .map(|i| i.blob_sha256.clone())
+                    .collect::<Vec<_>>(),
+                &self.images.iter().map(|i| i.model_id).collect::<Vec<_>>() as &[Option<Uuid>],
+                &self.images.iter().map(|i| i.variant_id).collect::<Vec<_>>() as &[Option<Uuid>],
+                &self.images.iter().map(|i| i.bundle_id).collect::<Vec<_>>() as &[Option<Uuid>],
+                &self
+                    .images
+                    .iter()
+                    .map(|i| i.kind.clone())
+                    .collect::<Vec<_>>(),
+                &self
+                    .images
+                    .iter()
+                    .map(|i| i.source_file_id)
+                    .collect::<Vec<_>>() as &[Option<Uuid>],
+                &self
+                    .images
+                    .iter()
+                    .map(|i| i.renderer.clone())
+                    .collect::<Vec<_>>() as &[Option<String>],
+                &self
+                    .images
+                    .iter()
+                    .map(|i| i.renderer_config.clone())
+                    .collect::<Vec<_>>() as &[Option<serde_json::Value>],
+                &self
+                    .images
+                    .iter()
+                    .map(|i| i.mime.clone())
+                    .collect::<Vec<_>>() as &[Option<String>],
+                &self.images.iter().map(|i| i.width).collect::<Vec<_>>() as &[Option<i32>],
+                &self.images.iter().map(|i| i.height).collect::<Vec<_>>() as &[Option<i32>],
+                &self.images.iter().map(|i| i.is_primary).collect::<Vec<_>>(),
+                &self.images.iter().map(|i| i.sort_order).collect::<Vec<_>>(),
+                &self.images.iter().map(|i| i.created_by).collect::<Vec<_>>(),
+                &self.images.iter().map(|i| i.created_at).collect::<Vec<_>>(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 /// Apply a manifest. The blob *bytes* must already be in the store (the route
 /// stages them before calling this); here we only record the `blobs` rows and
 /// build the entities. Everything runs in one transaction, so a failure leaves
@@ -1359,18 +1645,22 @@ pub async fn restore(
 ) -> Result<RestoreSummary, ApiError> {
     let mut tx = state.db.begin().await?;
     let mut summary = RestoreSummary::default();
+    let mut batches = Batches::default();
 
     // Blob rows first: files and images FK to them.
-    for blob in &manifest.blobs {
-        let done = sqlx::query!(
-            "INSERT INTO blobs (sha256, size) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            blob.sha256,
-            blob.size,
-        )
-        .execute(&mut *tx)
-        .await?;
-        summary.blobs += done.rows_affected() as usize;
-    }
+    let done = sqlx::query!(
+        "INSERT INTO blobs (sha256, size)
+         SELECT * FROM unnest($1::text[], $2::bigint[]) ON CONFLICT DO NOTHING",
+        &manifest
+            .blobs
+            .iter()
+            .map(|b| b.sha256.clone())
+            .collect::<Vec<_>>(),
+        &manifest.blobs.iter().map(|b| b.size).collect::<Vec<_>>(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    summary.blobs = done.rows_affected() as usize;
 
     // Creators: resolve by name (reuse an existing one), else create. Map the
     // manifest-local id to the resolved id.
@@ -1428,6 +1718,7 @@ pub async fn restore(
             &tag_map,
             &vtag_map,
             &mut summary,
+            &mut batches,
         )
         .await?;
         model_map.insert(m.id, new_id);
@@ -1466,6 +1757,7 @@ pub async fn restore(
             &tag_map,
             &model_map,
             &mut summary,
+            &mut batches,
         )
         .await?;
         bundle_map.insert(b.id, new_id);
@@ -1494,6 +1786,10 @@ pub async fn restore(
         }
     }
 
+    // Everything high-volume lands here, in dependency order, as a handful of
+    // statements rather than one round-trip per row.
+    batches.flush(&mut tx).await?;
+
     tx.commit().await?;
     Ok(summary)
 }
@@ -1508,6 +1804,7 @@ async fn create_model(
     tag_map: &HashMap<String, Uuid>,
     vtag_map: &HashMap<String, Uuid>,
     summary: &mut RestoreSummary,
+    batches: &mut Batches,
 ) -> Result<Uuid, ApiError> {
     let slug = crate::routes::models::unique_slug(state, &m.name, Some(&m.slug), None).await?;
     let creator_id = m.creator_id.and_then(|id| creator_map.get(&id).copied());
@@ -1570,74 +1867,58 @@ async fn create_model(
         .await?;
     }
 
-    // Variants: create rows first (no derived_from), map ids, then all files,
-    // then fix up derived_from, tag assignments and images.
+    // Variants, their files and their tag assignments are all queued rather than
+    // inserted: ids are minted here, so everything downstream (a file's variant,
+    // an image's source file) can be wired up without waiting on a RETURNING.
     let mut variant_map: HashMap<Uuid, Uuid> = HashMap::new();
     let mut file_map: HashMap<Uuid, Uuid> = HashMap::new();
     for v in &m.variants {
-        let vid = sqlx::query_scalar!(
-            "INSERT INTO model_variants (model_id, name, print_notes, created_by, created_at)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        let vid = Uuid::new_v4();
+        batches.variants.push(VariantRow {
+            id: vid,
             model_id,
-            v.name,
-            v.print_notes,
-            user.id,
-            v.created_at,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
+            name: v.name.clone(),
+            print_notes: v.print_notes.clone(),
+            created_by: user.id,
+            created_at: v.created_at,
+        });
         variant_map.insert(v.id, vid);
     }
 
     for v in &m.variants {
         let vid = variant_map[&v.id];
         for f in &v.files {
-            let new_fid = insert_file(tx, FileTarget::Variant(vid), f).await?;
-            file_map.insert(f.id, new_fid);
+            file_map.insert(f.id, batches.push_file(FileTarget::Variant(vid), f));
             summary.files += 1;
         }
         for name in &v.tags {
             if let Some(&tag_id) = vtag_map.get(&name.to_lowercase()) {
-                sqlx::query!(
-                    "INSERT INTO variant_tag_assignments (variant_id, tag_id)
-                     VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    vid,
-                    tag_id,
-                )
-                .execute(&mut *tx)
-                .await?;
+                batches.variant_tags.push((vid, tag_id));
             }
         }
     }
 
     for f in &m.files {
-        let new_fid = insert_file(tx, FileTarget::Model(model_id), f).await?;
-        file_map.insert(f.id, new_fid);
+        file_map.insert(f.id, batches.push_file(FileTarget::Model(model_id), f));
         summary.files += 1;
     }
     for v in &m.variants {
         if let Some(src) = v.derived_from_variant_id
             && let Some(&mapped) = variant_map.get(&src)
         {
-            sqlx::query!(
-                "UPDATE model_variants SET derived_from_variant_id = $2 WHERE id = $1",
-                variant_map[&v.id],
-                mapped,
-            )
-            .execute(&mut *tx)
-            .await?;
+            batches.derived.push((variant_map[&v.id], mapped));
         }
     }
 
     for v in &m.variants {
         let vid = variant_map[&v.id];
         for img in &v.images {
-            insert_image(tx, ImageTarget::Variant(vid), img, &file_map, user.id).await?;
+            batches.push_image(ImageTarget::Variant(vid), img, &file_map, user.id);
             summary.images += 1;
         }
     }
     for img in &m.images {
-        insert_image(tx, ImageTarget::Model(model_id), img, &file_map, user.id).await?;
+        batches.push_image(ImageTarget::Model(model_id), img, &file_map, user.id);
         summary.images += 1;
     }
 
@@ -1668,6 +1949,7 @@ async fn create_bundle(
     tag_map: &HashMap<String, Uuid>,
     model_map: &HashMap<Uuid, Uuid>,
     summary: &mut RestoreSummary,
+    batches: &mut Batches,
 ) -> Result<Uuid, ApiError> {
     let slug = crate::routes::bundles::unique_slug(state, &b.name, Some(&b.slug), None).await?;
     let creator_id = b.creator_id.and_then(|id| creator_map.get(&id).copied());
@@ -1746,19 +2028,17 @@ async fn create_bundle(
     }
 
     for f in &b.files {
-        insert_file(tx, FileTarget::Bundle(bundle_id), f).await?;
+        batches.push_file(FileTarget::Bundle(bundle_id), f);
         summary.files += 1;
     }
     let empty_file_map: HashMap<Uuid, Uuid> = HashMap::new();
     for img in &b.images {
-        insert_image(
-            tx,
+        batches.push_image(
             ImageTarget::Bundle(bundle_id),
             img,
             &empty_file_map,
             user.id,
-        )
-        .await?;
+        );
         summary.images += 1;
     }
 
@@ -1779,40 +2059,22 @@ async fn create_bundle(
     Ok(bundle_id)
 }
 
+/// A file has exactly one owner (the `num_nonnulls(...) = 1` check); the target
+/// is which column it goes in.
 enum FileTarget {
     Model(Uuid),
     Variant(Uuid),
     Bundle(Uuid),
 }
 
-async fn insert_file(
-    tx: &mut sqlx::PgConnection,
-    target: FileTarget,
-    f: &File,
-) -> Result<Uuid, ApiError> {
-    let (model_id, variant_id, bundle_id) = match target {
-        FileTarget::Model(id) => (Some(id), None, None),
-        FileTarget::Variant(id) => (None, Some(id), None),
-        FileTarget::Bundle(id) => (None, None, Some(id)),
-    };
-    let kind = f.kind.as_str();
-    Ok(sqlx::query_scalar!(
-        r#"INSERT INTO files
-             (blob_sha256, model_id, variant_id, bundle_id, path, filename, mime, kind, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::file_kind, $9)
-           RETURNING id"#,
-        f.blob_sha256,
-        model_id,
-        variant_id,
-        bundle_id,
-        f.path,
-        f.filename,
-        f.mime,
-        kind as _,
-        f.created_at,
-    )
-    .fetch_one(&mut *tx)
-    .await?)
+impl FileTarget {
+    fn columns(&self) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
+        match self {
+            FileTarget::Model(id) => (Some(*id), None, None),
+            FileTarget::Variant(id) => (None, Some(*id), None),
+            FileTarget::Bundle(id) => (None, None, Some(*id)),
+        }
+    }
 }
 
 enum ImageTarget {
@@ -1821,45 +2083,14 @@ enum ImageTarget {
     Bundle(Uuid),
 }
 
-async fn insert_image(
-    tx: &mut sqlx::PgConnection,
-    target: ImageTarget,
-    img: &Image,
-    file_map: &HashMap<Uuid, Uuid>,
-    user_id: Uuid,
-) -> Result<(), ApiError> {
-    let (model_id, variant_id, bundle_id) = match target {
-        ImageTarget::Model(id) => (Some(id), None, None),
-        ImageTarget::Variant(id) => (None, Some(id), None),
-        ImageTarget::Bundle(id) => (None, None, Some(id)),
-    };
-    let source_file_id = img.source_file_id.and_then(|id| file_map.get(&id).copied());
-    let kind = img.kind.as_str();
-    sqlx::query!(
-        r#"INSERT INTO images
-             (blob_sha256, model_id, variant_id, bundle_id, kind, source_file_id,
-              renderer, renderer_config, mime, width, height, is_primary, sort_order,
-              created_by, created_at)
-           VALUES ($1, $2, $3, $4, $5::image_kind, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
-        img.blob_sha256,
-        model_id,
-        variant_id,
-        bundle_id,
-        kind as _,
-        source_file_id,
-        img.renderer,
-        img.renderer_config,
-        img.mime,
-        img.width,
-        img.height,
-        img.is_primary,
-        img.sort_order,
-        user_id,
-        img.created_at,
-    )
-    .execute(&mut *tx)
-    .await?;
-    Ok(())
+impl ImageTarget {
+    fn columns(&self) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
+        match self {
+            ImageTarget::Model(id) => (Some(*id), None, None),
+            ImageTarget::Variant(id) => (None, Some(*id), None),
+            ImageTarget::Bundle(id) => (None, None, Some(*id)),
+        }
+    }
 }
 
 /// Resolve a manifest creator to a `creators` row: reuse one with the same name

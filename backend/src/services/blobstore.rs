@@ -67,6 +67,110 @@ impl FsBlobStore {
             .join(&sha256[2..4])
             .join(sha256)
     }
+
+    /// Is this blob already stored? Content addressing makes presence identity —
+    /// the bytes under a sha *are* that sha's bytes — so a caller holding a sha
+    /// can skip the work of producing them again.
+    pub fn has(&self, sha256: &str) -> bool {
+        self.path_for(sha256).exists()
+    }
+
+    /// Single-pass blocking ingest: hash the reader while writing it, then rename
+    /// into place. For bulk paths whose source is a blocking reader (a zip entry
+    /// in a restore), which otherwise have to spill to a temp file, re-read it and
+    /// write every byte a second time through [`BlobStore::put`].
+    ///
+    /// `sync` fsyncs before the rename. A caller writing many blobs at once should
+    /// pass `false` and call [`FsBlobStore::sync_blobs`] afterwards: interleaving
+    /// write→fsync→write→fsync per blob is what makes a large restore crawl on a
+    /// copy-on-write filesystem, where each fsync forces its own commit.
+    pub fn put_blocking(&self, reader: &mut impl std::io::Read, sync: bool) -> Result<StoredBlob> {
+        use std::io::Write;
+
+        let tmp_dir = self.root.join("tmp");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let tmp_path = tmp_dir.join(Uuid::new_v4().to_string());
+
+        let mut write = || -> Result<(String, i64)> {
+            let file = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("creating {}", tmp_path.display()))?;
+            let mut writer = HashingWriter {
+                inner: std::io::BufWriter::new(file),
+                hasher: Sha256::new(),
+                size: 0,
+            };
+            std::io::copy(reader, &mut writer)?;
+            writer.flush()?;
+            let HashingWriter {
+                inner,
+                hasher,
+                size,
+            } = writer;
+            let file = inner
+                .into_inner()
+                .map_err(|e| anyhow::anyhow!("flushing blob: {e}"))?;
+            if sync {
+                file.sync_all()?;
+            }
+            Ok((hex::encode(hasher.finalize()), size))
+        };
+
+        let (sha256, size) = match write() {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+        };
+
+        let final_path = self.path_for(&sha256);
+        std::fs::create_dir_all(final_path.parent().expect("blob path has parent"))?;
+        if final_path.exists() {
+            // Content-addressed: already stored, identical by definition.
+            std::fs::remove_file(&tmp_path)?;
+        } else {
+            std::fs::rename(&tmp_path, &final_path)?;
+        }
+        Ok(StoredBlob { sha256, size })
+    }
+
+    /// Flush a batch of just-written blobs to disk. Deferring the fsyncs to one
+    /// pass at the end lets the filesystem coalesce them — the data is already
+    /// sitting in one transaction group by the time the first fsync asks for it,
+    /// instead of forcing a commit between every pair of blobs.
+    pub fn sync_blobs(&self, shas: &[String]) -> Result<()> {
+        for sha in shas {
+            // fsync on a read handle still flushes the file's dirty pages; a blob
+            // that has since been GC'd simply has nothing left to flush.
+            match std::fs::File::open(self.path_for(sha)) {
+                Ok(file) => file.sync_all()?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Writes through to `inner` while hashing and counting — so an ingest reads its
+/// source once and writes it once, rather than hashing in a separate pass.
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+    size: i64,
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.size += n as i64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 impl BlobStore for FsBlobStore {
@@ -222,6 +326,51 @@ mod tests {
         // No stray temp files left behind
         let tmp_entries = std::fs::read_dir(store.root.join("tmp")).unwrap().count();
         assert_eq!(tmp_entries, 0);
+    }
+
+    #[test]
+    fn put_blocking_hashes_in_one_pass_and_agrees_with_put() {
+        let store = temp_store();
+        let blob = store
+            .put_blocking(&mut "hello world".as_bytes(), false)
+            .unwrap();
+        assert_eq!(
+            blob.sha256,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert_eq!(blob.size, 11);
+        assert_eq!(
+            std::fs::read(store.path_for(&blob.sha256)).unwrap(),
+            b"hello world"
+        );
+        // Deferring the fsync must not leave the bytes anywhere but their final
+        // home — the rename happens either way.
+        store
+            .sync_blobs(std::slice::from_ref(&blob.sha256))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(store.root.join("tmp")).unwrap().count(),
+            0
+        );
+
+        // Storing it again is a no-op, and `has` sees it without reading it.
+        assert!(store.has(&blob.sha256));
+        let again = store
+            .put_blocking(&mut "hello world".as_bytes(), false)
+            .unwrap();
+        assert_eq!(again.sha256, blob.sha256);
+        assert_eq!(
+            std::fs::read_dir(store.root.join("tmp")).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn has_is_false_for_a_blob_never_stored() {
+        let store = temp_store();
+        assert!(!store.has(&"0".repeat(64)));
+        // Syncing a batch that includes a since-deleted blob is not an error.
+        store.sync_blobs(&["0".repeat(64)]).unwrap();
     }
 
     #[tokio::test]

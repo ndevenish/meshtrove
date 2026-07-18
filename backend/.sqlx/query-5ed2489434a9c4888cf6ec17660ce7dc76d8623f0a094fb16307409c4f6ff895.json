@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO blobs (sha256, size)\n         SELECT * FROM unnest($1::text[], $2::bigint[]) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5ed2489434a9c4888cf6ec17660ce7dc76d8623f0a094fb16307409c4f6ff895"
+}
