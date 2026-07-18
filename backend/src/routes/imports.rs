@@ -781,6 +781,24 @@ async fn commit(
     // (nothing carved) renders once from its unsorted files, on the same rule.
     // (Bundle unsorted files don't render: they are a staging bucket.)
     for model_id in render_models {
+        // ...but only when the model has no picture yet. An archive that shipped
+        // photos (now the model's own images) already has something to show, and a
+        // rendered STL stand-in behind it is wasted work — so skip the render
+        // entirely if any image already hangs off the model or its variants.
+        let has_image = sqlx::query_scalar!(
+            r#"SELECT EXISTS (
+                   SELECT 1 FROM images i
+                   LEFT JOIN model_variants v ON v.id = i.variant_id
+                   WHERE i.model_id = $1 OR v.model_id = $1
+               ) AS "exists!""#,
+            model_id,
+        )
+        .fetch_one(&state.db)
+        .await?;
+        if has_image {
+            continue;
+        }
+
         let mut stls = sqlx::query_scalar!(
             r#"SELECT DISTINCT ON (f.variant_id) f.id
                FROM files f

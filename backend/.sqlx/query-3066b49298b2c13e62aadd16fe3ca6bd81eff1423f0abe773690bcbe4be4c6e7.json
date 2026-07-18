@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n                   SELECT 1 FROM images i\n                   LEFT JOIN model_variants v ON v.id = i.variant_id\n                   WHERE i.model_id = $1 OR v.model_id = $1\n               ) AS \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3066b49298b2c13e62aadd16fe3ca6bd81eff1423f0abe773690bcbe4be4c6e7"
+}
