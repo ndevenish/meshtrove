@@ -32,21 +32,39 @@ import {
 import { FileTree } from '../components/VariantSection'
 import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayoutPanel'
 import ImportRestorePanel from '../components/ImportRestorePanel'
+import { useImportDraftState, clearImportDraft } from '../importDraft'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
 
 /// The one place the model-vs-bundle question gets asked — after the archive has
 /// unpacked and you can see what's actually in it. Committing moves every staged
 /// file onto the destination and the import disappears.
+///
+/// `/imports/:id` reuses one instance across ids, so key the workbench on the id:
+/// a fresh import gets fresh state (and clean seeding), and its persisted draft is
+/// read once on mount rather than leaking between imports.
 export default function ImportPage() {
+  const { id } = useParams<{ id: string }>()
+  return <ImportWorkbench key={id ?? 'new'} />
+}
+
+function ImportWorkbench() {
   const { id } = useParams<{ id: string }>()
   const [params] = useSearchParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [name, setName] = useState('')
-  const [nameEdited, setNameEdited] = useState(false)
-  const [dest, setDest] = useState<Destination>(params.get('bundle') ? 'bundle' : 'new_model')
-  const [target, setTarget] = useState<BundleSummary | null>(null)
+  // These fields are the import's draft: persisted per id (see importDraft.ts) so
+  // closing the page and reopening it restores what you were part-way through.
+  const [name, setName] = useImportDraftState(id!, 'name', '')
+  const [nameEdited, setNameEdited] = useImportDraftState(id!, 'nameEdited', false)
+  const [dest, setDest] = useImportDraftState<Destination>(
+    id!,
+    'dest',
+    params.get('bundle') ? 'bundle' : 'new_model',
+  )
+  // The chosen bundle is stored by id (a BundleSummary is not ours to persist) and
+  // re-resolved from the loaded list below.
+  const [targetId, setTargetId] = useImportDraftState<string | null>(id!, 'targetId', null)
   const [layout, setLayout] = useState<{ spec: LayoutSpec; plan: LayoutPlan } | null>(null)
   // Per member-model merge choices from the layout panel, index-aligned to the
   // plan's models (a member id or null=new); null when not merging into a bundle.
@@ -57,10 +75,10 @@ export default function ImportPage() {
   // The facts about the drop, typed once. A box set is bought once, from one
   // creator, under one licence — so on a bundle commit these land on every member
   // model the carve creates, not just the bundle.
-  const [creatorName, setCreatorName] = useState('')
-  const [tags, setTags] = useState<string[]>([])
-  const [sourceUrl, setSourceUrl] = useState('')
-  const [description, setDescription] = useState('')
+  const [creatorName, setCreatorName] = useImportDraftState(id!, 'creatorName', '')
+  const [tags, setTags] = useImportDraftState<string[]>(id!, 'tags', [])
+  const [sourceUrl, setSourceUrl] = useImportDraftState(id!, 'sourceUrl', '')
+  const [description, setDescription] = useImportDraftState(id!, 'description', '')
 
   const { data: staged, isLoading } = useQuery({
     queryKey: ['import', id],
@@ -95,27 +113,28 @@ export default function ImportPage() {
     queryKey: ['bundles-all'],
     queryFn: () => api.searchBundles(new URLSearchParams({ per_page: '100' })),
   })
+  const target: BundleSummary | null = bundles?.bundles.find((b) => b.id === targetId) ?? null
 
   // Seed the editable name once the import loads, and preselect the bundle when
   // the drop happened on a bundle page (?bundle=…).
   useEffect(() => {
     if (staged && !name) setName(staged.name)
-  }, [staged, name])
+  }, [staged, name, setName])
   useEffect(() => {
     const wanted = params.get('bundle')
-    if (wanted && !target && bundles) {
+    if (wanted && !targetId && bundles) {
       // `?bundle=` may carry the id (the bundle page's inline merge box) or the
       // slug (the global page drop, whose URL is the canonical slug) — take either.
-      setTarget(bundles.bundles.find((b) => b.id === wanted || b.slug === wanted) ?? null)
+      setTargetId(bundles.bundles.find((b) => b.id === wanted || b.slug === wanted)?.id ?? null)
     }
-  }, [params, bundles, target])
+  }, [params, bundles, targetId, setTargetId])
 
   // A one-model layout that captured a single model name suggests it — unless
   // the user has typed their own.
   const suggestedName = dest === 'new_model' ? layout?.plan.models[0]?.name : undefined
   useEffect(() => {
     if (suggestedName && !nameEdited) setName(suggestedName)
-  }, [suggestedName, nameEdited])
+  }, [suggestedName, nameEdited, setName])
 
   if (isLoading || !staged) return null
 
@@ -161,6 +180,7 @@ export default function ImportPage() {
               }
             : { target: 'new_model', name: name.trim(), layout: spec, ...meta }
       const result = await api.commitImport(staged.id, body)
+      clearImportDraft(staged.id)
       await queryClient.invalidateQueries()
       navigate(result.type === 'model' ? `/models/${result.slug}` : `/bundles/${result.slug}`)
     } catch (err) {
@@ -171,6 +191,7 @@ export default function ImportPage() {
 
   const discard = async () => {
     await api.deleteImport(staged.id)
+    clearImportDraft(staged.id)
     await queryClient.invalidateQueries({ queryKey: ['imports'] })
     navigate('/imports')
   }
@@ -274,7 +295,7 @@ export default function ImportPage() {
             options={bundles?.bundles ?? []}
             getOptionLabel={(b) => b.name}
             value={target}
-            onChange={(_, value) => setTarget(value)}
+            onChange={(_, value) => setTargetId(value?.id ?? null)}
             renderInput={(props) => <TextField {...props} label="Bundle" />}
             sx={{ mb: 2 }}
           />
