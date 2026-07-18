@@ -121,6 +121,14 @@ impl Configuration {
                     .context("--create-admin must be in the form username:password")
             })
             .transpose()?;
+        // Pin the store dir to an absolute path once, here: it locates blobs and
+        // builds paths handed to admins, and neither should depend on the
+        // process's working directory. Resolved lexically (the dir may not exist
+        // yet — it's created at startup), so `./store` becomes `<cwd>/store` and an
+        // already-absolute path is left as given. Everything downstream (blobstore,
+        // exports, tmp) inherits it.
+        let store_dir = std::path::absolute(&args.store_dir)
+            .with_context(|| format!("resolving store dir {}", args.store_dir.display()))?;
         Ok(Configuration {
             dev_mode: args.dev,
             anonymous: args.anonymous,
@@ -128,7 +136,7 @@ impl Configuration {
             static_dir: args.static_dir,
             bind_addr: args.bind_addr,
             database_url: args.database_url,
-            store_dir: args.store_dir,
+            store_dir,
             cookie_key,
             create_admin,
         })
