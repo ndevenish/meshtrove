@@ -166,6 +166,11 @@ export interface BundleResults {
   per_page: number
 }
 
+/// What happens to a bundle's member models when the bundle is deleted:
+/// `keep` unlinks them, `delete` deletes all, `delete_exclusive` deletes only the
+/// ones not also in another bundle.
+export type BundleMemberDisposition = 'keep' | 'delete' | 'delete_exclusive'
+
 /// One row in the unified browse (models + bundles mixed). `count` is
 /// variant_count for models, model_count for bundles.
 export interface BrowseItem {
@@ -475,8 +480,8 @@ export const api = {
   createBundle: (body: unknown) => request<BundleDetail>('/api/bundles', json(body)),
   updateBundle: (id: string, body: unknown) =>
     request<BundleDetail>(`/api/bundles/${id}`, { ...json(body), method: 'PUT' }),
-  deleteBundle: (id: string, deleteModels = false) =>
-    request<void>(`/api/bundles/${id}${deleteModels ? '?delete_models=true' : ''}`, {
+  deleteBundle: (id: string, members: BundleMemberDisposition = 'keep') =>
+    request<void>(`/api/bundles/${id}${members === 'keep' ? '' : `?members=${members}`}`, {
       method: 'DELETE',
     }),
   addModelToBundle: (bundleId: string, modelId: string) =>

@@ -254,7 +254,7 @@ export default function BundlePage() {
               </>
             )}
             {canEdit && editing && (
-              <Stack direction="row" spacing={1}>
+              <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
                 <Button
                   variant="contained"
                   disabled={saving}
@@ -275,6 +275,7 @@ export default function BundlePage() {
                   startIcon={<DeleteIcon />}
                   disabled={saving}
                   onClick={() => setDeleteOpen(true)}
+                  sx={{ whiteSpace: 'nowrap' }}
                 >
                   Delete bundle
                 </Button>

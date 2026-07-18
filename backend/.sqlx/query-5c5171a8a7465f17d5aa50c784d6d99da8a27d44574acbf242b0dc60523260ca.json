@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.id, m.created_by FROM models m\n             JOIN bundle_models bm ON bm.model_id = m.id\n             WHERE bm.bundle_id = $1\n               AND NOT EXISTS (\n                 SELECT 1 FROM bundle_models other\n                 WHERE other.model_id = m.id AND other.bundle_id <> $1\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "created_by",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "created_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5c5171a8a7465f17d5aa50c784d6d99da8a27d44574acbf242b0dc60523260ca"
+}

@@ -478,12 +478,25 @@ async fn update(
     fetch_detail(&state, id).await.map(Json)
 }
 
+/// What to do with the bundle's member models when the bundle is deleted.
+#[derive(Deserialize, ToSchema, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberDisposition {
+    /// Keep every member — they only lose their link to this bundle (the default,
+    /// and what a plain DELETE has always done).
+    #[default]
+    Keep,
+    /// Delete every member, including ones that also belong to another bundle.
+    Delete,
+    /// Delete only the members unique to this bundle; keep any that also belong to
+    /// another bundle (those just leave this one).
+    DeleteExclusive,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct RemoveParams {
-    /// Also delete the bundle's member models, not just unlink them. Off by
-    /// default: a member is a standalone model that may live in other bundles.
     #[serde(default)]
-    pub delete_models: bool,
+    pub members: MemberDisposition,
 }
 
 async fn remove(
@@ -495,29 +508,52 @@ async fn remove(
     user.require_can_edit(bundle_created_by(&state, id).await?)?;
 
     let mut tx = state.db.begin().await?;
-    if params.delete_models {
-        // Each member is a standalone model with its own owner, so gate every one
-        // on the caller's edit permission *before* deleting any — all-or-nothing,
-        // never a partial wipe. Deleting a model cascades to its variants, files,
-        // images and bundle_models links (in this and any other bundle it was in);
-        // blobs are content-addressed and swept by GC (docs/plan.md).
-        let members = sqlx::query!(
+
+    // The members this delete removes (as (id, created_by)), per the disposition.
+    // A member is a standalone model with its own owner, so each one deleted is
+    // gated on the caller's edit permission *before* any are removed — the delete
+    // is all-or-nothing, never a partial wipe. Deleting a model cascades to its
+    // variants, files, images and bundle_models links (in this and any other
+    // bundle); blobs are content-addressed and swept by GC (docs/plan.md).
+    let to_delete: Vec<(Uuid, Uuid)> = match params.members {
+        MemberDisposition::Keep => Vec::new(),
+        MemberDisposition::Delete => sqlx::query!(
             "SELECT m.id, m.created_by FROM models m
              JOIN bundle_models bm ON bm.model_id = m.id WHERE bm.bundle_id = $1",
             id,
         )
         .fetch_all(&mut *tx)
-        .await?;
-        for member in &members {
-            user.require_can_edit(member.created_by)?;
-        }
-        let ids: Vec<Uuid> = members.iter().map(|m| m.id).collect();
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.created_by))
+        .collect(),
+        MemberDisposition::DeleteExclusive => sqlx::query!(
+            "SELECT m.id, m.created_by FROM models m
+             JOIN bundle_models bm ON bm.model_id = m.id
+             WHERE bm.bundle_id = $1
+               AND NOT EXISTS (
+                 SELECT 1 FROM bundle_models other
+                 WHERE other.model_id = m.id AND other.bundle_id <> $1
+               )",
+            id,
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.created_by))
+        .collect(),
+    };
+    for (_, created_by) in &to_delete {
+        user.require_can_edit(*created_by)?;
+    }
+    if !to_delete.is_empty() {
+        let ids: Vec<Uuid> = to_delete.iter().map(|(id, _)| *id).collect();
         sqlx::query!("DELETE FROM models WHERE id = ANY($1::uuid[])", &ids)
             .execute(&mut *tx)
             .await?;
     }
-    // Any members not deleted just lose their bundle_models link (cascade); the
-    // bundle row itself goes either way.
+    // Members not deleted just lose their bundle_models link (cascade); the bundle
+    // row itself goes either way.
     sqlx::query!("DELETE FROM bundles WHERE id = $1", id)
         .execute(&mut *tx)
         .await?;
