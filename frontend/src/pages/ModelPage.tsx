@@ -33,6 +33,7 @@ import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/Mode
 import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
+import ModelDeleteDialog from '../components/ModelDeleteDialog'
 
 export default function ModelPage() {
   const { id } = useParams<{ id: string }>()
@@ -51,6 +52,7 @@ export default function ModelPage() {
   const [saving, setSaving] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
 
@@ -370,6 +372,15 @@ export default function ModelPage() {
                 <Button disabled={saving} onClick={() => setEditing(false)}>
                   Cancel
                 </Button>
+                <Button
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  disabled={saving}
+                  onClick={() => setDeleteOpen(true)}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Delete model
+                </Button>
               </Stack>
             )}
           </Stack>
@@ -488,6 +499,16 @@ export default function ModelPage() {
         onChange={refresh}
       />
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} model={model} />
+      <ModelDeleteDialog
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        model={model}
+        onDeleted={async () => {
+          setDeleteOpen(false)
+          await queryClient.invalidateQueries()
+          navigate('/')
+        }}
+      />
       <Snackbar
         open={!!toast}
         autoHideDuration={4000}
