@@ -7,7 +7,6 @@ import {
   Button,
   CircularProgress,
   Container,
-  Divider,
   LinearProgress,
   Paper,
   Snackbar,
@@ -236,7 +235,7 @@ function ImportWorkbench() {
   }
 
   return (
-    <Container maxWidth="md" sx={{ py: 3 }}>
+    <Container maxWidth="xl" sx={{ py: 3 }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 2 }}>
         <Box sx={{ flexGrow: 1 }}>
           <Typography variant="h5">Importing</Typography>
@@ -250,165 +249,191 @@ function ImportWorkbench() {
         </Button>
       </Stack>
 
-      {staged.unpacking && (
-        <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-          <Typography sx={{ mb: 1 }}>Unpacking the archive…</Typography>
-          <LinearProgress />
-        </Paper>
-      )}
+      {/* Two columns: the data-entry form (left) beside the file list (right), so
+          a layout pattern's captures preview next to the fields that set them.
+          Stacks to one column below md; on md+ the file list sticks in view while
+          the long form scrolls past it. */}
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: { xs: 'column', md: 'row' },
+          alignItems: 'flex-start',
+          gap: 3,
+        }}
+      >
+        <Box sx={{ width: '100%', flex: '1 1 0', minWidth: 0 }}>
+          {staged.unpacking && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+              <Typography sx={{ mb: 1 }}>Unpacking the archive…</Typography>
+              <LinearProgress />
+            </Paper>
+          )}
 
-      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-        <TextField
-          fullWidth
-          label="Name"
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value)
-            setNameEdited(true)
-          }}
-          helperText="Used for the model or bundle this becomes"
-          sx={{ mb: 2 }}
-        />
+          <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+            <TextField
+              fullWidth
+              label="Name"
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value)
+                setNameEdited(true)
+              }}
+              helperText="Used for the model or bundle this becomes"
+              sx={{ mb: 2 }}
+            />
 
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          What is this?
-        </Typography>
-        <ToggleButtonGroup
-          exclusive
-          value={dest}
-          onChange={(_, value) => value && setDest(value as Destination)}
-          sx={{ mb: 2, flexWrap: 'wrap' }}
-        >
-          <ToggleButton value="new_model" sx={{ gap: 1 }}>
-            <ViewInArIcon fontSize="small" /> One model
-          </ToggleButton>
-          <ToggleButton value="new_bundle" sx={{ gap: 1 }}>
-            <Inventory2Icon fontSize="small" /> A new bundle
-          </ToggleButton>
-          <ToggleButton value="bundle" sx={{ gap: 1 }}>
-            <Inventory2Icon fontSize="small" /> Add to an existing bundle
-          </ToggleButton>
-        </ToggleButtonGroup>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              What is this?
+            </Typography>
+            <ToggleButtonGroup
+              exclusive
+              value={dest}
+              onChange={(_, value) => value && setDest(value as Destination)}
+              sx={{ mb: 2, flexWrap: 'wrap' }}
+            >
+              <ToggleButton value="new_model" sx={{ gap: 1 }}>
+                <ViewInArIcon fontSize="small" /> One model
+              </ToggleButton>
+              <ToggleButton value="new_bundle" sx={{ gap: 1 }}>
+                <Inventory2Icon fontSize="small" /> A new bundle
+              </ToggleButton>
+              <ToggleButton value="bundle" sx={{ gap: 1 }}>
+                <Inventory2Icon fontSize="small" /> Add to an existing bundle
+              </ToggleButton>
+            </ToggleButtonGroup>
 
-        {dest === 'bundle' && (
-          <Autocomplete
-            options={bundles?.bundles ?? []}
-            getOptionLabel={(b) => b.name}
-            value={target}
-            onChange={(_, value) => setTargetId(value?.id ?? null)}
-            renderInput={(props) => <TextField {...props} label="Bundle" />}
-            sx={{ mb: 2 }}
-          />
-        )}
-
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          Details (optional)
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-          {dest === 'new_model'
-            ? 'Recorded on the model this becomes.'
-            : 'Recorded on the bundle and on every model carved out of it — a box set is bought once.'}
-        </Typography>
-        <Stack spacing={2} sx={{ mb: 2.5 }}>
-          <Autocomplete
-            freeSolo
-            options={(creators ?? []).map((c) => c.name)}
-            value={creatorName}
-            onInputChange={(_, value) => setCreatorName(value)}
-            renderInput={(props) => (
-              <TextField {...props} size="small" label="Creator (author / company / site)" />
+            {dest === 'bundle' && (
+              <Autocomplete
+                options={bundles?.bundles ?? []}
+                getOptionLabel={(b) => b.name}
+                value={target}
+                onChange={(_, value) => setTargetId(value?.id ?? null)}
+                renderInput={(props) => <TextField {...props} label="Bundle" />}
+                sx={{ mb: 2 }}
+              />
             )}
-          />
-          <Autocomplete
-            multiple
-            freeSolo
-            options={(allTags ?? []).map((t) => t.name)}
-            value={tags}
-            onChange={(_, value) => setTags(value)}
-            renderInput={(props) => (
-              <TextField {...props} size="small" label="Tags" placeholder="add tag…" />
+
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Details (optional)
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              {dest === 'new_model'
+                ? 'Recorded on the model this becomes.'
+                : 'Recorded on the bundle and on every model carved out of it — a box set is bought once.'}
+            </Typography>
+            <Stack spacing={2} sx={{ mb: 2.5 }}>
+              <Autocomplete
+                freeSolo
+                options={(creators ?? []).map((c) => c.name)}
+                value={creatorName}
+                onInputChange={(_, value) => setCreatorName(value)}
+                renderInput={(props) => (
+                  <TextField {...props} size="small" label="Creator (author / company / site)" />
+                )}
+              />
+              <Autocomplete
+                multiple
+                freeSolo
+                options={(allTags ?? []).map((t) => t.name)}
+                value={tags}
+                onChange={(_, value) => setTags(value)}
+                renderInput={(props) => (
+                  <TextField {...props} size="small" label="Tags" placeholder="add tag…" />
+                )}
+              />
+              <TextField
+                size="small"
+                label="Source URL"
+                value={sourceUrl}
+                onChange={(e) => setSourceUrl(e.target.value)}
+              />
+              <TextField
+                size="small"
+                label="Description (markdown)"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                multiline
+                minRows={3}
+              />
+            </Stack>
+
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Carve it up? (optional)
+            </Typography>
+            <ImportLayoutPanel
+              importId={staged.id}
+              fileCount={(files ?? []).filter((f) => f.kind !== 'archive').length}
+              unpacking={staged.unpacking}
+              target={dest === 'new_model' ? 'model' : 'bundle'}
+              bundleId={dest === 'bundle' ? target?.id : undefined}
+              onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
+              onMergeTargets={setMergeTargets}
+            />
+
+            {dest === 'new_model' && layout && layout.plan.model_names.length > 1 && (
+              <Alert
+                severity="info"
+                sx={{ mb: 2 }}
+                action={
+                  <Button size="small" onClick={() => setDest('new_bundle')}>
+                    Make it a bundle
+                  </Button>
+                }
+              >
+                This layout finds {layout.plan.model_names.length} different model names — it looks
+                like a collection.
+              </Alert>
             )}
-          />
-          <TextField
-            size="small"
-            label="Source URL"
-            value={sourceUrl}
-            onChange={(e) => setSourceUrl(e.target.value)}
-          />
-          <TextField
-            size="small"
-            label="Description (markdown)"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            multiline
-            minRows={3}
-          />
-        </Stack>
 
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          Carve it up? (optional)
-        </Typography>
-        <ImportLayoutPanel
-          importId={staged.id}
-          fileCount={(files ?? []).filter((f) => f.kind !== 'archive').length}
-          unpacking={staged.unpacking}
-          target={dest === 'new_model' ? 'model' : 'bundle'}
-          bundleId={dest === 'bundle' ? target?.id : undefined}
-          onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
-          onMergeTargets={setMergeTargets}
-        />
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              {layout
+                ? dest === 'new_model'
+                  ? `Matched files are carved into ${layout.plan.models[0]?.variants.length ?? 0} variant(s); the rest land in the model’s unsorted list.`
+                  : `Matched files are carved into ${layout.plan.models.length} member model(s) with their variants; the rest land in the bundle’s unsorted list.`
+                : dest === 'new_model'
+                  ? 'Files land in the model’s unsorted list; sort them into variants on the model page.'
+                  : 'Files land in the bundle’s unsorted list; carve them into member models on the bundle page.'}
+            </Typography>
 
-        {dest === 'new_model' && layout && layout.plan.model_names.length > 1 && (
-          <Alert
-            severity="info"
-            sx={{ mb: 2 }}
-            action={
-              <Button size="small" onClick={() => setDest('new_bundle')}>
-                Make it a bundle
+            <Stack direction="row" spacing={1}>
+              <Button
+                variant="contained"
+                size="large"
+                onClick={commit}
+                disabled={staged.unpacking || committing || staged.file_count === 0}
+                startIcon={committing ? <CircularProgress size={16} color="inherit" /> : undefined}
+              >
+                {staged.unpacking ? 'Waiting for unpack…' : 'Import'}
               </Button>
-            }
-          >
-            This layout finds {layout.plan.model_names.length} different model names — it looks like
-            a collection.
-          </Alert>
-        )}
+            </Stack>
+          </Paper>
+        </Box>
 
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          {layout
-            ? dest === 'new_model'
-              ? `Matched files are carved into ${layout.plan.models[0]?.variants.length ?? 0} variant(s); the rest land in the model’s unsorted list.`
-              : `Matched files are carved into ${layout.plan.models.length} member model(s) with their variants; the rest land in the bundle’s unsorted list.`
-            : dest === 'new_model'
-              ? 'Files land in the model’s unsorted list; sort them into variants on the model page.'
-              : 'Files land in the bundle’s unsorted list; carve them into member models on the bundle page.'}
-        </Typography>
-
-        <Stack direction="row" spacing={1}>
-          <Button
-            variant="contained"
-            size="large"
-            onClick={commit}
-            disabled={staged.unpacking || committing || staged.file_count === 0}
-            startIcon={committing ? <CircularProgress size={16} color="inherit" /> : undefined}
-          >
-            {staged.unpacking ? 'Waiting for unpack…' : 'Import'}
-          </Button>
-        </Stack>
-      </Paper>
-
-      <Divider sx={{ mb: 2 }} />
-      <Typography variant="h6" sx={{ mb: 1 }}>
-        Contents
-      </Typography>
-      {layout ? (
-        <AnnotatedFileList
-          files={files ?? []}
-          annotations={layout.plan.annotations}
-          roles={layout.spec.roles}
-        />
-      ) : (
-        <FileTree files={files ?? []} />
-      )}
+        <Box
+          sx={{
+            width: '100%',
+            flex: '1 1 0',
+            minWidth: 0,
+            position: { md: 'sticky' },
+            top: { md: 88 },
+            maxHeight: { md: 'calc(100vh - 104px)' },
+            overflowY: { md: 'auto' },
+          }}
+        >
+          <Typography variant="h6" sx={{ mb: 1 }}>
+            Contents
+          </Typography>
+          {layout ? (
+            <AnnotatedFileList
+              files={files ?? []}
+              annotations={layout.plan.annotations}
+              roles={layout.spec.roles}
+            />
+          ) : (
+            <FileTree files={files ?? []} />
+          )}
+        </Box>
+      </Box>
 
       <Snackbar
         open={!!error}
