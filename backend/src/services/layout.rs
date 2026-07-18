@@ -258,14 +258,20 @@ pub fn analyze(
 
     let mut roles: Vec<Role> = vec![Role::Ignore; group_count];
     for (key, role) in &spec.roles {
-        let index: usize = key
-            .parse()
+        // A saved layout carries a role per group it was built for, but an
+        // in-progress edit may have cut the pattern down to fewer groups. Skip a
+        // role whose group the current pattern no longer has — the carve simply
+        // uses the groups that exist — rather than failing the whole plan, which
+        // would drop the preview back to the plain file tree the moment you delete
+        // a group. (The panel keeps those stale assignments, greyed out, and they
+        // reactivate when the group returns.)
+        if let Some(index) = key
+            .parse::<usize>()
             .ok()
             .filter(|i| (1..group_count).contains(i))
-            .ok_or_else(|| {
-                ApiError::BadRequest(format!("no capture group {key} in the pattern"))
-            })?;
-        roles[index] = *role;
+        {
+            roles[index] = *role;
+        }
     }
     if roles.iter().filter(|r| **r == Role::ModelName).count() > 1 {
         return Err(ApiError::BadRequest(
@@ -596,6 +602,35 @@ mod tests {
     }
 
     #[test]
+    fn roles_for_absent_groups_are_ignored_not_an_error() {
+        // Editing a saved layout down to fewer capture groups must still plan, so
+        // the UI stays in matching mode (and greys the now-absent roles) instead
+        // of erroring back to the plain file tree. Here the roles map still names
+        // groups 3 and 4, but the pattern now has only two.
+        let spec = LayoutSpec {
+            pattern: r"[^/]+/([^/]+)/([^/]+)/[^/]+\.stl".into(),
+            roles: HashMap::from([
+                ("1".into(), Role::ModelTag),
+                ("2".into(), Role::ModelName),
+                ("3".into(), Role::VariantTag), // no such group any more
+                ("4".into(), Role::VariantTag), // ditto
+            ]),
+            value_map: HashMap::new(),
+            flatten: false,
+        };
+        let files = vec![file(1, "DownloadAll/1 - Heroes/Gold", "Gold.stl")];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab())
+            .expect("fewer groups than the roles map should not error");
+        assert_eq!(
+            plan.groups.len(),
+            2,
+            "only the two real groups are reported"
+        );
+        let gold = plan.models.iter().find(|m| m.name == "Gold").expect("gold");
+        assert_eq!(gold.tags, vec!["1 - Heroes"]);
+    }
+
+    #[test]
     fn identity_is_resolved_tags_not_raw_captures() {
         // Supported_LYCHEE and Supported_Lychee fold to one mapped value; the
         // two files land on the same variant.
@@ -737,9 +772,12 @@ mod tests {
         spec.pattern = "(".into();
         assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_err());
 
+        // A role for a group the pattern doesn't have is NOT rejected — it is
+        // ignored, so editing a saved layout down to fewer groups still plans (see
+        // roles_for_absent_groups_are_ignored_not_an_error).
         let mut spec = loot_spec();
         spec.roles.insert("9".into(), Role::ModelTag);
-        assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_err());
+        assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_ok());
 
         let mut spec = loot_spec();
         spec.roles.insert("1".into(), Role::ModelName); // second model-name group
