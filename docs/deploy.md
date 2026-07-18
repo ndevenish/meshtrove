@@ -28,11 +28,15 @@ Edit `.env.prod` and set at least:
   Keep it stable: if it changes, everyone is logged out.
 - `MESHTROVE_CREATE_ADMIN` — `username:password` for the first admin.
 
-Then build and start:
+Then start it:
 
 ```bash
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 ```
+
+This pulls the prebuilt `ghcr.io/ndevenish/meshtrove:latest` image — nothing is
+built locally. `pull_policy: always` means every `up` re-pulls, so a redeploy
+picks up the newest published image.
 
 The app is now on <http://localhost:3000> (change the host port with
 `MESHTROVE_PORT`). Log in with the admin credentials you set, then **change the
@@ -45,7 +49,7 @@ Useful follow-ups:
 ```bash
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f app
 docker compose --env-file .env.prod -f docker-compose.prod.yml down      # stop
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build   # redeploy after a code change
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d      # redeploy on the latest image
 ```
 
 Data lives in two named volumes and survives `down`/`up`:

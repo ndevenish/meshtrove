@@ -1,8 +1,10 @@
 # Production deployment: Postgres + the MeshTrove app, both persisted to named
 # volumes. This is separate from docker-compose.yml (dev, Postgres only).
+# The app runs the prebuilt ghcr.io/ndevenish/meshtrove:latest image, re-pulled
+# on every `up`.
 #
 #   cp .env.prod.example .env.prod    # then fill it in
-#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 #
 # See docs/deploy.md for the full walkthrough.
 
@@ -26,11 +28,8 @@ services:
     restart: unless-stopped
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        APP_VERSION: ${APP_VERSION:-docker}
+    image: ghcr.io/ndevenish/meshtrove:latest
+    pull_policy: always
     depends_on:
       postgres:
         condition: service_healthy
