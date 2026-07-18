@@ -11,11 +11,15 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::{QueryBuilder, Row};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::models::{
+    parse_csv, push_model_tag_filters, push_text_filter, push_variant_tag_filters,
+};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -37,7 +41,17 @@ pub struct VariantTag {
 
 #[derive(Deserialize)]
 pub struct ListQuery {
+    /// Name substring, for autocomplete pickers.
     pub q: Option<String>,
+    /// The browse page's current selection. When present, `variant_count`
+    /// switches from a global per-variant tally to a co-occurrence count: how
+    /// many *models* would still match if this variant tag were added to the
+    /// selection (one variant carrying the whole set, as the browse filter
+    /// requires). With no selection the plain per-variant count is returned, so
+    /// autocomplete callers are unaffected.
+    pub sel_tags: Option<String>,
+    pub sel_vtags: Option<String>,
+    pub sel_q: Option<String>,
 }
 
 async fn list(
@@ -45,19 +59,50 @@ async fn list(
     _user: User,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<VariantTag>>, ApiError> {
-    let q = query.q.unwrap_or_default();
-    let tags = sqlx::query_as!(
-        VariantTag,
-        r#"SELECT t.id, t.name as "name!: String", t.description,
-                  (SELECT count(*) FROM variant_tag_assignments a WHERE a.tag_id = t.id)
-                      as "variant_count!"
-           FROM variant_tags t
-           WHERE ($1 = '' OR t.name ILIKE '%' || $1 || '%')
-           ORDER BY "variant_count!" DESC, t.name"#,
-        q,
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let name = query.q.unwrap_or_default();
+    let sel_tags = parse_csv(&query.sel_tags.unwrap_or_default());
+    let sel_vtags = parse_csv(&query.sel_vtags.unwrap_or_default());
+    let sel_q = query.sel_q.unwrap_or_default().trim().to_string();
+    let has_selection = !sel_tags.is_empty() || !sel_vtags.is_empty() || !sel_q.is_empty();
+
+    let mut qb = QueryBuilder::new("SELECT t.id, t.name::text AS name, t.description, ");
+    if has_selection {
+        // Count models that would survive adding this candidate `t`: one variant
+        // must carry the candidate *and* every already-selected variant tag.
+        qb.push("(SELECT count(*) FROM models m WHERE TRUE");
+        push_text_filter(&mut qb, &sel_q);
+        push_model_tag_filters(&mut qb, &sel_tags);
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM model_variants v WHERE v.model_id = m.id \
+             AND EXISTS (SELECT 1 FROM variant_tag_assignments ca \
+             WHERE ca.variant_id = v.id AND ca.tag_id = t.id)",
+        );
+        push_variant_tag_filters(&mut qb, &sel_vtags);
+        qb.push(")) AS variant_count ");
+    } else {
+        qb.push(
+            "(SELECT count(*) FROM variant_tag_assignments a WHERE a.tag_id = t.id) \
+             AS variant_count ",
+        );
+    }
+    qb.push("FROM variant_tags t WHERE (")
+        .push_bind(name.clone())
+        .push(" = '' OR t.name ILIKE '%' || ")
+        .push_bind(name.clone())
+        .push(" || '%') ORDER BY variant_count DESC, t.name");
+
+    let rows = qb.build().fetch_all(&state.db).await?;
+    let tags = rows
+        .into_iter()
+        .map(|r| -> Result<VariantTag, sqlx::Error> {
+            Ok(VariantTag {
+                id: r.try_get("id")?,
+                name: r.try_get("name")?,
+                description: r.try_get("description")?,
+                variant_count: r.try_get("variant_count")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(tags))
 }
 

@@ -492,6 +492,25 @@ export function uploadWithProgress<T>(
   })
 }
 
+/// The browse page's current selection, threaded into the tag/variant-tag
+/// listings so their counts read as "how many models match this selection *and*
+/// this tag" — the numbers filter down as you narrow. Omit it (the autocomplete
+/// pickers do) for plain global counts.
+export interface TagFilter {
+  tags?: string[]
+  vtags?: string[]
+  q?: string
+}
+
+const tagSelectionQuery = (sel: TagFilter): string => {
+  const p = new URLSearchParams()
+  if (sel.tags?.length) p.set('sel_tags', sel.tags.join(','))
+  if (sel.vtags?.length) p.set('sel_vtags', sel.vtags.join(','))
+  if (sel.q?.trim()) p.set('sel_q', sel.q.trim())
+  const qs = p.toString()
+  return qs ? `?${qs}` : ''
+}
+
 export const api = {
   me: () => request<User>('/api/me'),
   login: (username: string, password: string) =>
@@ -619,8 +638,9 @@ export const api = {
   updateCreator: (id: string, body: unknown) =>
     request<Creator>(`/api/creators/${id}`, { ...json(body), method: 'PUT' }),
 
-  tags: (q = '') => request<Tag[]>(`/api/tags?q=${encodeURIComponent(q)}`),
-  variantTags: (q = '') => request<VariantTag[]>(`/api/variant-tags?q=${encodeURIComponent(q)}`),
+  tags: (sel: TagFilter = {}) => request<Tag[]>(`/api/tags${tagSelectionQuery(sel)}`),
+  variantTags: (sel: TagFilter = {}) =>
+    request<VariantTag[]>(`/api/variant-tags${tagSelectionQuery(sel)}`),
 
   jobs: (status = '') => request<Job[]>(`/api/jobs?status=${status}`),
   retryJob: (id: number) => request<void>(`/api/jobs/${id}/retry`, { method: 'POST' }),

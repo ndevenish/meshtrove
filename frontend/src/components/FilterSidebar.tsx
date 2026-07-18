@@ -10,14 +10,23 @@ import { api } from '../api'
 /// will not match a model that has those tags on different variants.
 export default function FilterSidebar() {
   const [params, setParams] = useSearchParams()
-  const { data: tags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
-  const { data: variantTags } = useQuery({
-    queryKey: ['variant-tags'],
-    queryFn: () => api.variantTags(),
-  })
 
   const activeTags = (params.get('tags') ?? '').split(',').filter(Boolean)
   const activeVariantTags = (params.get('vtags') ?? '').split(',').filter(Boolean)
+  const search = params.get('q') ?? ''
+
+  // Counts reflect the current selection: each chip shows how many models would
+  // remain if it were added, so narrowing filters the numbers down. The
+  // selection is in the query key, so the clouds refetch as chips are toggled.
+  const selection = { tags: activeTags, vtags: activeVariantTags, q: search }
+  const { data: tags } = useQuery({
+    queryKey: ['tags', activeTags, activeVariantTags, search],
+    queryFn: () => api.tags(selection),
+  })
+  const { data: variantTags } = useQuery({
+    queryKey: ['variant-tags', activeTags, activeVariantTags, search],
+    queryFn: () => api.variantTags(selection),
+  })
 
   const update = (mutate: (next: URLSearchParams) => void) => {
     const next = new URLSearchParams(params)

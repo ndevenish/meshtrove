@@ -90,16 +90,50 @@ pub fn parse_csv(value: &str) -> Vec<String> {
 
 /// Require one variant of `v` to carry every named variant tag at once. A model
 /// with a 32mm+supported variant and a 75mm+unsupported one does NOT match
-/// `32mm + unsupported`.
-fn push_variant_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, vtags: &[String]) {
+/// `32mm + unsupported`. Called with the `model_variants v` correlation already
+/// open, so it appends `AND EXISTS (…)` clauses tied to that same `v.id`. The
+/// join alias is `ft` (not `t`) so callers can reference their own outer `t`.
+pub fn push_variant_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, vtags: &[String]) {
     for tag in vtags {
         qb.push(
             " AND EXISTS (SELECT 1 FROM variant_tag_assignments a
-                          JOIN variant_tags t ON t.id = a.tag_id
-                         WHERE a.variant_id = v.id AND t.name = ",
+                          JOIN variant_tags ft ON ft.id = a.tag_id
+                         WHERE a.variant_id = v.id AND ft.name = ",
         )
         .push_bind(tag.clone())
         .push(")");
+    }
+}
+
+/// Full-text + fuzzy-name predicate (alias `m`).
+pub fn push_text_filter(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str) {
+    if !q.is_empty() {
+        qb.push(" AND (m.search @@ websearch_to_tsquery('english', ")
+            .push_bind(q.to_string())
+            .push(") OR m.name ILIKE '%' || ")
+            .push_bind(q.to_string())
+            .push(" || '%')");
+    }
+}
+
+/// Require the model (alias `m`) to carry every named tag. The join alias is
+/// `ft` so a caller correlating to an outer `t` (e.g. the tag-cloud count) is
+/// not shadowed.
+pub fn push_model_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, tags: &[String]) {
+    for tag in tags {
+        qb.push(" AND EXISTS (SELECT 1 FROM model_tags mt JOIN tags ft ON ft.id = mt.tag_id WHERE mt.model_id = m.id AND ft.name = ")
+            .push_bind(tag.clone())
+            .push(")");
+    }
+}
+
+/// Require the model (alias `m`) to have one variant carrying every named
+/// variant tag at once.
+pub fn push_variant_group(qb: &mut QueryBuilder<sqlx::Postgres>, vtags: &[String]) {
+    if !vtags.is_empty() {
+        qb.push(" AND EXISTS (SELECT 1 FROM model_variants v WHERE v.model_id = m.id");
+        push_variant_tag_filters(qb, vtags);
+        qb.push(")");
     }
 }
 
@@ -110,23 +144,9 @@ pub fn push_filters(
     tags: &[String],
     vtags: &[String],
 ) {
-    if !q.is_empty() {
-        qb.push(" AND (m.search @@ websearch_to_tsquery('english', ")
-            .push_bind(q.to_string())
-            .push(") OR m.name ILIKE '%' || ")
-            .push_bind(q.to_string())
-            .push(" || '%')");
-    }
-    for tag in tags {
-        qb.push(" AND EXISTS (SELECT 1 FROM model_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id AND t.name = ")
-            .push_bind(tag.clone())
-            .push(")");
-    }
-    if !vtags.is_empty() {
-        qb.push(" AND EXISTS (SELECT 1 FROM model_variants v WHERE v.model_id = m.id");
-        push_variant_tag_filters(qb, vtags);
-        qb.push(")");
-    }
+    push_text_filter(qb, q);
+    push_model_tag_filters(qb, tags);
+    push_variant_group(qb, vtags);
 }
 
 async fn search(
