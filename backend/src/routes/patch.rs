@@ -1066,6 +1066,34 @@ async fn insert_image(
     Ok(inserted.rows_affected() > 0)
 }
 
+/// Scraped metadata arrives HTML-encoded — a title with an en dash comes through
+/// as `&#8211;`, an ampersand as `&amp;`. Decode entities on the way in so stored
+/// names, descriptions, creators, and tags read as text rather than markup. Image
+/// references are left untouched: they must match zip entry names byte for byte.
+fn decode_entities(patch: &mut Patch) {
+    fn dec(s: &mut Option<String>) {
+        if let Some(v) = s {
+            *v = html_escape::decode_html_entities(v).into_owned();
+        }
+    }
+    fn dec_all(v: &mut [String]) {
+        for s in v {
+            *s = html_escape::decode_html_entities(s).into_owned();
+        }
+    }
+    dec(&mut patch.source.url);
+    dec(&mut patch.bundle.name);
+    dec(&mut patch.bundle.creator);
+    dec(&mut patch.bundle.description_md);
+    for m in &mut patch.models {
+        dec(&mut m.name);
+        dec(&mut m.category);
+        dec_all(&mut m.tags);
+        dec(&mut m.match_hint.name);
+        dec_all(&mut m.match_hint.aliases);
+    }
+}
+
 async fn read_archive_from_bytes(bytes: Vec<u8>) -> Result<Archive, ApiError> {
     tokio::task::spawn_blocking(move || {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
@@ -1097,8 +1125,9 @@ async fn read_archive_from_bytes(bytes: Vec<u8>) -> Result<Archive, ApiError> {
         }
         let patch_json =
             patch_json.ok_or_else(|| ApiError::BadRequest("no patch.json in the zip".into()))?;
-        let patch: Patch = serde_json::from_slice(&patch_json)
+        let mut patch: Patch = serde_json::from_slice(&patch_json)
             .map_err(|e| ApiError::BadRequest(format!("bad patch.json: {e}")))?;
+        decode_entities(&mut patch);
         Ok(Archive { patch, images })
     })
     .await
@@ -1284,5 +1313,49 @@ mod tests {
             resolve_one(pm("Werejackal Priest Buried Tomb", None), &members),
             vec![members[0].id]
         );
+    }
+
+    #[test]
+    fn decode_entities_decodes_names_tags_and_description() {
+        let mut patch = Patch {
+            source: PatchSource {
+                url: Some("https://x.test/?a=1&amp;b=2".into()),
+            },
+            bundle: PatchBundle {
+                name: Some("Tomb &#8211; Kickstarter".into()),
+                creator: Some("Bob &amp; Co".into()),
+                description_md: Some("Isn&#39;t it grand".into()),
+                images: vec!["cover&#8211;.png".into()],
+            },
+            models: vec![PatchModel {
+                match_hint: MatchHint {
+                    name: Some("Crocodile &amp; Camel".into()),
+                    aliases: vec!["Croc &#8211; v2".into()],
+                },
+                name: Some("Crocodile &#8211; Buried".into()),
+                tags: vec!["large &amp; scaly".into()],
+                image: Some("model&#8211;.png".into()),
+                category: Some("Enemies &amp; Foes".into()),
+            }],
+        };
+        decode_entities(&mut patch);
+        assert_eq!(patch.source.url.as_deref(), Some("https://x.test/?a=1&b=2"));
+        assert_eq!(patch.bundle.name.as_deref(), Some("Tomb – Kickstarter"));
+        assert_eq!(patch.bundle.creator.as_deref(), Some("Bob & Co"));
+        assert_eq!(
+            patch.bundle.description_md.as_deref(),
+            Some("Isn't it grand")
+        );
+        assert_eq!(patch.models[0].name.as_deref(), Some("Crocodile – Buried"));
+        assert_eq!(patch.models[0].tags, vec!["large & scaly"]);
+        assert_eq!(patch.models[0].category.as_deref(), Some("Enemies & Foes"));
+        assert_eq!(
+            patch.models[0].match_hint.name.as_deref(),
+            Some("Crocodile & Camel")
+        );
+        assert_eq!(patch.models[0].match_hint.aliases, vec!["Croc – v2"]);
+        // Image references stay byte-for-byte so they still match zip entries.
+        assert_eq!(patch.bundle.images, vec!["cover&#8211;.png"]);
+        assert_eq!(patch.models[0].image.as_deref(), Some("model&#8211;.png"));
     }
 }
