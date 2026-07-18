@@ -151,6 +151,10 @@ function EntryRow({
   // An entry is not consumed by a pickup, so nothing stops a second one but this
   // — and a second pickup of a big folder is a long, silent waste of disk.
   const disabled = busy || entry.importing || entry.file_count === 0
+  // Imported before is a warning, not a bar: re-importing is legitimate (a failed
+  // commit, a folder refilled with more files). So the button stays live and only
+  // steps back to secondary, with the date next to it.
+  const done = entry.imported_at !== null
   return (
     <Stack
       direction="row"
@@ -164,13 +168,25 @@ function EntryRow({
         </Typography>
         <Typography variant="body2" color="text.secondary">
           {entry.file_count} file{entry.file_count === 1 ? '' : 's'} · {formatBytes(entry.size)}
+          {done && ` · imported ${new Date(entry.imported_at!).toLocaleDateString()}`}
         </Typography>
       </Box>
       {entry.importing && (
         <Chip size="small" icon={<CircularProgress size={12} sx={{ ml: 1 }} />} label="Importing" />
       )}
-      <Button variant="contained" onClick={onImport} disabled={disabled}>
-        {busy ? 'Starting…' : 'Import'}
+      {/* Changed beats imported: the name has been here before, the contents
+          haven't, so "already done" would be the wrong thing to read. */}
+      {!entry.importing && entry.changed_since_import && (
+        <Tooltip title="Imported before, but its files have changed since">
+          <Chip size="small" color="warning" variant="outlined" label="Changed" />
+        </Tooltip>
+      )}
+      <Button
+        variant={done && !entry.changed_since_import ? 'outlined' : 'contained'}
+        onClick={onImport}
+        disabled={disabled}
+      >
+        {busy ? 'Starting…' : done ? 'Import again' : 'Import'}
       </Button>
     </Stack>
   )

@@ -221,6 +221,12 @@ export interface DropboxEntry {
   modified: string | null
   /** a pickup of this entry is already queued or running */
   importing: boolean
+  /** when it was last picked up — a pickup leaves the dropbox untouched, so
+      without this an imported entry looks identical to a new one */
+  imported_at: string | null
+  /** imported before, but its file count or size has changed since: same name,
+      different contents */
+  changed_since_import: boolean
 }
 
 export interface DropboxListing {

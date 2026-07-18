@@ -44,6 +44,16 @@ pub struct DropboxEntry {
     /// dropbox after a pickup, so without this the button invites you to import
     /// the same 40GB twice.
     pub importing: bool,
+    /// When this entry was last picked up successfully. A pickup never modifies
+    /// the dropbox, so without this an entry that is already in the library looks
+    /// exactly like one that has never been touched — and the only thing standing
+    /// between you and importing it twice is remembering.
+    pub imported_at: Option<DateTime<Utc>>,
+    /// It has been picked up, but its file count or total size no longer matches
+    /// what that pickup took: same name, different contents. The history is keyed
+    /// on the name (see `list`), so this is what keeps a refilled folder from
+    /// reading as already-done.
+    pub changed_since_import: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -89,6 +99,8 @@ async fn list(State(state): State<AppState>, user: User) -> Result<Json<DropboxL
                 size: files.iter().map(|f| f.size as i64).sum(),
                 modified: meta.modified().ok().map(DateTime::<Utc>::from),
                 importing: false,
+                imported_at: None,
+                changed_since_import: false,
             });
         }
         out.sort_by_key(|e| e.name.to_lowercase());
@@ -106,8 +118,38 @@ async fn list(State(state): State<AppState>, user: User) -> Result<Json<DropboxL
     )
     .fetch_all(&state.db)
     .await?;
+
+    // …and which have been picked up before. Jobs are never pruned, so a
+    // succeeded `dropbox_import` is a durable record of "this was taken, then".
+    // It is keyed on the entry's *name*, which is all a job payload holds — so
+    // the count and size that pickup actually took are stamped alongside it
+    // (see `pick_up`) and compared below. Refill a folder under the same name and
+    // it reads as changed rather than as already-imported.
+    let history = sqlx::query!(
+        r#"SELECT DISTINCT ON (payload->>'entry')
+                  payload->>'entry' as "entry!",
+                  finished_at,
+                  (payload->>'file_count')::bigint as recorded_count,
+                  (payload->>'size')::bigint as recorded_size
+           FROM jobs
+           WHERE kind = 'dropbox_import' AND status = 'succeeded'
+             AND payload->>'entry' IS NOT NULL
+           ORDER BY payload->>'entry', finished_at DESC"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
     for entry in &mut entries {
         entry.importing = in_flight.contains(&entry.name);
+        if let Some(past) = history.iter().find(|h| h.entry == entry.name) {
+            entry.imported_at = past.finished_at;
+            // A pickup from before the count/size were recorded can't be
+            // compared — say nothing rather than guess at "changed".
+            entry.changed_since_import = match (past.recorded_count, past.recorded_size) {
+                (Some(count), Some(size)) => count != entry.file_count || size != entry.size,
+                _ => false,
+            };
+        }
     }
 
     Ok(Json(DropboxListing {
@@ -146,11 +188,35 @@ async fn pick_up(
         .trim_end_matches(".zip")
         .to_string();
 
+    // Scan before queueing anything. It costs a stat walk — nothing next to the
+    // hashing the job itself does — and buys two things: an empty or unreadable
+    // entry is a 400 here rather than a job that fails a second later, and the
+    // count and size recorded in the payload are the ones as of this moment,
+    // which is what `list` compares against to spot a folder refilled under a
+    // name that has already been imported.
+    let scan_path = path.clone();
+    let staged = tokio::task::spawn_blocking(move || dropbox::scan(&scan_path))
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::Error::new(e)))?
+        .map_err(ApiError::Internal)?;
+    if staged.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "{entry:?} holds no files to import"
+        )));
+    }
+    let file_count = staged.len() as i64;
+    let size: i64 = staged.iter().map(|f| f.size as i64).sum();
+
     let import = imports::create_import(&state, &user, &name).await?;
     crate::services::jobs::enqueue(
         &state.db,
         "dropbox_import",
-        serde_json::json!({ "import_id": import.id, "entry": entry }),
+        serde_json::json!({
+            "import_id": import.id,
+            "entry": entry,
+            "file_count": file_count,
+            "size": size,
+        }),
     )
     .await?;
     // Re-read after queueing, so the summary already carries `unpacking` — an
