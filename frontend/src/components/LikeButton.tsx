@@ -10,8 +10,13 @@ import { LIKE_COLOR } from '../theme'
 /// The heart in a card's foot: one control carrying both what *you* think and
 /// what everyone thinks. The count sits inside the button rather than beside it
 /// so clicking the number does what clicking a number next to a heart looks
-/// like it should. Hidden at zero — a row of honest zeroes tells nobody
-/// anything.
+/// like it should, and *before* it, so the heart stays put on the card's right
+/// edge whether or not there is a number to show. Hidden at zero — a row of
+/// honest zeroes tells nobody anything.
+///
+/// The negative right margin cancels the button's own padding: without it the
+/// gap to the card's edge is the padding plus the foot row's, and the heart
+/// floats visibly further from the right edge than from the bottom one.
 ///
 /// Lives outside the card's CardActionArea: a <button> nested in an <a> is
 /// invalid HTML, and the anchor would swallow the click.
@@ -47,11 +52,11 @@ export default function LikeButton({
   if (!user) {
     if (likeCount === 0) return null
     return (
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 0.5 }}>
-        <FavoriteIcon sx={{ fontSize: 18, color: 'text.disabled' }} />
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, py: 0.5, pr: 0.25 }}>
         <Typography variant="caption" color="text.secondary">
           {likeCount}
         </Typography>
+        <FavoriteIcon sx={{ fontSize: 18, color: 'text.disabled' }} />
       </Box>
     )
   }
@@ -71,17 +76,18 @@ export default function LikeButton({
         sx={{
           borderRadius: 5,
           gap: 0.5,
-          px: count > 0 ? 1 : undefined,
+          px: 1,
+          mr: -0.75,
           color: shown ? LIKE_COLOR : 'text.disabled',
           '&:hover': { color: LIKE_COLOR },
         }}
       >
-        {shown ? <FavoriteIcon fontSize="small" /> : <FavoriteBorderIcon fontSize="small" />}
         {count > 0 && (
           <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1 }}>
             {count}
           </Typography>
         )}
+        {shown ? <FavoriteIcon fontSize="small" /> : <FavoriteBorderIcon fontSize="small" />}
       </IconButton>
     </Tooltip>
   )

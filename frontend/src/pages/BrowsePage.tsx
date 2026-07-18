@@ -53,71 +53,88 @@ export default function BrowsePage() {
     enabled: showLiked,
   })
 
+  const likedItems = showLiked && liked ? liked.items : []
+
+  const likedHeading = (
+    <MuiLink
+      component={Link}
+      to="/likes"
+      underline="none"
+      color="inherit"
+      sx={{ display: 'inline-flex', alignItems: 'center' }}
+    >
+      <Typography variant="h5">Liked</Typography>
+      <Typography component="span" color="text.secondary" sx={{ ml: 1 }}>
+        ({liked?.total})
+      </Typography>
+      <ChevronRightIcon sx={{ color: 'text.secondary' }} />
+    </MuiLink>
+  )
+
+  const browseHeading = (
+    <Typography variant="h5">
+      Browse{' '}
+      <Typography component="span" color="text.secondary">
+        {data ? `(${data.total})` : ''}
+      </Typography>
+    </Typography>
+  )
+
+  // "New" belongs to the page, not to the Browse section it used to sit in:
+  // when a liked row appears it would ride the Browse heading halfway down the
+  // page. So it shares a line with whichever heading comes first instead.
+  const newButton = canEdit && (
+    <>
+      <Button
+        variant="contained"
+        startIcon={<AddIcon />}
+        onClick={(e) => setCreateAnchor(e.currentTarget)}
+      >
+        New
+      </Button>
+      <Menu
+        anchorEl={createAnchor}
+        open={createAnchor !== null}
+        onClose={() => setCreateAnchor(null)}
+      >
+        <MenuItem
+          onClick={() => {
+            setCreateAnchor(null)
+            setCreateModelOpen(true)
+          }}
+        >
+          New model
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setCreateAnchor(null)
+            setCreateBundleOpen(true)
+          }}
+        >
+          New bundle
+        </MenuItem>
+      </Menu>
+    </>
+  )
+
   return (
     <Container maxWidth="xl" sx={{ py: 3, display: 'flex' }}>
       <FilterSidebar />
       <Box sx={{ flexGrow: 1 }}>
-        {showLiked && liked && liked.items.length > 0 && (
-          <Box sx={{ mb: 4 }}>
-            <MuiLink
-              component={Link}
-              to="/likes"
-              underline="none"
-              color="inherit"
-              sx={{ display: 'inline-flex', alignItems: 'center', mb: 2 }}
-            >
-              <Typography variant="h5">Liked</Typography>
-              <Typography component="span" color="text.secondary" sx={{ ml: 1 }}>
-                ({liked.total})
-              </Typography>
-              <ChevronRightIcon sx={{ color: 'text.secondary' }} />
-            </MuiLink>
-            <ItemGrid items={liked.items} singleRow />
-          </Box>
-        )}
-
         <Stack direction="row" sx={{ alignItems: 'center', mb: 2 }}>
-          <Typography variant="h5">
-            Browse{' '}
-            <Typography component="span" color="text.secondary">
-              {data ? `(${data.total})` : ''}
-            </Typography>
-          </Typography>
+          {likedItems.length > 0 ? likedHeading : browseHeading}
           <Box sx={{ flexGrow: 1 }} />
-          {canEdit && (
-            <>
-              <Button
-                variant="contained"
-                startIcon={<AddIcon />}
-                onClick={(e) => setCreateAnchor(e.currentTarget)}
-              >
-                New
-              </Button>
-              <Menu
-                anchorEl={createAnchor}
-                open={createAnchor !== null}
-                onClose={() => setCreateAnchor(null)}
-              >
-                <MenuItem
-                  onClick={() => {
-                    setCreateAnchor(null)
-                    setCreateModelOpen(true)
-                  }}
-                >
-                  New model
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setCreateAnchor(null)
-                    setCreateBundleOpen(true)
-                  }}
-                >
-                  New bundle
-                </MenuItem>
-              </Menu>
-            </>
-          )}
+          {newButton}
         </Stack>
+
+        {likedItems.length > 0 && (
+          <>
+            <Box sx={{ mb: 4 }}>
+              <ItemGrid items={likedItems} singleRow />
+            </Box>
+            <Box sx={{ mb: 2 }}>{browseHeading}</Box>
+          </>
+        )}
 
         <ItemGrid items={data?.items ?? []} />
 
