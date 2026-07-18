@@ -45,8 +45,11 @@ export default function DropboxPanel() {
     queryFn: () => api.dropbox(),
     enabled: isAdmin,
     // Listing sizes a folder by walking it, so this is more expensive than the
-    // imports list next to it — poll gently, and only while the panel is open.
-    refetchInterval: open ? 10_000 : false,
+    // imports list beside it — poll gently, and slower still while collapsed.
+    // Not *never*, though: the header is what tells you whether there is
+    // anything in there, so it has to notice a file that arrives while you are
+    // sitting on the page.
+    refetchInterval: open ? 10_000 : 30_000,
   })
 
   const pickUp = useMutation({
@@ -65,6 +68,11 @@ export default function DropboxPanel() {
   if (!isAdmin) return null
 
   const entries = data?.entries ?? []
+  // Nothing to expand into is nothing to offer: an empty dropbox collapses to a
+  // single line saying where the folder is, with no button that pays out an
+  // empty list. The count beside the title is then a promise — if there is no
+  // "Show", there is nothing behind it.
+  const hasEntries = entries.length > 0
 
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
@@ -72,7 +80,12 @@ export default function DropboxPanel() {
         <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Typography sx={{ fontWeight: 600 }}>
             From the server{' '}
-            {entries.length > 0 && <Chip size="small" label={entries.length} sx={{ ml: 0.5 }} />}
+            {hasEntries && <Chip size="small" label={entries.length} sx={{ ml: 0.5 }} />}
+            {!isLoading && !hasEntries && (
+              <Typography component="span" variant="body2" color="text.secondary">
+                — nothing waiting
+              </Typography>
+            )}
           </Typography>
           <Typography
             variant="body2"
@@ -96,27 +109,29 @@ export default function DropboxPanel() {
             </IconButton>
           </span>
         </Tooltip>
-        <Button
-          onClick={() => setOpen((v) => !v)}
-          endIcon={open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-        >
-          {open ? 'Hide' : 'Show'}
-        </Button>
+        {hasEntries && (
+          <Button
+            onClick={() => setOpen((v) => !v)}
+            endIcon={open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+          >
+            {open ? 'Hide' : 'Show'}
+          </Button>
+        )}
       </Stack>
 
-      <Collapse in={open}>
+      {/* Outside the collapse: a pickup that fails has to be readable even if the
+          entry that failed has just left the list. */}
+      {error && (
+        <Alert severity="error" onClose={() => setError('')} sx={{ mt: 2 }}>
+          {error}
+        </Alert>
+      )}
+
+      {/* Gated on `hasEntries` as well as `open`: the last entry being imported
+          away takes the toggle with it, and a body left open would have no way
+          back. */}
+      <Collapse in={open && hasEntries}>
         <Box sx={{ mt: 2 }}>
-          {error && (
-            <Alert severity="error" onClose={() => setError('')} sx={{ mb: 1.5 }}>
-              {error}
-            </Alert>
-          )}
-          {isLoading && <CircularProgress size={20} />}
-          {!isLoading && entries.length === 0 && (
-            <Typography variant="body2" color="text.secondary">
-              Nothing here. Copy an archive or a model folder into the path above and rescan.
-            </Typography>
-          )}
           <Stack spacing={1}>
             {entries.map((entry) => (
               <EntryRow
@@ -127,12 +142,9 @@ export default function DropboxPanel() {
               />
             ))}
           </Stack>
-          {entries.length > 0 && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
-              Importing copies the entry into the store; the original stays here until you delete
-              it.
-            </Typography>
-          )}
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+            Importing copies the entry into the store; the original stays here until you delete it.
+          </Typography>
         </Box>
       </Collapse>
     </Paper>
