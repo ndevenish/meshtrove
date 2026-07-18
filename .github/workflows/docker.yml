@@ -7,7 +7,6 @@ name: Build and push Docker image
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -119,13 +118,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # latest -> newest push to the default branch; also a git-tag tag and a
-          # per-commit sha tag. Adjust to taste.
+          # Release tags from the git tag (v1.2.3 -> 1.2.3 and 1.2); `latest`
+          # tracks the newest semver tag (default flavor latest=auto). A manual
+          # dispatch that isn't on a semver tag just gets the sha tag.
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
