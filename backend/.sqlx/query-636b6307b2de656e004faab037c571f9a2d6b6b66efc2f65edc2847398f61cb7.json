@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT f.blob_sha256, f.filename, f.mime FROM files f WHERE f.id = $1",
+  "query": "SELECT f.blob_sha256, f.filename, f.mime, f.import_id FROM files f WHERE f.id = $1",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,17 @@
             "name": "mime"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "import_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "import_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -45,8 +56,9 @@
     "nullable": [
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "a271943f4e2885c4efd11884f9bd2f72314a0ccea7d337e7f9563265f541a9da"
+  "hash": "636b6307b2de656e004faab037c571f9a2d6b6b66efc2f65edc2847398f61cb7"
 }

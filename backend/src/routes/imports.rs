@@ -124,9 +124,14 @@ async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, ApiEr
 
 async fn detail(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ImportSummary>, ApiError> {
+    // An import is editor-and-above working state — never public. Gate viewing the
+    // same way `list` does (editor+), so a signed-out visitor (a guest viewer)
+    // can't read it. The write paths (plan/commit/update/remove) still gate on
+    // ownership via `require_can_edit`.
+    user.require_editor()?;
     Ok(Json(fetch_import(&state, id).await?))
 }
 

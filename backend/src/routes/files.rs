@@ -510,9 +510,13 @@ async fn list_bundle_files(
 /// archive, shown on the import page before it is committed to a model/bundle.
 async fn list_import_files(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    // Staged files are part of an import, which is editor-and-above working state:
+    // don't list them to a signed-out visitor (a guest viewer). The model/bundle
+    // listings above stay open — those own committed, browsable content.
+    user.require_editor()?;
     let rows = sqlx::query!(
         r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
                   f.kind as "kind: FileKind", f.created_at, b.size
@@ -844,17 +848,24 @@ pub struct RenderQueued {
 
 async fn download_file(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let row = sqlx::query!(
-        r#"SELECT f.blob_sha256, f.filename, f.mime FROM files f WHERE f.id = $1"#,
+        r#"SELECT f.blob_sha256, f.filename, f.mime, f.import_id FROM files f WHERE f.id = $1"#,
         id
     )
     .fetch_optional(&state.db)
     .await?
     .ok_or(ApiError::NotFound)?;
+
+    // Downloads of committed model/bundle files are public (browse is open), but a
+    // file still owned by an import is unreviewed staging content — gate it to
+    // editor+ so a signed-out visitor can't pull staged bytes by file id.
+    if row.import_id.is_some() {
+        user.require_editor()?;
+    }
 
     stream_blob(
         &state,
