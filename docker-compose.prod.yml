@@ -14,6 +14,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
       POSTGRES_DB: meshtrove
     volumes:
+      # Named volume by default. To back this with a ZFS dataset instead, replace
+      # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
+      #   - /srv/meshtrove/pgdata:/var/lib/postgresql/data
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U meshtrove"]
@@ -44,6 +47,9 @@ services:
     ports:
       - "${MESHTROVE_PORT:-3000}:3000"
     volumes:
+      # Named volume by default. To back this with a ZFS dataset instead, replace
+      # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
+      #   - /srv/meshtrove/store:/app/store
       - store:/app/store
     restart: unless-stopped
 

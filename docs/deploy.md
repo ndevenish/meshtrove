@@ -55,6 +55,85 @@ Data lives in two named volumes and survives `down`/`up`:
 
 ---
 
+## ZFS-backed storage (optional)
+
+If the host runs ZFS, back the two persistent stores with dedicated datasets
+instead of Docker named volumes. They have opposite I/O profiles — Postgres does
+small random 8 KB page I/O with its own WAL, while the blob store holds large,
+immutable, content-addressed files — so give each its own dataset and tune it
+accordingly. Substitute your pool name for `tank`:
+
+```bash
+# Parent — organizational only, not mounted itself; children inherit the defaults.
+zfs create -o canmount=off -o mountpoint=/srv/meshtrove \
+           -o atime=off -o xattr=sa -o compression=lz4 \
+           tank/meshtrove
+
+# Postgres: 16k records suit its 8 KB page workload; it has its own cache + WAL.
+zfs create -o recordsize=16k \
+           -o logbias=throughput \
+           -o primarycache=metadata \
+           tank/meshtrove/pgdata
+
+# Blob store: large immutable archives → big records, minimal metadata overhead.
+zfs create -o recordsize=1M \
+           tank/meshtrove/store
+```
+
+Why these settings:
+
+- **`recordsize=16k` (pgdata)** — Postgres does 8 KB page I/O. `8k` matches it
+  exactly (no random-access amplification) but bloats metadata and hurts
+  compression; `16k` is the common compromise. Drop to `8k` only for heavy OLTP.
+- **`recordsize=1M` (store)** — blobs are written once and read sequentially, so
+  a large record minimizes metadata and maximizes throughput.
+- **`compression=lz4`** — nearly free and it early-aborts on incompressible data.
+  The store is mostly already-compressed archives so it gains little there, but
+  Postgres data compresses well. Use `zstd` on the store only if you archive lots
+  of raw STL/ASCII and want the ratio.
+- **`primarycache=metadata` + `logbias=throughput` (pgdata)** — Postgres caches
+  data in its own `shared_buffers`, so double-caching file data in ARC is wasteful.
+  These are the standard Postgres-on-ZFS tunings.
+- **No dedup** — the store is already content-addressed (sha256-keyed), so it
+  dedupes at the application layer; ZFS dedup would just burn RAM.
+
+Set ownership to match the container users (bind mounts pass host UIDs straight
+through): Postgres runs as UID `999`, the app as UID `10001`.
+
+```bash
+chown 999:999     /srv/meshtrove/pgdata
+chown 10001:10001 /srv/meshtrove/store
+```
+
+Then point the containers at the dataset mountpoints. In
+`docker-compose.prod.yml`, replace the two volume lines with bind mounts (commented
+hints are already in the file) and delete the bottom `volumes:` block:
+
+```yaml
+  postgres:
+    volumes:
+      - /srv/meshtrove/pgdata:/var/lib/postgresql/data
+  app:
+    volumes:
+      - /srv/meshtrove/store:/app/store
+```
+
+Bind mounts are the simplest, most robust way to land the containers on ZFS — no
+ZFS Docker volume driver required.
+
+### Snapshots and backups
+
+A ZFS snapshot of `pgdata` is crash-consistent: Postgres replays its WAL on the
+next start and comes up clean, so periodic `zfs snapshot` / `zfs send` is a valid
+backup (keep `pg_dump` around for a portable logical dump).
+
+The datasets reference each other — DB rows point at blobs in the store — so when
+snapshotting or restoring, take **`pgdata` first, then `store`**. That keeps the
+store a superset of what the DB references; the worst case is a few orphan blobs
+(harmless), never a DB row pointing at a missing file.
+
+---
+
 ## Building the image on its own
 
 ```bash
