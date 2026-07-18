@@ -214,14 +214,26 @@ export interface ImportSummary {
 /// so the union of a file's variant-tag captures is its variant.
 export type GroupRole = 'model_name' | 'model_tag' | 'variant_tag' | 'ignore'
 
-/// The user-editable layout definition. The pattern is a backend (fancy-regex)
-/// pattern — an opaque string here; the frontend never runs it.
-export interface LayoutSpec {
+/// One regex of a layout. The pattern is a backend (fancy-regex) pattern — an
+/// opaque string here; the frontend never runs it. Group numbers and the value
+/// map are local to the rule, so two rules can both use group 1 for different
+/// things.
+export interface LayoutRule {
+  /** optional label, shown on the rule's editor block ("scale", "supports") */
+  name: string
   pattern: string
   /** capture group number (as a string key) -> role */
   roles: Record<string, GroupRole>
   /** lowercased raw capture -> variant tag names ([] = maps to nothing) */
   value_map: Record<string, string[]>
+  /** off = contributes nothing, like a rule that never matches */
+  enabled: boolean
+}
+
+/// The user-editable layout definition: several small patterns, each searched
+/// across the path, whose captured model/variant tags merge.
+export interface LayoutSpec {
+  rules: LayoutRule[]
   /** drop the folders once the carve has read them: files land with no path */
   flatten?: boolean
 }
@@ -232,16 +244,22 @@ export interface ImportLayout extends LayoutSpec {
   creator_id: string | null
 }
 
-/// A slice of a file's path; `group` set = highlight it by that group's role.
+/// A slice of a file's path; `role` set = highlight it in that role's colour.
+/// The role travels with the slice because a group number is no longer unique
+/// once a layout has several rules.
 export interface PathPart {
   text: string
-  group?: number
+  role?: GroupRole
 }
 
 export interface FileAnnotation {
   id: string
+  /** matched by at least one enabled rule */
   matched: boolean
   parts: PathPart[]
+  /** indices of rules that captured two different values for one group here —
+      their output was dropped for this file (a warning, never a blocker) */
+  invalid_rules: number[]
   model_name?: string
   model_tags: string[]
   variant_tags: string[]
@@ -290,13 +308,20 @@ export interface CapturedValue {
 
 /// The dry run of a layout over an import's staged files. Commit executes the
 /// same computation, so this preview is the result.
+/// What one rule found, for its own editor block — index-aligned to the spec's
+/// rules. Both halves are per-rule because both are read through that rule's
+/// own roles and value map.
+export interface RulePlan {
+  groups: GroupInfo[]
+  values: CapturedValue[]
+}
+
 export interface LayoutPlan {
   total: number
   matched: number
   carved: number
-  groups: GroupInfo[]
+  rules: RulePlan[]
   models: PlanModel[]
-  values: CapturedValue[]
   model_names: string[]
   annotations: FileAnnotation[]
   /** existing members of the bundle being merged into (empty otherwise), for

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO import_layouts (name, pattern, roles, value_map, flatten, creator_id, created_by)\n         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+  "query": "INSERT INTO import_layouts (name, rules, flatten, creator_id, created_by)\n         VALUES ($1, $2, $3, $4, $5) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -23,8 +23,6 @@
             "kind": "Simple"
           }
         },
-        "Text",
-        "Jsonb",
         "Jsonb",
         "Bool",
         "Uuid",
@@ -35,5 +33,5 @@
       false
     ]
   },
-  "hash": "efd0371daf89628d88c1b8b92536241141031820db5cf34ea1a02704fe7d15f2"
+  "hash": "785f67e93eab536a7606e807adc16851045c4c6dcdca4e71ce8b07170f2beebb"
 }

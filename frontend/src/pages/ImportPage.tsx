@@ -427,7 +427,7 @@ function ImportWorkbench() {
             <AnnotatedFileList
               files={files ?? []}
               annotations={layout.plan.annotations}
-              roles={layout.spec.roles}
+              rules={layout.spec.rules}
             />
           ) : (
             <FileTree files={files ?? []} />

@@ -540,7 +540,20 @@ captures — symmetric at both levels:
 
 ### API — server is the single source of truth
 
-`POST /api/imports/{id}/plan` takes `{pattern, roles, value_map}` and dry-runs
+A layout is a **list of rules**, not one regex (2026-07-18). One pattern that
+has to capture the model name, the category, the scale *and* the support state
+at once is fragile to write and impossible to reuse; several small ones compose.
+Each rule carries its own `pattern`, `roles`, `value_map`, a label and an
+enable/disable switch, and is **searched** across the path rather than anchored
+to it. Their results merge: model tags and variant tags union, and exactly one
+rule in a layout may carry the `model_name` role (the layout is rejected if two
+do). Within one rule a capture group must produce the *same* value everywhere it
+matches in a file — `32mm` here and `75mm` there is no answer at all, so that
+rule is dropped for that file and the file is flagged (a warning; it never
+blocks the commit). The enable switch is per-import working state, persisted in
+the import draft; saving the layout captures the toggles as its defaults.
+
+`POST /api/imports/{id}/plan` takes `{rules, flatten}` and dry-runs
 the carve, returning the grouped tree (model → tag sets → file counts +
 example paths). Commit takes the same layout params plus optional per-file
 overrides for stragglers and executes atomically in the existing one-transaction
@@ -554,9 +567,13 @@ Because the frontend never runs the regex, per-file display data must ride in
 the plan response too. Alongside the tree, `plan` returns an annotation per
 staged file:
 
-- **`parts`** — the path split into segments `{text, group?}` (built from the
-  engine's capture offsets), so the UI renders matched groups as highlighted
-  spans, colored by assigned role; an unmatched file is one plain segment.
+- **`parts`** — the path split into segments `{text, role?}` (built from the
+  engine's capture offsets, pooled across every rule that matched), so the UI
+  renders captures as highlighted spans in their role's colour; an unmatched
+  file is one plain segment. The *role* rides on the segment rather than a group
+  number, which is no longer unique once a layout has several rules.
+- **`invalid_rules`** — indices of rules that contradicted themselves on this
+  file, driving the row's warning marker.
 - **resolution** — `{model_name?, model_tags[], variant_tags[]}` *after*
   vocabulary mapping, rendered as trailing chips on each file row
   (`→ Gold · heroes · 32mm supported lychee`). A capture whose value has no
@@ -575,9 +592,8 @@ erDiagram
     import_layouts {
         uuid id PK
         text name
-        text pattern "Rust regex, matched full-path"
-        jsonb roles "capture group -> role"
-        jsonb value_map "raw capture -> tag names"
+        jsonb rules "[{name, pattern, roles, value_map, enabled}]"
+        bool flatten "drop folders on the way in"
         uuid creator_id FK "nullable"
     }
 ```

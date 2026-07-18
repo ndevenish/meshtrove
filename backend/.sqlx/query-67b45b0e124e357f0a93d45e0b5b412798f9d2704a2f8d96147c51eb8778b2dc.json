@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, name::text as \"name!\", creator_id,\n                  jsonb_build_object('pattern', pattern, 'roles', roles,\n                                     'value_map', value_map, 'flatten', flatten)\n                      as \"spec!: SpecJson\"\n           FROM import_layouts ORDER BY name",
+  "query": "SELECT id, name::text as \"name!\", creator_id,\n                  jsonb_build_object('rules', rules, 'flatten', flatten)\n                      as \"spec!: SpecJson\"\n           FROM import_layouts ORDER BY name",
   "describe": {
     "columns": [
       {
@@ -48,5 +48,5 @@
       null
     ]
   },
-  "hash": "89a7928dae1314a4e8159b67201bace4ece4547888b42a8ebf6c9157600adb45"
+  "hash": "67b45b0e124e357f0a93d45e0b5b412798f9d2704a2f8d96147c51eb8778b2dc"
 }

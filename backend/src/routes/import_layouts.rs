@@ -44,9 +44,9 @@ pub struct LayoutInput {
     pub creator_id: Option<Uuid>,
 }
 
-/// A saved layout must at least compile and name real capture groups; running
-/// [`analyze`] over no files checks exactly that, with the engine that will
-/// interpret it later.
+/// A saved layout must at least compile — every rule, including the disabled
+/// ones — and claim the model name at most once; running [`analyze`] over no
+/// files checks exactly that, with the engine that will interpret it later.
 fn validate(input: &LayoutInput) -> Result<String, ApiError> {
     let name = input.name.trim().to_string();
     if name.is_empty() {
@@ -54,6 +54,16 @@ fn validate(input: &LayoutInput) -> Result<String, ApiError> {
     }
     analyze(&input.spec, CarveTarget::Bundle, &[], &Default::default())?;
     Ok(name)
+}
+
+/// Store canonical value-map keys, so a template never carries two spellings of
+/// one value that a carve then resolves by hash order (see layout.rs). Each rule
+/// maps its own values.
+fn canonicalise(spec: &mut LayoutSpec) -> serde_json::Value {
+    for rule in &mut spec.rules {
+        rule.value_map = canonical_value_map(&rule.value_map).into_iter().collect();
+    }
+    serde_json::to_value(&spec.rules).expect("rules serialize")
 }
 
 fn name_conflict(e: sqlx::Error) -> ApiError {
@@ -73,8 +83,7 @@ async fn list(
 ) -> Result<Json<Vec<ImportLayout>>, ApiError> {
     let rows = sqlx::query!(
         r#"SELECT id, name::text as "name!", creator_id,
-                  jsonb_build_object('pattern', pattern, 'roles', roles,
-                                     'value_map', value_map, 'flatten', flatten)
+                  jsonb_build_object('rules', rules, 'flatten', flatten)
                       as "spec!: SpecJson"
            FROM import_layouts ORDER BY name"#,
     )
@@ -99,18 +108,12 @@ async fn create(
 ) -> Result<Json<ImportLayout>, ApiError> {
     user.require_editor()?;
     let name = validate(&input)?;
-    // Store canonical value-map keys, so a template never carries two spellings
-    // of one value that a carve then resolves by hash order (see layout.rs).
-    input.spec.value_map = canonical_value_map(&input.spec.value_map)
-        .into_iter()
-        .collect();
+    let rules = canonicalise(&mut input.spec);
     let id: Uuid = sqlx::query_scalar!(
-        "INSERT INTO import_layouts (name, pattern, roles, value_map, flatten, creator_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO import_layouts (name, rules, flatten, creator_id, created_by)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
         name,
-        input.spec.pattern,
-        serde_json::to_value(&input.spec.roles).expect("roles serialize"),
-        serde_json::to_value(&input.spec.value_map).expect("value_map serialize"),
+        rules,
         input.spec.flatten,
         input.creator_id,
         user.id,
@@ -134,19 +137,14 @@ async fn update(
 ) -> Result<Json<ImportLayout>, ApiError> {
     user.require_editor()?;
     let name = validate(&input)?;
-    input.spec.value_map = canonical_value_map(&input.spec.value_map)
-        .into_iter()
-        .collect();
+    let rules = canonicalise(&mut input.spec);
     let updated = sqlx::query!(
         "UPDATE import_layouts
-            SET name = $2, pattern = $3, roles = $4, value_map = $5, flatten = $6,
-                creator_id = $7, updated_at = now()
+            SET name = $2, rules = $3, flatten = $4, creator_id = $5, updated_at = now()
           WHERE id = $1",
         id,
         name,
-        input.spec.pattern,
-        serde_json::to_value(&input.spec.roles).expect("roles serialize"),
-        serde_json::to_value(&input.spec.value_map).expect("value_map serialize"),
+        rules,
         input.spec.flatten,
         input.creator_id,
     )
