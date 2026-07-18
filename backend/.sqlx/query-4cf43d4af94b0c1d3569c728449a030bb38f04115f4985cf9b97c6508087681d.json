@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM user_bundle_marks WHERE user_id = $1 AND bundle_id = $2 AND mark = 'liked'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4cf43d4af94b0c1d3569c728449a030bb38f04115f4985cf9b97c6508087681d"
+}

@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (payload->>'entry')\n                  payload->>'entry' as \"entry!\",\n                  finished_at,\n                  (payload->>'file_count')::bigint as recorded_count,\n                  (payload->>'size')::bigint as recorded_size\n           FROM jobs\n           WHERE kind = 'dropbox_import' AND status = 'succeeded'\n             AND payload->>'entry' IS NOT NULL\n           ORDER BY payload->>'entry', finished_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "finished_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "recorded_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "recorded_size",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "e2ced62191e9c51bed89453e29185e9ff6f5ae4725b7ba5f43f9cf0b9961ccec"
+}

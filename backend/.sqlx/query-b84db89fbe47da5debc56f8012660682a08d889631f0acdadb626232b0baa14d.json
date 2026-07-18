@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_model_marks (user_id, model_id, mark) VALUES ($1, $2, 'liked')\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b84db89fbe47da5debc56f8012660682a08d889631f0acdadb626232b0baa14d"
+}

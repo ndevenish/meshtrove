@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM user_model_marks WHERE user_id = $1 AND model_id = $2 AND mark = 'liked'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "42292063ba6d234e49d7d5b9bf197930ccb2d996d3bc789b3fe346099a30f878"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,\n                  (SELECT count(*) FROM files f WHERE f.import_id = i.id) as \"file_count!\",\n                  EXISTS (\n                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'archive_file_id' = f.id::text\n                  ) as \"unpacking!\"\n           FROM imports i WHERE i.id = $1",
+  "query": "SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,\n                  (SELECT count(*) FROM files f WHERE f.import_id = i.id) as \"file_count!\",\n                  (EXISTS (\n                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'archive_file_id' = f.id::text\n                  ) OR EXISTS (\n                    SELECT 1 FROM jobs j\n                    WHERE j.kind = 'dropbox_import'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'import_id' = i.id::text\n                  )) as \"unpacking!\"\n           FROM imports i\n           ORDER BY i.created_at DESC",
   "describe": {
     "columns": [
       {
@@ -72,9 +72,7 @@
       }
     ],
     "parameters": {
-      "Left": [
-        "Uuid"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -86,5 +84,5 @@
       null
     ]
   },
-  "hash": "2e3e890490495ada5d630f21ee731496b18a795cd815d7c1aa603aa2c488eabd"
+  "hash": "34261c54a82d0aab498fc0cdcfa981e28b9b0648501cc979a09d3e697033c0f7"
 }

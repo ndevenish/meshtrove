@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT payload->>'entry' as \"entry!\" FROM jobs\n           WHERE kind = 'dropbox_import' AND status IN ('queued', 'running')\n             AND payload->>'entry' IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ef8f821a777cb808d99ec48f36b22cf0d45cbc8fc9b5198357840fa88b0b2835"
+}
