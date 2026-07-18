@@ -86,6 +86,21 @@ Implementation quirks worth knowing (found the hard way):
   drops a blob only when no `files` *or* `images` row still points at it, and only
   after the transaction that removed the last reference has committed.
 - First registered user becomes admin; later users start as viewers.
+- **The dropbox** (`<store>/imports`, added 2026-07-18): a folder an admin fills
+  server-side — over ssh, a file share, a torrent client's completed dir — and
+  stages from the Importing page with one button. The browser is the wrong pipe
+  for bytes already on the machine: uploading a 40GB box set that is sitting next
+  to the store copies it back over the network to land where it started. A pickup
+  reads it in place. It is deliberately *not* a second import mechanism — the
+  pickup creates the same staged import a drop does, roots a folder's paths at
+  its own name exactly as a browser folder-drop does, and hands any zip to the
+  same `import_archive` job (`routes/files::on_archive_ingested` is shared by
+  both doors). The copy runs as a `dropbox_import` job, not inline, because the
+  entry can be tens of gigabytes; `ImportSummary.unpacking` covers that job too,
+  so the existing "still unpacking, can't commit" guard covers a pickup for free.
+  Admin-only, unlike the rest of the import routes, because it reads the server's
+  filesystem. Picking up never modifies the dropbox — the entry stays until the
+  admin deletes it, so a failed import is always retryable.
 
 ## File-first import + recategorisation (Phases 1–2 done, 3 remaining)
 

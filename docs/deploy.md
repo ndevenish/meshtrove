@@ -53,6 +53,11 @@ Data lives in two named volumes and survives `down`/`up`:
 - `pgdata` — the Postgres database.
 - `store` — uploaded model/blob files (`/app/store` in the container).
 
+`store/imports` is the **dropbox**: drop an archive or a model folder in there on
+the host and an admin can stage it from the Importing page with a button, instead
+of uploading bytes that are already on the machine. It is created at startup, and
+must be readable by the UID the container runs as (see `PUID`/`PGID` below).
+
 ---
 
 ## ZFS-backed storage (optional)

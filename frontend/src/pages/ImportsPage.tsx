@@ -13,6 +13,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useQuery } from '@tanstack/react-query'
 
 import { api } from '../api'
+import DropboxPanel from '../components/DropboxPanel'
 
 /// Everything dropped but not yet placed. Imports live only here — they are
 /// deliberately absent from browse until they become a model or a bundle.
@@ -31,6 +32,10 @@ export default function ImportsPage() {
       <Typography color="text.secondary" sx={{ mb: 2 }}>
         Dropped archives wait here until you say what they are. They don't appear in browse yet.
       </Typography>
+
+      {/* Admins can also pull straight from the server's dropbox folder, without
+          the round trip through the browser. */}
+      <DropboxPanel />
 
       {!isLoading && staged?.length === 0 && (
         <Paper variant="outlined" sx={{ p: 6, textAlign: 'center' }}>

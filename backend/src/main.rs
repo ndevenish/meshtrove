@@ -6,7 +6,7 @@ mod services;
 mod state;
 mod util;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{Router, routing::get};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -27,6 +27,11 @@ async fn main() -> Result<()> {
     tracing::info!(version = VERSION, "starting meshtrove");
 
     let state = AppState::new().await?;
+    // Create the dropbox eagerly: it is a folder a human is meant to find and
+    // drop files into, so it has to exist before anyone looks for it.
+    let dropbox = state.config.dropbox_dir();
+    std::fs::create_dir_all(&dropbox)
+        .with_context(|| format!("creating dropbox dir {}", dropbox.display()))?;
     sqlx::migrate!().run(&state.db).await?;
     routes::auth::ensure_startup_users(&state).await?;
     services::jobs::recover_stranded(&state.db).await?;
@@ -41,6 +46,7 @@ async fn main() -> Result<()> {
         .merge(routes::bundles::router())
         .merge(routes::jobs::router())
         .merge(routes::creators::router())
+        .merge(routes::dropbox::router())
         .merge(routes::exports::router())
         .merge(routes::files::router())
         .merge(routes::images::router())

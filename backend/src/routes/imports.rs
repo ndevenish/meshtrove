@@ -50,8 +50,9 @@ pub struct ImportSummary {
     pub created_at: DateTime<Utc>,
     /// Files staged so far (the archive itself plus anything unpacked from it).
     pub file_count: i64,
-    /// An unpack job for one of this import's archives is queued or running:
-    /// the contents aren't final yet, so committing is refused.
+    /// The import is still filling up — an unpack job for one of its archives is
+    /// queued or running, or a dropbox pickup is still copying entries onto it.
+    /// Either way the contents aren't final yet, so committing is refused.
     pub unpacking: bool,
     /// The dropped archive is a MeshTrove export: it is restored (recreating the
     /// models/bundles it holds), not carved. The Import page shows a restore
@@ -69,12 +70,17 @@ async fn list(
     let rows = sqlx::query!(
         r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
-                  EXISTS (
+                  (EXISTS (
                     SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
                     WHERE j.kind = 'import_archive'
                       AND j.status IN ('queued', 'running')
                       AND j.payload->>'archive_file_id' = f.id::text
-                  ) as "unpacking!"
+                  ) OR EXISTS (
+                    SELECT 1 FROM jobs j
+                    WHERE j.kind = 'dropbox_import'
+                      AND j.status IN ('queued', 'running')
+                      AND j.payload->>'import_id' = i.id::text
+                  )) as "unpacking!"
            FROM imports i
            ORDER BY i.created_at DESC"#,
     )
@@ -95,16 +101,21 @@ async fn list(
     ))
 }
 
-async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, ApiError> {
+pub async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, ApiError> {
     let r = sqlx::query!(
         r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
-                  EXISTS (
+                  (EXISTS (
                     SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
                     WHERE j.kind = 'import_archive'
                       AND j.status IN ('queued', 'running')
                       AND j.payload->>'archive_file_id' = f.id::text
-                  ) as "unpacking!"
+                  ) OR EXISTS (
+                    SELECT 1 FROM jobs j
+                    WHERE j.kind = 'dropbox_import'
+                      AND j.status IN ('queued', 'running')
+                      AND j.payload->>'import_id' = i.id::text
+                  )) as "unpacking!"
            FROM imports i WHERE i.id = $1"#,
         id,
     )
@@ -141,7 +152,18 @@ async fn create(
     Json(input): Json<ImportInput>,
 ) -> Result<Json<ImportSummary>, ApiError> {
     user.require_editor()?;
-    let name = input.name.trim();
+    Ok(Json(create_import(&state, &user, &input.name).await?))
+}
+
+/// Open an empty import. Shared with the dropbox pickup (routes/dropbox.rs),
+/// which creates the import up front and fills it from a background job — the
+/// caller has already decided who is allowed to do that.
+pub async fn create_import(
+    state: &AppState,
+    user: &User,
+    name: &str,
+) -> Result<ImportSummary, ApiError> {
+    let name = name.trim();
     let name = if name.is_empty() { "Import" } else { name };
     let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO imports (name, created_by) VALUES ($1, $2) RETURNING id",
@@ -150,7 +172,7 @@ async fn create(
     )
     .fetch_one(&state.db)
     .await?;
-    Ok(Json(fetch_import(&state, id).await?))
+    fetch_import(state, id).await
 }
 
 async fn update(

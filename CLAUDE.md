@@ -32,7 +32,8 @@ every request a synthetic admin; unset it to exercise real auth
 
 - `backend/src/routes/` — one file per API area; routers merged in `main.rs`
 - `backend/src/services/` — blobstore (content-addressed FS store, sha256-keyed),
-  jobs (SKIP LOCKED worker in-binary), importer (zip), renderer (f3d shell-out)
+  jobs (SKIP LOCKED worker in-binary), importer (zip), dropbox (pick up an entry
+  from `<store>/imports`), renderer (f3d shell-out)
 - `backend/migrations/0001_initial.sql` — full schema, tsvector triggers, seed axes
 - `frontend/src/api.ts` — typed fetch layer; `pages/` + `components/`
 
@@ -41,7 +42,9 @@ every request a synthetic admin; unset it to exercise real auth
 - sqlx macros check queries against a live DB: postgres must be up (and
   migrated) to compile. `DATABASE_URL` comes from `.env`.
 - Model/bundle files are immutable blobs in `store/ab/cd/<sha256>`; logical
-  paths/filenames live only in the `files` table. Never write to `store/` directly.
+  paths/filenames live only in the `files` table. Never write to `store/` directly
+  — except `store/imports`, the **dropbox**: a plain folder an admin drops
+  archives/model folders into for the Importing page to stage without an upload.
 - A `file` has exactly one owner (`num_nonnulls(model_id, variant_id, bundle_id,
   import_id) = 1`). A dropped archive stages in an **import** — not a model, not
   a bundle, invisible to browse — until `POST /api/imports/{id}/commit` moves its

@@ -105,6 +105,15 @@ pub struct Configuration {
 }
 
 impl Configuration {
+    /// The dropbox: a plain folder an admin can copy archives and model folders
+    /// into, server-side, and stage as imports from the Importing page without
+    /// pushing gigabytes back through the browser. Inside the store so a
+    /// deployment still only has to mount one directory, and named so it can't
+    /// collide with the store's own `ab/cd` blob fan-out.
+    pub fn dropbox_dir(&self) -> PathBuf {
+        self.store_dir.join("imports")
+    }
+
     pub fn load() -> Result<Configuration> {
         let args = Arguments::parse();
         let cookie_key = args.get_cookie_key()?;

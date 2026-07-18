@@ -208,6 +208,27 @@ export interface ImportSummary {
   is_export: boolean
 }
 
+/// One entry sitting in the server-side dropbox (`<store>/imports`) — an archive
+/// or a folder an admin put there directly, waiting to be staged with a button
+/// instead of pushed back through the browser.
+export interface DropboxEntry {
+  /** its name in the dropbox; the handle `pickUpDropboxEntry` takes */
+  name: string
+  is_dir: boolean
+  /** files a pickup would stage — a folder's whole tree */
+  file_count: number
+  size: number
+  modified: string | null
+  /** a pickup of this entry is already queued or running */
+  importing: boolean
+}
+
+export interface DropboxListing {
+  /** absolute path of the dropbox on the server, so an admin knows where to copy to */
+  path: string
+  entries: DropboxEntry[]
+}
+
 // --- Import layout templates (regex-driven carve; see docs/plan.md) ---------
 
 /// What a capture group means. No "variant" role: a variant IS its tag set,
@@ -534,6 +555,11 @@ export const api = {
     request<CommitResult>(`/api/imports/${id}/commit`, json(target)),
   planImport: (id: string, spec: LayoutSpec, target: PlanTarget, bundleId?: string) =>
     request<LayoutPlan>(`/api/imports/${id}/plan`, json({ ...spec, target, bundle_id: bundleId })),
+  /** contents of the server-side dropbox (admin only) */
+  dropbox: () => request<DropboxListing>('/api/dropbox'),
+  /** stage one dropbox entry as an import; the copy itself runs as a job */
+  pickUpDropboxEntry: (entry: string) =>
+    request<ImportSummary>('/api/dropbox/import', json({ entry })),
   importLayouts: () => request<ImportLayout[]>('/api/import-layouts'),
   createImportLayout: (body: { name: string; creator_id?: string | null } & LayoutSpec) =>
     request<ImportLayout>('/api/import-layouts', json(body)),

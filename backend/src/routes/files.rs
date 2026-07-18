@@ -43,7 +43,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Clone, Copy)]
-enum Owner {
+pub(crate) enum Owner {
     Model(Uuid),
     Variant(Uuid),
     Bundle(Uuid),
@@ -305,44 +305,15 @@ async fn consume_fields(
                     kind,
                 )
                 .await?;
-
-                // A zip unpacks in the background into its owner's files: onto a
-                // variant, into a model's or bundle's "unsorted" bucket, or into
-                // an import's staging bucket. The archive itself only lives as
-                // long as the import does — committing one drops the original and
-                // keeps a `source_archives` row in its place (services/gc.rs).
-                //
-                // One exception: a zip dropped into an import that turns out to be
-                // a MeshTrove export (it carries a manifest.json) is *restored*,
-                // not carved. Peek its central directory — a cheap read that never
-                // unpacks the rest — and if it is one, flag the import and skip the
-                // unpack; the Import page then offers "restore" (routes/transfer).
-                if matches!(record.kind, FileKind::Archive)
-                    && filename.to_lowercase().ends_with(".zip")
-                {
-                    let is_export = matches!(owner, Owner::Import(_))
-                        && crate::services::transfer::read_manifest_from_blob(
-                            &state.store,
-                            &blob.sha256,
-                        )
-                        .await?
-                        .is_some();
-                    if let (true, Owner::Import(import_id)) = (is_export, owner) {
-                        sqlx::query!(
-                            "UPDATE imports SET is_export = true, updated_at = now() WHERE id = $1",
-                            import_id,
-                        )
-                        .execute(&state.db)
-                        .await?;
-                    } else {
-                        crate::services::jobs::enqueue(
-                            &state.db,
-                            "import_archive",
-                            serde_json::json!({ "archive_file_id": record.id }),
-                        )
-                        .await?;
-                    }
-                }
+                on_archive_ingested(
+                    state,
+                    owner,
+                    record.id,
+                    record.kind,
+                    &filename,
+                    &blob.sha256,
+                )
+                .await?;
                 records.push(record);
             }
             _ => {}
@@ -352,8 +323,56 @@ async fn consume_fields(
     Ok(records)
 }
 
+/// What happens to a zip once its bytes are stored: it unpacks in the background
+/// into its owner's files — onto a variant, into a model's or bundle's "unsorted"
+/// bucket, or into an import's staging bucket. The archive itself only lives as
+/// long as the import does — committing one drops the original and keeps a
+/// `source_archives` row in its place (services/gc.rs).
+///
+/// One exception: a zip that lands in an import and turns out to be a MeshTrove
+/// export (it carries a manifest.json) is *restored*, not carved. Peek its central
+/// directory — a cheap read that never unpacks the rest — and if it is one, flag
+/// the import and skip the unpack; the Import page then offers "restore"
+/// (routes/transfer).
+///
+/// Shared by every ingest path — a browser upload and a dropbox pickup
+/// (services/dropbox.rs) — so an archive behaves the same whichever door it came
+/// through. A non-archive is a no-op.
+pub(crate) async fn on_archive_ingested(
+    state: &AppState,
+    owner: Owner,
+    file_id: Uuid,
+    kind: FileKind,
+    filename: &str,
+    sha256: &str,
+) -> Result<(), ApiError> {
+    if !matches!(kind, FileKind::Archive) || !filename.to_lowercase().ends_with(".zip") {
+        return Ok(());
+    }
+    let is_export = matches!(owner, Owner::Import(_))
+        && crate::services::transfer::read_manifest_from_blob(&state.store, sha256)
+            .await?
+            .is_some();
+    if let (true, Owner::Import(import_id)) = (is_export, owner) {
+        sqlx::query!(
+            "UPDATE imports SET is_export = true, updated_at = now() WHERE id = $1",
+            import_id,
+        )
+        .execute(&state.db)
+        .await?;
+    } else {
+        crate::services::jobs::enqueue(
+            &state.db,
+            "import_archive",
+            serde_json::json!({ "archive_file_id": file_id }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn insert_file(
+pub(crate) async fn insert_file(
     state: &AppState,
     owner: Owner,
     sha256: &str,
