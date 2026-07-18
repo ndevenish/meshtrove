@@ -9,7 +9,8 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
+    http::StatusCode,
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
@@ -24,7 +25,7 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/dropbox", get(list))
+        .route("/api/dropbox", get(list).delete(remove))
         .route("/api/dropbox/import", post(pick_up))
 }
 
@@ -223,4 +224,41 @@ async fn pick_up(
     // import reported as settled the instant before its pickup starts is one the
     // page would offer to commit while it is still filling.
     Ok(Json(imports::fetch_import(&state, import.id).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct EntryQuery {
+    /// Name of the entry to delete, as `GET /api/dropbox` reported it.
+    pub entry: String,
+}
+
+/// Delete a dropbox entry off the server's disk. A pickup only copies an entry
+/// into the store; the original lingers until an admin clears it, which until
+/// now meant shell access to the box. Admin-only, like the rest of this surface.
+async fn remove(
+    State(state): State<AppState>,
+    user: User,
+    Query(query): Query<EntryQuery>,
+) -> Result<StatusCode, ApiError> {
+    user.require_admin()?;
+    let path = dropbox::resolve(&state.config.dropbox_dir(), query.entry.trim())
+        .map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        // The entry may be a symlink (a dropbox pointed at a NAS share). Removing
+        // it must unlink the entry itself — never recurse through the link and
+        // wipe the share behind it — so branch on the *link's* own type, not the
+        // target's. On Unix `remove_file` unlinks a symlink whatever it points at.
+        let kind = std::fs::symlink_metadata(&path)?.file_type();
+        if kind.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }
+    })
+    .await
+    .map_err(|e| ApiError::Internal(anyhow::Error::new(e)))?
+    .map_err(|e| ApiError::Internal(e.into()))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

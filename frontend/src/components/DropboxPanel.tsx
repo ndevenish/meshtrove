@@ -18,6 +18,7 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import FolderIcon from '@mui/icons-material/Folder'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import RefreshIcon from '@mui/icons-material/Refresh'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatBytes, type DropboxEntry } from '../api'
@@ -61,6 +62,15 @@ export default function DropboxPanel() {
       await queryClient.invalidateQueries({ queryKey: ['imports'] })
       await queryClient.invalidateQueries({ queryKey: ['dropbox'] })
       navigate(`/imports/${staged.id}`)
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const del = useMutation({
+    mutationFn: (entry: string) => api.deleteDropboxEntry(entry),
+    onSuccess: async () => {
+      setError('')
+      await queryClient.invalidateQueries({ queryKey: ['dropbox'] })
     },
     onError: (e: Error) => setError(e.message),
   })
@@ -138,7 +148,18 @@ export default function DropboxPanel() {
                 key={entry.name}
                 entry={entry}
                 busy={pickUp.isPending && pickUp.variables === entry.name}
+                deleting={del.isPending && del.variables === entry.name}
                 onImport={() => pickUp.mutate(entry.name)}
+                onDelete={() => {
+                  if (
+                    confirm(
+                      `Delete "${entry.name}" from the server? This removes it from the ` +
+                        `dropbox on disk and cannot be undone. Anything already imported ` +
+                        `into the library is unaffected.`,
+                    )
+                  )
+                    del.mutate(entry.name)
+                }}
               />
             ))}
           </Stack>
@@ -154,11 +175,15 @@ export default function DropboxPanel() {
 function EntryRow({
   entry,
   busy,
+  deleting,
   onImport,
+  onDelete,
 }: {
   entry: DropboxEntry
   busy: boolean
+  deleting: boolean
   onImport: () => void
+  onDelete: () => void
 }) {
   // An entry is not consumed by a pickup, so nothing stops a second one but this
   // — and a second pickup of a big folder is a long, silent waste of disk.
@@ -200,6 +225,16 @@ function EntryRow({
       >
         {busy ? 'Starting…' : done ? 'Import again' : 'Import'}
       </Button>
+      {/* Clearing the original off disk once it is safely in the library — the
+          one step that used to need shell access. Barred mid-pickup, when the
+          files are still being read out of the dropbox. */}
+      <Tooltip title="Delete from the server">
+        <span>
+          <IconButton color="error" onClick={onDelete} disabled={entry.importing || deleting}>
+            {deleting ? <CircularProgress size={20} /> : <DeleteOutlineIcon />}
+          </IconButton>
+        </span>
+      </Tooltip>
     </Stack>
   )
 }

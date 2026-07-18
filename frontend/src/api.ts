@@ -596,6 +596,9 @@ export const api = {
   /** stage one dropbox entry as an import; the copy itself runs as a job */
   pickUpDropboxEntry: (entry: string) =>
     request<ImportSummary>('/api/dropbox/import', json({ entry })),
+  /** delete a dropbox entry off the server's disk (admin only) */
+  deleteDropboxEntry: (entry: string) =>
+    request<void>(`/api/dropbox?entry=${encodeURIComponent(entry)}`, { method: 'DELETE' }),
   importLayouts: () => request<ImportLayout[]>('/api/import-layouts'),
   createImportLayout: (body: { name: string; creator_id?: string | null } & LayoutSpec) =>
     request<ImportLayout>('/api/import-layouts', json(body)),
