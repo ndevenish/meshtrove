@@ -14,9 +14,10 @@ import { LIKE_COLOR } from '../theme'
 /// the card's right edge whether or not there is a number to show. Hidden at
 /// zero — a row of honest zeroes tells nobody anything.
 ///
-/// The negative margins cancel the button's own padding back out: horizontally
-/// so the gap to the card's edge is the foot's alone rather than that plus the
-/// button's, vertically so the button's hit-target doesn't inflate the creator
+/// Trimmed right padding walks the heart out to the card's edge so its gap
+/// there matches its gap to the bottom — a negative margin can't, because the
+/// flex-grow creator beside it just absorbs the space that frees. A negative
+/// vertical margin keeps the button's hit-target from inflating the creator
 /// line it shares.
 ///
 /// Lives outside the card's CardActionArea: a <button> nested in an <a> is
@@ -77,11 +78,15 @@ export default function LikeButton({
         sx={{
           borderRadius: 5,
           gap: 0.5,
-          px: 1,
-          // Cancel the button's own padding back out: horizontally so the heart
-          // keeps the card's right edge, vertically so its hit-target doesn't
-          // inflate the creator line it now sits on.
-          mr: -0.75,
+          // The heart sits at the *end* of a row whose creator text has
+          // flex-grow, so a negative right margin buys nothing — the creator
+          // just eats the freed space and the button stays put. Trimming the
+          // button's own right padding is what walks the glyph out to the edge,
+          // so its gap to the card's right matches its gap to the bottom rather
+          // than carrying the full padding twice over. `my` keeps the button's
+          // hit-target from inflating the creator line it shares.
+          pl: 1,
+          pr: 0.25,
           my: -0.5,
           color: shown ? LIKE_COLOR : 'text.disabled',
           '&:hover': { color: LIKE_COLOR },
