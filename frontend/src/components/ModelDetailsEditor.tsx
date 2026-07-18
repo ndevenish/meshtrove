@@ -36,6 +36,7 @@ const ModelDetailsEditor = forwardRef<
   useSuppressGlobalDrop()
   const [name, setName] = useState(model.name)
   const [creatorName, setCreatorName] = useState(model.creator_name ?? '')
+  const [creatorRef, setCreatorRef] = useState(model.creator_ref ?? '')
   const [tags, setTags] = useState<string[]>(model.tags)
   const [sourceUrl, setSourceUrl] = useState(model.source_url ?? '')
   const [description, setDescription] = useState(model.description_md ?? '')
@@ -66,6 +67,7 @@ const ModelDetailsEditor = forwardRef<
       const saved = await api.updateModel(model.id, {
         name: name.trim(),
         creator_id,
+        creator_ref: creatorRef.trim() || null,
         source_url: sourceUrl.trim() || null,
         tags,
       })
@@ -136,6 +138,12 @@ const ModelDetailsEditor = forwardRef<
         value={creatorName}
         onInputChange={(_, value) => setCreatorName(value)}
         renderInput={(props) => <TextField {...props} label="Creator (author / company / site)" />}
+      />
+      <TextField
+        label="Creator ID"
+        value={creatorRef}
+        onChange={(e) => setCreatorRef(e.target.value)}
+        placeholder="the creator's own id / SKU for this model"
       />
       <Autocomplete
         multiple

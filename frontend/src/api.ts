@@ -100,6 +100,8 @@ export interface ModelDetail {
   slug: string
   creator_id: string | null
   creator_name: string | null
+  /** the creator's own id/SKU for the model — free text, not the creators FK */
+  creator_ref: string | null
   source_url: string | null
   license: string | null
   purchase_price: number | null
@@ -243,7 +245,7 @@ export interface DropboxListing {
 
 /// What a capture group means. No "variant" role: a variant IS its tag set,
 /// so the union of a file's variant-tag captures is its variant.
-export type GroupRole = 'model_name' | 'model_tag' | 'variant_tag' | 'ignore'
+export type GroupRole = 'model_name' | 'creator_ref' | 'model_tag' | 'variant_tag' | 'ignore'
 
 /// One regex of a layout. The pattern is a backend (fancy-regex) pattern — an
 /// opaque string here; the frontend never runs it. Group numbers and the value
@@ -292,6 +294,7 @@ export interface FileAnnotation {
       their output was dropped for this file (a warning, never a blocker) */
   invalid_rules: number[]
   model_name?: string
+  creator_ref?: string
   model_tags: string[]
   variant_tags: string[]
   /** raw variant-tag captures with no resolution — fill the value map in */
@@ -307,6 +310,8 @@ export interface PlanVariant {
 
 export interface PlanModel {
   name: string
+  /** the creator's own id/SKU, if a creator_ref group caught one */
+  creator_ref?: string
   tags: string[]
   file_count: number
   variants: PlanVariant[]

@@ -52,11 +52,12 @@ const modelKey = (m: PlanModel): string =>
 /// Highlight colours per role — alpha overlays so they read on light and dark.
 export const ROLE_STYLES: Record<GroupRole, { label: string; bg: string }> = {
   model_name: { label: 'Model name', bg: 'rgba(250, 104, 49, 0.30)' },
+  creator_ref: { label: 'Creator ID', bg: 'rgba(2, 136, 209, 0.28)' },
   model_tag: { label: 'Model tag', bg: 'rgba(142, 36, 170, 0.25)' },
   variant_tag: { label: 'Variant tag', bg: 'rgba(46, 125, 50, 0.28)' },
   ignore: { label: 'Ignore', bg: 'transparent' },
 }
-const ROLE_ORDER: GroupRole[] = ['model_name', 'model_tag', 'variant_tag', 'ignore']
+const ROLE_ORDER: GroupRole[] = ['model_name', 'creator_ref', 'model_tag', 'variant_tag', 'ignore']
 
 /// What a rule is called in a message when the user hasn't named it.
 const ruleLabel = (rule: LayoutRule, index: number): string =>
@@ -772,6 +773,13 @@ export function AnnotatedFileList({
                       size="small"
                       label={annotation.model_name}
                       sx={{ bgcolor: ROLE_STYLES.model_name.bg }}
+                    />
+                  )}
+                  {annotation.creator_ref && (
+                    <Chip
+                      size="small"
+                      label={annotation.creator_ref}
+                      sx={{ bgcolor: ROLE_STYLES.creator_ref.bg }}
                     />
                   )}
                   {annotation.model_tags.map((tag) => (

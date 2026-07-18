@@ -562,12 +562,19 @@ async fn commit(
         CommitInput::NewModel { name, meta, .. } => {
             let name = named(name);
             let slug = models::unique_slug(&state, &name, None, None).await?;
+            // A one-model carve produces a single planned model; take the creator
+            // id its layout caught, if any.
+            let creator_ref = carve
+                .as_ref()
+                .and_then(|p| p.models.first())
+                .and_then(|m| m.creator_ref.clone());
             let model_id: Uuid = sqlx::query_scalar!(
-                "INSERT INTO models (name, slug, creator_id, created_by)
-                 VALUES ($1, $2, $3, $4) RETURNING id",
+                "INSERT INTO models (name, slug, creator_id, creator_ref, created_by)
+                 VALUES ($1, $2, $3, $4, $5) RETURNING id",
                 name,
                 slug,
                 meta.creator_id,
+                creator_ref,
                 user.id,
             )
             .fetch_one(&mut *tx)
@@ -1290,11 +1297,12 @@ async fn carve_into_bundle(
             None => {
                 let slug = unique_member_slug(&mut *tx, &planned.name, &mut reserved_slugs).await?;
                 let model_id: Uuid = sqlx::query_scalar!(
-                    "INSERT INTO models (name, slug, creator_id, created_by)
-                     VALUES ($1, $2, $3, $4) RETURNING id",
+                    "INSERT INTO models (name, slug, creator_id, creator_ref, created_by)
+                     VALUES ($1, $2, $3, $4, $5) RETURNING id",
                     planned.name,
                     slug,
                     bundle_creator,
+                    planned.creator_ref,
                     user_id,
                 )
                 .fetch_one(&mut *tx)
@@ -1402,6 +1410,7 @@ mod tests {
     fn planned(name: &str, tags: &[&str]) -> layout::PlanModel {
         layout::PlanModel {
             name: name.into(),
+            creator_ref: None,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             file_count: 0,
             variants: Vec::new(),

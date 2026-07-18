@@ -249,6 +249,8 @@ async fn search(
 pub struct ModelInput {
     pub name: String,
     pub creator_id: Option<Uuid>,
+    /// The creator's own id/SKU for this model — free text, not the creators FK.
+    pub creator_ref: Option<String>,
     pub source_url: Option<String>,
     pub license: Option<String>,
     pub purchase_price: Option<f64>,
@@ -267,6 +269,7 @@ pub struct ModelDetail {
     pub slug: String,
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
+    pub creator_ref: Option<String>,
     pub source_url: Option<String>,
     pub license: Option<String>,
     pub purchase_price: Option<f64>,
@@ -374,13 +377,14 @@ async fn create(
 
     let mut tx = state.db.begin().await?;
     let model_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO models (name, slug, creator_id, source_url, license,
+        r#"INSERT INTO models (name, slug, creator_id, creator_ref, source_url, license,
                                purchase_price, purchase_date, order_ref, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6::float8::numeric(10,2), $7, $8, $9)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::float8::numeric(10,2), $8, $9, $10)
            RETURNING id"#,
         name,
         slug,
         input.creator_id,
+        input.creator_ref,
         input.source_url,
         input.license,
         input.purchase_price,
@@ -412,6 +416,7 @@ async fn create(
 async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiError> {
     let row = sqlx::query!(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?",
+                  m.creator_ref,
                   m.source_url, m.license, m.purchase_price::float8 as purchase_price,
                   m.purchase_date, m.order_ref, m.created_by, m.created_at, m.updated_at,
                   (SELECT r.body_md FROM model_description_revisions r
@@ -479,6 +484,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
         slug: row.slug,
         creator_id: row.creator_id,
         creator_name: row.creator_name,
+        creator_ref: row.creator_ref,
         source_url: row.source_url,
         license: row.license,
         purchase_price: row.purchase_price,
@@ -561,6 +567,7 @@ async fn update(
     // are on the form, so a cleared one there is a real instruction to clear.
     sqlx::query!(
         r#"UPDATE models SET name = $2, slug = $9, creator_id = $3, source_url = $4,
+               creator_ref = $10,
                license = coalesce($5, license),
                purchase_price = coalesce($6::float8::numeric(10,2), purchase_price),
                purchase_date = coalesce($7, purchase_date),
@@ -576,6 +583,7 @@ async fn update(
         input.purchase_date,
         input.order_ref,
         slug,
+        input.creator_ref,
     )
     .execute(&mut *tx)
     .await?;

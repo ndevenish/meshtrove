@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO models (name, slug, creator_id, created_by)\n                     VALUES ($1, $2, $3, $4) RETURNING id",
+  "query": "INSERT INTO models (name, slug, creator_id, creator_ref, created_by)\n                 VALUES ($1, $2, $3, $4, $5) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -20,6 +20,7 @@
         "Text",
         "Text",
         "Uuid",
+        "Text",
         "Uuid"
       ]
     },
@@ -27,5 +28,5 @@
       false
     ]
   },
-  "hash": "0db482bf4f815e2b514bf2e73db6350d16258d38b1e4c52d9126e3f79c3386f9"
+  "hash": "c218e8e66a4646dcfb461b0a59b609375d3a7f00c2db64051e74f297cb3f1231"
 }

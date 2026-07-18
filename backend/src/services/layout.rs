@@ -37,6 +37,10 @@ use crate::error::ApiError;
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     ModelName,
+    /// The creator's own id/SKU for the model. Singular per layout, like the
+    /// model name — a model has one — but stored verbatim (an id, not a title,
+    /// so no camel-case expansion).
+    CreatorRef,
     ModelTag,
     VariantTag,
     Ignore,
@@ -143,6 +147,8 @@ pub struct FileAnnotation {
     pub invalid_rules: Vec<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_ref: Option<String>,
     pub model_tags: Vec<String>,
     pub variant_tags: Vec<String>,
     /// Raw variant-tag captures with no resolution — the mapping table's todo.
@@ -167,6 +173,10 @@ pub struct PlanVariant {
 pub struct PlanModel {
     /// Empty under [`CarveTarget::Model`] when no single name was captured.
     pub name: String,
+    /// The creator's own id/SKU for this model, if a `creator_ref` group caught
+    /// one. Stamped onto the model at commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_ref: Option<String>,
     pub tags: Vec<String>,
     pub file_count: usize,
     pub variants: Vec<PlanVariant>,
@@ -346,6 +356,7 @@ pub fn analyze(
 ) -> Result<Plan, ApiError> {
     let mut compiled: Vec<CompiledRule> = Vec::with_capacity(spec.rules.len());
     let mut name_groups = 0usize;
+    let mut creator_ref_groups = 0usize;
     for rule in &spec.rules {
         // Searched, not anchored — a small rule finds its fragment wherever it
         // sits. The seeded patterns anchor themselves (`^…$`), so they still
@@ -372,6 +383,7 @@ pub fn analyze(
             }
         }
         name_groups += roles.iter().filter(|r| **r == Role::ModelName).count();
+        creator_ref_groups += roles.iter().filter(|r| **r == Role::CreatorRef).count();
 
         compiled.push(CompiledRule {
             regex,
@@ -392,6 +404,12 @@ pub fn analyze(
     if name_groups > 1 {
         return Err(ApiError::BadRequest(
             "at most one capture group, in one rule, can be the model name".into(),
+        ));
+    }
+    // The creator id is singular for the same reason the name is: a model has one.
+    if creator_ref_groups > 1 {
+        return Err(ApiError::BadRequest(
+            "at most one capture group, in one rule, can be the creator id".into(),
         ));
     }
 
@@ -418,6 +436,7 @@ pub fn analyze(
     type VariantKey = Vec<String>;
     struct ModelAcc {
         name: String,
+        creator_ref: Option<String>,
         tags: Vec<String>,
         variants: BTreeMap<VariantKey, PlanVariant>,
     }
@@ -433,6 +452,7 @@ pub fn analyze(
         let mut invalid_rules: Vec<usize> = Vec::new();
         let mut spans: Vec<(usize, usize, Role)> = Vec::new();
         let mut model_name: Option<String> = None;
+        let mut creator_ref: Option<String> = None;
         let mut model_tags: Vec<String> = Vec::new();
         let mut variant_tags: Vec<String> = Vec::new();
         let mut unmapped: Vec<String> = Vec::new();
@@ -510,6 +530,8 @@ pub fn analyze(
                     // capture becomes the model's name verbatim — so `DwarfBerserker`
                     // would be the name in the library. Put the spaces back.
                     Role::ModelName => model_name = Some(crate::util::expand_camel_case(raw)),
+                    // An id, not a title: keep it exactly as captured.
+                    Role::CreatorRef => creator_ref = Some(raw.clone()),
                     Role::ModelTag => {
                         if !model_tags.iter().any(|t| fold(t) == fold(raw)) {
                             model_tags.push(raw.clone());
@@ -580,6 +602,7 @@ pub fn analyze(
                 parts,
                 invalid_rules,
                 model_name: None,
+                creator_ref: None,
                 model_tags: vec![],
                 variant_tags: vec![],
                 unmapped: vec![],
@@ -610,9 +633,14 @@ pub fn analyze(
                     CarveTarget::Model => String::new(),
                     CarveTarget::Bundle => model_name.clone().unwrap_or_default(),
                 },
+                creator_ref: None,
                 tags: Vec::new(),
                 variants: BTreeMap::new(),
             });
+            // First file to carry one wins; a model has a single creator id.
+            if acc.creator_ref.is_none() {
+                acc.creator_ref = creator_ref.clone();
+            }
             for tag in &model_tags {
                 if !acc.tags.iter().any(|t| fold(t) == fold(tag)) {
                     acc.tags.push(tag.clone());
@@ -637,6 +665,7 @@ pub fn analyze(
             parts,
             invalid_rules,
             model_name,
+            creator_ref,
             model_tags,
             variant_tags,
             unmapped,
@@ -649,6 +678,7 @@ pub fn analyze(
         .map(|acc| PlanModel {
             file_count: acc.variants.values().map(|v| v.file_count).sum(),
             name: acc.name,
+            creator_ref: acc.creator_ref,
             tags: acc.tags,
             variants: acc.variants.into_values().collect(),
             merge_target: None,
