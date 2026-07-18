@@ -55,16 +55,23 @@ export default function FilterSidebar() {
             Variants
           </Typography>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
-            {variantTags.map((tag) => (
-              <Chip
-                key={tag.id}
-                label={`${tag.name} (${tag.variant_count})`}
-                size="small"
-                color={activeVariantTags.includes(tag.name) ? 'primary' : 'default'}
-                variant={activeVariantTags.includes(tag.name) ? 'filled' : 'outlined'}
-                onClick={() => toggle('vtags', activeVariantTags, tag.name)}
-              />
-            ))}
+            {variantTags.map((tag) => {
+              const active = activeVariantTags.includes(tag.name)
+              return (
+                <Chip
+                  key={tag.id}
+                  label={`${tag.name} (${tag.variant_count})`}
+                  size="small"
+                  color={active ? 'primary' : 'default'}
+                  variant={active ? 'filled' : 'outlined'}
+                  onClick={() => toggle('vtags', activeVariantTags, tag.name)}
+                  // A dead end under the current selection — adding it would empty
+                  // the grid. Faded, not hidden, so the vocabulary stays put
+                  // instead of reshuffling as you narrow.
+                  sx={{ opacity: tag.variant_count === 0 && !active ? 0.4 : 1 }}
+                />
+              )
+            })}
           </Box>
           <Divider sx={{ my: 2 }} />
         </>
@@ -73,16 +80,20 @@ export default function FilterSidebar() {
         Tags
       </Typography>
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
-        {(tags ?? []).map((tag) => (
-          <Chip
-            key={tag.id}
-            label={`${tag.name} (${tag.model_count})`}
-            size="small"
-            color={activeTags.includes(tag.name) ? 'primary' : 'default'}
-            variant={activeTags.includes(tag.name) ? 'filled' : 'outlined'}
-            onClick={() => toggle('tags', activeTags, tag.name)}
-          />
-        ))}
+        {(tags ?? []).map((tag) => {
+          const active = activeTags.includes(tag.name)
+          return (
+            <Chip
+              key={tag.id}
+              label={`${tag.name} (${tag.model_count})`}
+              size="small"
+              color={active ? 'primary' : 'default'}
+              variant={active ? 'filled' : 'outlined'}
+              onClick={() => toggle('tags', activeTags, tag.name)}
+              sx={{ opacity: tag.model_count === 0 && !active ? 0.1 : 1 }}
+            />
+          )
+        })}
         {tags?.length === 0 && (
           <Typography variant="body2" color="text.secondary">
             No tags yet
