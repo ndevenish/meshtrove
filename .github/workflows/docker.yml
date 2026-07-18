@@ -120,11 +120,12 @@ jobs:
           images: ${{ env.IMAGE }}
           # Release tags from the git tag (v1.2.3 -> 1.2.3 and 1.2); `latest`
           # tracks the newest semver tag (default flavor latest=auto). A manual
-          # dispatch that isn't on a semver tag just gets the sha tag.
+          # dispatch also moves `latest`, plus always a per-commit sha tag.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
