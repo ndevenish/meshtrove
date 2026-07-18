@@ -597,6 +597,9 @@ async fn commit(
             )
             .execute(&mut *tx)
             .await?;
+            // Any images among those files are pictures of the model — pull them
+            // out of the file list and into its gallery.
+            adopt_model_images(&mut tx, model_id, user.id).await?;
             render_models.push(model_id);
             CommitResult {
                 kind: "model".into(),
@@ -1066,6 +1069,68 @@ async fn carve_variants(
     Ok(())
 }
 
+/// Move a model's imported image *files* into its image gallery. A photo that
+/// shipped inside the archive — landed on the model itself or on one of its
+/// variants by the carve — is a picture of the model, not something to download,
+/// so it belongs in the `images` table rather than `files`. For each image blob
+/// owned by the model or any of its variants: insert an `images` row owned by the
+/// model (same blob, no new bytes), then drop the `files` row.
+///
+/// The shortest-named image becomes the model's primary if it hasn't got one
+/// already — the same tie-break `model_preview_image` uses — so an included cover
+/// shot becomes the model's picture instead of a rendered STL. A model that
+/// already has a primary (a scraper cover, a promoted variant render) keeps it;
+/// the adopted images just join the gallery. Deduped by (model, blob), so the
+/// same picture sitting in two variants becomes one image.
+async fn adopt_model_images(
+    tx: &mut sqlx::PgConnection,
+    model_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    let images = sqlx::query!(
+        r#"SELECT f.id, f.blob_sha256, f.mime
+           FROM files f
+           LEFT JOIN model_variants v ON v.id = f.variant_id
+           WHERE (f.model_id = $1 OR v.model_id = $1)
+             AND f.mime LIKE 'image/%'
+           ORDER BY length(f.filename), f.filename"#,
+        model_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if images.is_empty() {
+        return Ok(());
+    }
+    let mut file_ids: Vec<Uuid> = Vec::with_capacity(images.len());
+    for img in &images {
+        // Sequential inserts: once the first claims primary, `NOT EXISTS` turns
+        // the rest false, so exactly one is primary — and none is if the model
+        // already had one. `source_file_id` is left null on purpose: the file it
+        // would point at is deleted just below (the FK would null it anyway), and
+        // the explicit primary is what the preview picker keys on.
+        sqlx::query!(
+            r#"INSERT INTO images (blob_sha256, model_id, kind, mime, is_primary, created_by)
+               SELECT $1, $2, 'imported', $3,
+                      NOT EXISTS (SELECT 1 FROM images i WHERE i.model_id = $2 AND i.is_primary),
+                      $4
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM images i WHERE i.blob_sha256 = $1 AND i.model_id = $2
+               )"#,
+            img.blob_sha256,
+            model_id,
+            img.mime,
+            user_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        file_ids.push(img.id);
+    }
+    sqlx::query!("DELETE FROM files WHERE id = ANY($1::uuid[])", &file_ids)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
 /// Stamp the import's metadata onto every model the carve created. `coalesce`
 /// throughout: a blank field on the import page means "nothing to say", not
 /// "erase what the carve worked out" — so a member model keeps the creator its
@@ -1256,6 +1321,9 @@ async fn carve_into_bundle(
             model_is_new,
         )
         .await?;
+        // Images the carve placed on this member — whether it was freshly created
+        // or matched to it by name — are pictures of it, not files to download.
+        adopt_model_images(&mut *tx, model_id, user_id).await?;
     }
 
     // Record the bundle's sections (categories) from the carve's model tags, in

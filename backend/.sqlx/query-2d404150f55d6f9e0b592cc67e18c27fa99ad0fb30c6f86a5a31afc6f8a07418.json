@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT f.id, f.blob_sha256, f.mime\n           FROM files f\n           LEFT JOIN model_variants v ON v.id = f.variant_id\n           WHERE (f.model_id = $1 OR v.model_id = $1)\n             AND f.mime LIKE 'image/%'\n           ORDER BY length(f.filename), f.filename",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "blob_sha256",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "blob_sha256"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "mime",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "mime"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "2d404150f55d6f9e0b592cc67e18c27fa99ad0fb30c6f86a5a31afc6f8a07418"
+}
