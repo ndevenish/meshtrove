@@ -699,6 +699,9 @@ export interface ExportSummary {
   size: number | null
   filename: string | null
   error: string | null
+  /** absolute path of the built artifact in the store — sent only to admins, and
+      only for a ready export (see routes/exports.rs) */
+  path: string | null
   created_at: string
   updated_at: string
 }

@@ -19,7 +19,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::extractors::User;
+use crate::extractors::{User, UserRole};
 use crate::services::export_job::export_dir;
 use crate::services::transfer::{ExportSpec, VariantFilter};
 use crate::state::AppState;
@@ -46,8 +46,23 @@ pub struct ExportSummary {
     pub filename: Option<String>,
     /// Why it failed (status = failed).
     pub error: Option<String>,
+    /// Absolute path of the built artifact in the store — populated only for an
+    /// admin, and only once the export is `ready` (before that no file exists).
+    /// Lets an admin grab the zip straight off disk instead of downloading it.
+    pub path: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The on-disk artifact path, but only for an admin looking at a ready export —
+/// a server filesystem path is not something to hand to every viewer.
+fn artifact_path(state: &AppState, id: Uuid, status: &str, user: &User) -> Option<String> {
+    (user.role == UserRole::Admin && status == "ready").then(|| {
+        export_dir(state)
+            .join(format!("{id}.zip"))
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -119,7 +134,7 @@ async fn create(
     )
     .await?;
 
-    Ok(Json(fetch(&state, id).await?))
+    Ok(Json(fetch(&state, id, &user).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -306,16 +321,20 @@ async fn list(
     .await?;
     Ok(Json(
         rows.into_iter()
-            .map(|r| ExportSummary {
-                id: r.id,
-                name: r.name,
-                status: r.status,
-                model_count: r.model_count as i64,
-                size: r.size,
-                filename: r.filename,
-                error: r.error,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
+            .map(|r| {
+                let path = artifact_path(&state, r.id, &r.status, &user);
+                ExportSummary {
+                    id: r.id,
+                    name: r.name,
+                    status: r.status,
+                    model_count: r.model_count as i64,
+                    size: r.size,
+                    filename: r.filename,
+                    error: r.error,
+                    path,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                }
             })
             .collect(),
     ))
@@ -328,7 +347,7 @@ async fn detail(
 ) -> Result<Json<ExportSummary>, ApiError> {
     let created_by = export_created_by(&state, id).await?;
     user.require_can_edit(created_by)?;
-    Ok(Json(fetch(&state, id).await?))
+    Ok(Json(fetch(&state, id, &user).await?))
 }
 
 async fn download(
@@ -376,7 +395,7 @@ async fn remove(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-async fn fetch(state: &AppState, id: Uuid) -> Result<ExportSummary, ApiError> {
+async fn fetch(state: &AppState, id: Uuid, user: &User) -> Result<ExportSummary, ApiError> {
     let r = sqlx::query!(
         r#"SELECT id, name, status, size, filename, error, created_at, updated_at,
                   coalesce(jsonb_array_length(spec->'model_ids'), 0) as "model_count!"
@@ -386,6 +405,7 @@ async fn fetch(state: &AppState, id: Uuid) -> Result<ExportSummary, ApiError> {
     .fetch_optional(&state.db)
     .await?
     .ok_or(ApiError::NotFound)?;
+    let path = artifact_path(state, r.id, &r.status, user);
     Ok(ExportSummary {
         id: r.id,
         name: r.name,
@@ -394,6 +414,7 @@ async fn fetch(state: &AppState, id: Uuid) -> Result<ExportSummary, ApiError> {
         size: r.size,
         filename: r.filename,
         error: r.error,
+        path,
         created_at: r.created_at,
         updated_at: r.updated_at,
     })

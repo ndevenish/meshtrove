@@ -12,6 +12,9 @@ import {
 import DownloadIcon from '@mui/icons-material/Download'
 import DeleteIcon from '@mui/icons-material/Delete'
 import ArchiveIcon from '@mui/icons-material/Archive'
+import ContentCopyIcon from '@mui/icons-material/ContentCopy'
+import CheckIcon from '@mui/icons-material/Check'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, exportDownloadUrl, formatBytes } from '../api'
@@ -94,9 +97,58 @@ export default function ExportsPage() {
                 </Button>
               </Tooltip>
             </Stack>
+            {/* Admins get the artifact's on-disk path (backend sends it only to
+                them, only when ready) — to grab the zip straight off the store. */}
+            {e.path && <PathBox path={e.path} />}
           </Paper>
         ))}
       </Stack>
     </Container>
+  )
+}
+
+/// The store path of a ready export, in a monospace box with a copy button.
+function PathBox({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(path)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Clipboard blocked (e.g. a non-secure origin) — the path stays selectable.
+    }
+  }
+  return (
+    <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: 'stretch' }}>
+      <Box
+        title={path}
+        sx={{
+          flexGrow: 1,
+          minWidth: 0,
+          fontFamily: 'monospace',
+          fontSize: 12,
+          bgcolor: 'action.hover',
+          borderRadius: 1,
+          px: 1,
+          py: 0.75,
+          overflowX: 'auto',
+          whiteSpace: 'nowrap',
+          display: 'flex',
+          alignItems: 'center',
+        }}
+      >
+        {path}
+      </Box>
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={() => void copy()}
+        startIcon={copied ? <CheckIcon /> : <ContentCopyIcon />}
+        sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+      >
+        {copied ? 'Copied' : 'Copy path'}
+      </Button>
+    </Stack>
   )
 }
