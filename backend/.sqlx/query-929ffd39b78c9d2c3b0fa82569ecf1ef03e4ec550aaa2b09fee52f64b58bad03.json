@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM models WHERE id = ANY($1::uuid[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "929ffd39b78c9d2c3b0fa82569ecf1ef03e4ec550aaa2b09fee52f64b58bad03"
+}

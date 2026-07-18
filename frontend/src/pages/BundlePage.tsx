@@ -44,6 +44,7 @@ import BundleUnsortedSection from '../components/BundleUnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ImportErrorDialog from '../components/ImportErrorDialog'
 import BundlePatchDialog from '../components/BundlePatchDialog'
+import BundleDeleteDialog from '../components/BundleDeleteDialog'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -58,6 +59,7 @@ export default function BundlePage() {
   const editorRef = useRef<DetailsEditorHandle>(null)
   const [saving, setSaving] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const [patchOpen, setPatchOpen] = useState(false)
   // The zip dropped on the inline importer box, handed to the dialog to preview.
   const [patchFile, setPatchFile] = useState<File | null>(null)
@@ -268,6 +270,14 @@ export default function BundlePage() {
                 <Button disabled={saving} onClick={() => setEditing(false)}>
                   Cancel
                 </Button>
+                <Button
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  disabled={saving}
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  Delete bundle
+                </Button>
               </Stack>
             )}
           </Stack>
@@ -395,6 +405,17 @@ export default function BundlePage() {
         onChange={refresh}
       />
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} bundle={bundle} />
+      <BundleDeleteDialog
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        bundle={bundle}
+        onDeleted={async () => {
+          setDeleteOpen(false)
+          await queryClient.invalidateQueries()
+          navigate('/')
+        }}
+      />
+
       <BundlePatchDialog
         bundleId={bundle.id}
         open={patchOpen}

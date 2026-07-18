@@ -478,17 +478,50 @@ async fn update(
     fetch_detail(&state, id).await.map(Json)
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct RemoveParams {
+    /// Also delete the bundle's member models, not just unlink them. Off by
+    /// default: a member is a standalone model that may live in other bundles.
+    #[serde(default)]
+    pub delete_models: bool,
+}
+
 async fn remove(
     State(state): State<AppState>,
     user: User,
     Path(id): Path<Uuid>,
+    Query(params): Query<RemoveParams>,
 ) -> Result<StatusCode, ApiError> {
     user.require_can_edit(bundle_created_by(&state, id).await?)?;
-    // Deletes the bundle and its bundle_models rows (cascade); member models
-    // themselves are standalone and remain.
-    sqlx::query!("DELETE FROM bundles WHERE id = $1", id)
-        .execute(&state.db)
+
+    let mut tx = state.db.begin().await?;
+    if params.delete_models {
+        // Each member is a standalone model with its own owner, so gate every one
+        // on the caller's edit permission *before* deleting any — all-or-nothing,
+        // never a partial wipe. Deleting a model cascades to its variants, files,
+        // images and bundle_models links (in this and any other bundle it was in);
+        // blobs are content-addressed and swept by GC (docs/plan.md).
+        let members = sqlx::query!(
+            "SELECT m.id, m.created_by FROM models m
+             JOIN bundle_models bm ON bm.model_id = m.id WHERE bm.bundle_id = $1",
+            id,
+        )
+        .fetch_all(&mut *tx)
         .await?;
+        for member in &members {
+            user.require_can_edit(member.created_by)?;
+        }
+        let ids: Vec<Uuid> = members.iter().map(|m| m.id).collect();
+        sqlx::query!("DELETE FROM models WHERE id = ANY($1::uuid[])", &ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+    // Any members not deleted just lose their bundle_models link (cascade); the
+    // bundle row itself goes either way.
+    sqlx::query!("DELETE FROM bundles WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

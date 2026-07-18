@@ -475,7 +475,10 @@ export const api = {
   createBundle: (body: unknown) => request<BundleDetail>('/api/bundles', json(body)),
   updateBundle: (id: string, body: unknown) =>
     request<BundleDetail>(`/api/bundles/${id}`, { ...json(body), method: 'PUT' }),
-  deleteBundle: (id: string) => request<void>(`/api/bundles/${id}`, { method: 'DELETE' }),
+  deleteBundle: (id: string, deleteModels = false) =>
+    request<void>(`/api/bundles/${id}${deleteModels ? '?delete_models=true' : ''}`, {
+      method: 'DELETE',
+    }),
   addModelToBundle: (bundleId: string, modelId: string) =>
     request<void>(`/api/bundles/${bundleId}/models`, json({ model_id: modelId })),
   removeModelFromBundle: (bundleId: string, modelId: string) =>
