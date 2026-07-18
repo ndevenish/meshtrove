@@ -412,18 +412,22 @@ export default function BundlePage() {
               </Box>
             </>
           )}
+
+          {/* Loose files sit with the description rather than full-width below:
+              they are a property of the bundle itself, like its tags and its
+              text, and the full width beneath belongs to the member grid. */}
+          <BundleUnsortedSection
+            bundle={bundle}
+            canEdit={!!canEdit}
+            editing={editing}
+            onChange={refresh}
+          />
         </Box>
       </Stack>
 
-      {/* Contents run the full width beneath the gallery/details block, so the
-          member grid gets every column it can and its category tabs have room. */}
+      {/* Members run the full width beneath the gallery/details block, so the
+          grid gets every column it can and its category tabs have room. */}
       <Divider sx={{ my: 3 }} />
-      <BundleUnsortedSection
-        bundle={bundle}
-        canEdit={!!canEdit}
-        editing={editing}
-        onChange={refresh}
-      />
       <MembersSection
         bundleId={bundle.id}
         bundleCreatorId={bundle.creator_id}

@@ -311,7 +311,11 @@ export default function ModelPage() {
                 </Box>
               )
             })}
-            {canEdit && (
+            {/* Same line as the delete button above: adding a picture is an edit,
+                so the tile waits for edit mode. Dropping and pasting are
+                unaffected — they are caught page-wide (imageGestures.ts) and stay
+                available whenever you can edit at all. */}
+            {canEdit && editing && (
               <Button
                 component="label"
                 variant="outlined"
