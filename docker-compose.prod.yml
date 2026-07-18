@@ -34,6 +34,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The image runs as its own uid (10001) by default. When the store is bind-
+    # mounted onto a host dataset (e.g. ZFS owned 1000:1000), run the container as
+    # that owner so it can write — otherwise you get "Permission denied (os error
+    # 13)". Set MESHTROVE_UID/GID in .env.prod to match the dataset's owner.
+    user: "${MESHTROVE_UID:-10001}:${MESHTROVE_GID:-10001}"
     environment:
       # The app applies migrations itself at startup (sqlx::migrate!).
       DATABASE_URL: postgres://meshtrove:${POSTGRES_PASSWORD}@postgres:5432/meshtrove
