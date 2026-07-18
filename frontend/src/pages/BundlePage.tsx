@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Autocomplete,
   Container,
@@ -549,8 +549,19 @@ function MembersSection({
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
-  // Which category tab is active; null = "All Models".
-  const [category, setCategory] = useState<string | null>(null)
+  // Which category tab is active; null = "All Models". Held in the URL rather
+  // than component state so opening a member and coming back restores the tab
+  // you were on. `replace` keeps re-tabbing on the same page to one history
+  // entry, so Back leaves the bundle in one step rather than walking every tab
+  // you tried.
+  const [params, setParams] = useSearchParams()
+  const category = params.get('cat')
+  const setCategory = (next: string | null) => {
+    const p = new URLSearchParams(params)
+    if (next) p.set('cat', next)
+    else p.delete('cat')
+    setParams(p, { replace: true })
+  }
   const [addValue, setAddValue] = useState('')
   const [savingCats, setSavingCats] = useState(false)
   // Drag-to-reorder the category rows: the row being dragged, and the row the

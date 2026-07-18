@@ -15,8 +15,12 @@ export default function ModelCard({
   hideCreator?: boolean
 }) {
   return (
-    <Card variant="outlined" sx={{ height: '100%' }}>
-      <CardActionArea component={Link} to={`/models/${model.slug}`}>
+    <Card variant="outlined" sx={{ height: '100%', position: 'relative' }}>
+      <CardActionArea
+        component={Link}
+        to={`/models/${model.slug}`}
+        sx={{ position: 'relative', zIndex: 2 }}
+      >
         <Box
           sx={{
             aspectRatio: '1',
@@ -64,7 +68,16 @@ export default function ModelCard({
               {model.creator_name ?? 'Unknown creator'}
             </Typography>
           )}
-          <LikeButton kind="model" id={model.id} liked={model.liked} likeCount={model.like_count} />
+          {/* Lifted above the overlay link below so the heart keeps its own
+              clicks while the rest of the foot navigates. */}
+          <Box sx={{ position: 'relative', zIndex: 2, display: 'flex' }}>
+            <LikeButton
+              kind="model"
+              id={model.id}
+              liked={model.liked}
+              likeCount={model.like_count}
+            />
+          </Box>
         </Stack>
         {model.tags.length > 0 && (
           <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
@@ -74,6 +87,17 @@ export default function ModelCard({
           </Stack>
         )}
       </Box>
+      {/* A full-card click target. It sits beneath the CardActionArea (which
+          keeps its own ripple over the image and name) but above the passive
+          foot, so the creator line and its surrounding padding open the model
+          too — everything but the heart, which is lifted back on top. */}
+      <Box
+        component={Link}
+        to={`/models/${model.slug}`}
+        aria-hidden
+        tabIndex={-1}
+        sx={{ position: 'absolute', inset: 0, zIndex: 1 }}
+      />
     </Card>
   )
 }

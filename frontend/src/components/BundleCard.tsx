@@ -14,8 +14,12 @@ type BundleCardData = Pick<
 
 export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
   return (
-    <Card variant="outlined" sx={{ height: '100%' }}>
-      <CardActionArea component={Link} to={`/bundles/${bundle.slug}`}>
+    <Card variant="outlined" sx={{ height: '100%', position: 'relative' }}>
+      <CardActionArea
+        component={Link}
+        to={`/bundles/${bundle.slug}`}
+        sx={{ position: 'relative', zIndex: 2 }}
+      >
         <Box
           sx={{
             aspectRatio: '1',
@@ -86,12 +90,16 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
           >
             {bundle.creator_name ?? 'Unknown creator'}
           </Typography>
-          <LikeButton
-            kind="bundle"
-            id={bundle.id}
-            liked={bundle.liked}
-            likeCount={bundle.like_count}
-          />
+          {/* Lifted above the overlay link below so the heart keeps its own
+              clicks while the rest of the foot navigates. */}
+          <Box sx={{ position: 'relative', zIndex: 2, display: 'flex' }}>
+            <LikeButton
+              kind="bundle"
+              id={bundle.id}
+              liked={bundle.liked}
+              likeCount={bundle.like_count}
+            />
+          </Box>
         </Stack>
         {bundle.tags.length > 0 && (
           <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
@@ -101,6 +109,17 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
           </Stack>
         )}
       </Box>
+      {/* A full-card click target. It sits beneath the CardActionArea (which
+          keeps its own ripple over the image and name) but above the passive
+          foot, so the creator line and its surrounding padding open the bundle
+          too — everything but the heart, which is lifted back on top. */}
+      <Box
+        component={Link}
+        to={`/bundles/${bundle.slug}`}
+        aria-hidden
+        tabIndex={-1}
+        sx={{ position: 'absolute', inset: 0, zIndex: 1 }}
+      />
     </Card>
   )
 }
