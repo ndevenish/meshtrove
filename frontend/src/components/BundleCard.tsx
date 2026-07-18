@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
 import { Card, CardActionArea, CardContent, Typography, Box, Chip, Stack } from '@mui/material'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
-import FavoriteIcon from '@mui/icons-material/Favorite'
 
 import { type BundleSummary, imageUrl } from '../api'
 import LikeButton from './LikeButton'
@@ -15,13 +14,14 @@ type BundleCardData = Pick<
 
 export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
   return (
-    // `position: relative` so the like button, which is not part of the link,
-    // can be pinned to the corner of the artwork.
-    <Card variant="outlined" sx={{ height: '100%', position: 'relative' }}>
+    // A column so the foot row — tags and the like button, the parts that are
+    // not the link — can sit below the CardActionArea and still be flush with
+    // the bottom of a card stretched to match its neighbours.
+    <Card variant="outlined" sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <CardActionArea
         component={Link}
         to={`/bundles/${bundle.slug}`}
-        sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'stretch' }}
+        sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', alignItems: 'stretch' }}
       >
         <Box
           sx={{
@@ -72,29 +72,33 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
             {bundle.model_count} model{bundle.model_count === 1 ? '' : 's'}
           </Typography>
         </Box>
-        <CardContent sx={{ flexGrow: 1, width: '100%', pb: '12px !important' }}>
+        <CardContent sx={{ flexGrow: 1, width: '100%', pb: 0 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.25 }} noWrap>
             {bundle.name}
           </Typography>
           <Typography variant="body2" color="text.secondary" noWrap>
             {bundle.creator_name ?? 'Unknown creator'}
           </Typography>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.75 }}>
-            {/* Matches ModelCard: the public tally, hidden at zero. */}
-            {bundle.like_count > 0 && (
-              <>
-                <FavoriteIcon sx={{ fontSize: 16, color: 'primary.main' }} />
-                <Typography variant="caption">{bundle.like_count}</Typography>
-              </>
-            )}
-            <Box sx={{ flexGrow: 1 }} />
-            {bundle.tags.slice(0, 2).map((tag) => (
-              <Chip key={tag} label={tag} size="small" variant="outlined" />
-            ))}
-          </Stack>
         </CardContent>
       </CardActionArea>
-      <LikeButton kind="bundle" id={bundle.id} liked={bundle.liked} />
+      {/* The card's base. `minHeight` holds the row open when a card has
+          neither tags nor likes, so the feet of a grid row stay level. */}
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{ alignItems: 'center', px: 2, pt: 0.75, pb: 1.5, minHeight: 30 }}
+      >
+        {bundle.tags.slice(0, 2).map((tag) => (
+          <Chip key={tag} label={tag} size="small" variant="outlined" />
+        ))}
+        <Box sx={{ flexGrow: 1 }} />
+        <LikeButton
+          kind="bundle"
+          id={bundle.id}
+          liked={bundle.liked}
+          likeCount={bundle.like_count}
+        />
+      </Stack>
     </Card>
   )
 }
