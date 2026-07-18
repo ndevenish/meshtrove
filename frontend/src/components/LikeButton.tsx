@@ -7,16 +7,17 @@ import { api } from '../api'
 import { useAuth } from '../main'
 import { LIKE_COLOR } from '../theme'
 
-/// The heart in a card's foot: one control carrying both what *you* think and
-/// what everyone thinks. The count sits inside the button rather than beside it
-/// so clicking the number does what clicking a number next to a heart looks
-/// like it should, and *before* it, so the heart stays put on the card's right
-/// edge whether or not there is a number to show. Hidden at zero — a row of
-/// honest zeroes tells nobody anything.
+/// The heart at the end of a card's creator line: one control carrying both
+/// what *you* think and what everyone thinks. The count sits inside the button
+/// rather than beside it so clicking the number does what clicking a number
+/// next to a heart looks like it should, and *before* it, so the heart keeps
+/// the card's right edge whether or not there is a number to show. Hidden at
+/// zero — a row of honest zeroes tells nobody anything.
 ///
-/// The negative right margin cancels the button's own padding: without it the
-/// gap to the card's edge is the padding plus the foot row's, and the heart
-/// floats visibly further from the right edge than from the bottom one.
+/// The negative margins cancel the button's own padding back out: horizontally
+/// so the gap to the card's edge is the foot's alone rather than that plus the
+/// button's, vertically so the button's hit-target doesn't inflate the creator
+/// line it shares.
 ///
 /// Lives outside the card's CardActionArea: a <button> nested in an <a> is
 /// invalid HTML, and the anchor would swallow the click.
@@ -52,7 +53,7 @@ export default function LikeButton({
   if (!user) {
     if (likeCount === 0) return null
     return (
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, py: 0.5, pr: 0.25 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, pr: 0.25 }}>
         <Typography variant="caption" color="text.secondary">
           {likeCount}
         </Typography>
@@ -77,7 +78,11 @@ export default function LikeButton({
           borderRadius: 5,
           gap: 0.5,
           px: 1,
+          // Cancel the button's own padding back out: horizontally so the heart
+          // keeps the card's right edge, vertically so its hit-target doesn't
+          // inflate the creator line it now sits on.
           mr: -0.75,
+          my: -0.5,
           color: shown ? LIKE_COLOR : 'text.disabled',
           '&:hover': { color: LIKE_COLOR },
         }}

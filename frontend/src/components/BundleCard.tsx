@@ -14,15 +14,8 @@ type BundleCardData = Pick<
 
 export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
   return (
-    // A column so the foot row — tags and the like button, the parts that are
-    // not the link — can sit below the CardActionArea and still be flush with
-    // the bottom of a card stretched to match its neighbours.
-    <Card variant="outlined" sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <CardActionArea
-        component={Link}
-        to={`/bundles/${bundle.slug}`}
-        sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', alignItems: 'stretch' }}
-      >
+    <Card variant="outlined" sx={{ height: '100%' }}>
+      <CardActionArea component={Link} to={`/bundles/${bundle.slug}`}>
         <Box
           sx={{
             aspectRatio: '1',
@@ -72,33 +65,42 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
             {bundle.model_count} model{bundle.model_count === 1 ? '' : 's'}
           </Typography>
         </Box>
-        <CardContent sx={{ flexGrow: 1, width: '100%', pb: 0 }}>
+        <CardContent sx={{ pb: 0 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.25 }} noWrap>
             {bundle.name}
           </Typography>
-          <Typography variant="body2" color="text.secondary" noWrap>
-            {bundle.creator_name ?? 'Unknown creator'}
-          </Typography>
         </CardContent>
       </CardActionArea>
-      {/* The card's base. `minHeight` holds the row open when a card has
-          neither tags nor likes, so the feet of a grid row stay level. */}
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{ alignItems: 'center', px: 2, pt: 0.75, pb: 1.5, minHeight: 30 }}
-      >
-        {bundle.tags.slice(0, 2).map((tag) => (
-          <Chip key={tag} label={tag} size="small" variant="outlined" />
-        ))}
-        <Box sx={{ flexGrow: 1 }} />
-        <LikeButton
-          kind="bundle"
-          id={bundle.id}
-          liked={bundle.liked}
-          likeCount={bundle.like_count}
-        />
-      </Stack>
+      {/* The card's text foot, outside the link: the heart rides the end of the
+          creator line rather than sitting in a band of its own, so the tally
+          reads as a property of the thing, level with the name it belongs to.
+          The creator takes the slack and truncates, leaving the heart pinned to
+          the right edge. */}
+      <Box sx={{ px: 2, pt: 0.25, pb: 1.5 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            noWrap
+            sx={{ flexGrow: 1, minWidth: 0 }}
+          >
+            {bundle.creator_name ?? 'Unknown creator'}
+          </Typography>
+          <LikeButton
+            kind="bundle"
+            id={bundle.id}
+            liked={bundle.liked}
+            likeCount={bundle.like_count}
+          />
+        </Stack>
+        {bundle.tags.length > 0 && (
+          <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+            {bundle.tags.slice(0, 2).map((tag) => (
+              <Chip key={tag} label={tag} size="small" variant="outlined" />
+            ))}
+          </Stack>
+        )}
+      </Box>
     </Card>
   )
 }
