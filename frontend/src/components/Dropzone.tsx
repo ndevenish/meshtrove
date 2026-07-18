@@ -31,6 +31,10 @@ export default function Dropzone({
   return (
     <Box
       component="label"
+      // Marks this as an explicit file target: an image dropped in here is a
+      // file, not a picture, so the page-wide image drop (see imageGestures.ts)
+      // leaves anything landing inside alone.
+      data-file-drop=""
       onDragOver={(e) => {
         e.preventDefault()
         setOver(true)

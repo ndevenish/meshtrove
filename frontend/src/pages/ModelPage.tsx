@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   Container,
@@ -13,6 +13,7 @@ import {
   Divider,
   Snackbar,
   Alert,
+  alpha,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import StarIcon from '@mui/icons-material/Star'
@@ -27,7 +28,7 @@ import DownloadIcon from '@mui/icons-material/Download'
 import { api, imageUrl, sourceOrigin } from '../api'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
-import { usePasteImage } from '../usePasteImage'
+import { usePasteImage, useDropImage } from '../imageGestures'
 import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
 import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
@@ -141,12 +142,24 @@ export default function ModelPage() {
     !!model &&
     !!user &&
     (user.role === 'admin' || (user.role === 'editor' && user.id === model.created_by))
-  usePasteImage(canEditModel, 'models', id ?? '', {
-    onUploaded: () => {
+  // Both gestures address the model by **UUID**: `id` here is the slug (the
+  // canonical URL), and the image routes parse their path segment as a Uuid, so
+  // passing it straight through fails the extractor before the handler runs.
+  const modelId = model?.id ?? ''
+  const imageAdded = useCallback(
+    (how: string) => {
       void queryClient.invalidateQueries({ queryKey: ['model', id] })
-      setToast('Image added from clipboard')
+      setToast(`Image added ${how}`)
     },
+    [queryClient, id],
+  )
+  usePasteImage(canEditModel, 'models', modelId, {
+    onUploaded: () => imageAdded('from clipboard'),
     onError: (m) => setToast(`Paste failed: ${m}`),
+  })
+  const droppingImage = useDropImage(canEditModel, 'models', modelId, {
+    onUploaded: () => imageAdded('to this model'),
+    onError: (m) => setToast(`Image upload failed: ${m}`),
   })
 
   if (!model) return null
@@ -170,14 +183,40 @@ export default function ModelPage() {
         <Box sx={{ width: { md: 460 }, flexShrink: 0 }}>
           <Paper
             variant="outlined"
-            sx={{
+            sx={(theme) => ({
               aspectRatio: '1',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               overflow: 'hidden',
-            }}
+              position: 'relative',
+              // The drop itself is caught page-wide (imageGestures.ts) — this is
+              // only where the page says so, since the gallery is where the
+              // picture is going to appear.
+              ...(droppingImage && {
+                borderColor: theme.palette.primary.main,
+                borderStyle: 'dashed',
+                borderWidth: 2,
+              }),
+            })}
           >
+            {droppingImage && (
+              <Stack
+                sx={(theme) => ({
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 1,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 1,
+                  pointerEvents: 'none',
+                  backgroundColor: alpha(theme.palette.background.paper, 0.9),
+                })}
+              >
+                <AddPhotoAlternateIcon sx={{ fontSize: 48, color: 'primary.main' }} />
+                <Typography sx={{ fontWeight: 600 }}>Drop to add image</Typography>
+              </Stack>
+            )}
             {shownImage ? (
               <Box
                 component="img"
@@ -190,7 +229,7 @@ export default function ModelPage() {
                 No images yet
                 {canEdit && (
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    Paste an image (⌘V) to add one
+                    Drop one on the page, or paste (⌘V)
                   </Typography>
                 )}
               </Typography>

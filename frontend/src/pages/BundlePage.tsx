@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Autocomplete,
@@ -17,6 +17,7 @@ import {
   Tabs,
   Snackbar,
   Alert,
+  alpha,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import StarIcon from '@mui/icons-material/Star'
@@ -33,7 +34,7 @@ import DownloadIcon from '@mui/icons-material/Download'
 import { api, imageUrl, sourceOrigin } from '../api'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
-import { usePasteImage } from '../usePasteImage'
+import { usePasteImage, useDropImage } from '../imageGestures'
 import { useSuppressGlobalDrop } from '../globalDrop'
 import { startImport } from '../upload'
 import Dropzone from '../components/Dropzone'
@@ -99,12 +100,23 @@ export default function BundlePage() {
     !!bundle &&
     !!user &&
     (user.role === 'admin' || (user.role === 'editor' && user.id === bundle.created_by))
-  usePasteImage(canEditBundle, 'bundles', id ?? '', {
-    onUploaded: () => {
+  // By UUID, not the slug in `id`: the image routes parse their path segment as
+  // a Uuid and reject a slug before the handler runs (see ModelPage).
+  const bundleId = bundle?.id ?? ''
+  const imageAdded = useCallback(
+    (how: string) => {
       void queryClient.invalidateQueries({ queryKey: ['bundle', id] })
-      setToast('Image added from clipboard')
+      setToast(`Image added ${how}`)
     },
+    [queryClient, id],
+  )
+  usePasteImage(canEditBundle, 'bundles', bundleId, {
+    onUploaded: () => imageAdded('from clipboard'),
     onError: (m) => setToast(`Paste failed: ${m}`),
+  })
+  const droppingImage = useDropImage(canEditBundle, 'bundles', bundleId, {
+    onUploaded: () => imageAdded('to this bundle'),
+    onError: (m) => setToast(`Image upload failed: ${m}`),
   })
 
   if (!bundle) return null
@@ -128,14 +140,39 @@ export default function BundlePage() {
         <Box sx={{ width: { md: 460 }, flexShrink: 0 }}>
           <Paper
             variant="outlined"
-            sx={{
+            sx={(theme) => ({
               aspectRatio: '1',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               overflow: 'hidden',
-            }}
+              position: 'relative',
+              // Caught page-wide (imageGestures.ts); this is only where the page
+              // says where the picture is going to land.
+              ...(droppingImage && {
+                borderColor: theme.palette.primary.main,
+                borderStyle: 'dashed',
+                borderWidth: 2,
+              }),
+            })}
           >
+            {droppingImage && (
+              <Stack
+                sx={(theme) => ({
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 1,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 1,
+                  pointerEvents: 'none',
+                  backgroundColor: alpha(theme.palette.background.paper, 0.9),
+                })}
+              >
+                <AddPhotoAlternateIcon sx={{ fontSize: 48, color: 'primary.main' }} />
+                <Typography sx={{ fontWeight: 600 }}>Drop to add image</Typography>
+              </Stack>
+            )}
             {shownImage ? (
               <Box
                 component="img"
@@ -148,7 +185,7 @@ export default function BundlePage() {
                 No images yet
                 {canEdit && (
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    Paste an image (⌘V) to add one
+                    Drop one on the page, or paste (⌘V)
                   </Typography>
                 )}
               </Typography>
