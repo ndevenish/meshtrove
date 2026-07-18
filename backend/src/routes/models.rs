@@ -62,6 +62,8 @@ pub struct ModelSummary {
     pub primary_image_id: Option<Uuid>,
     pub tags: Vec<String>,
     pub like_count: i64,
+    /// whether the *calling* user has liked it — what the heart button renders
+    pub liked: bool,
     pub variant_count: i64,
     /// Variants satisfying the `vtags` filter (when one was given)
     pub matched_variant_ids: Option<Vec<Uuid>>,
@@ -129,7 +131,7 @@ pub fn push_filters(
 
 async fn search(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResults>, ApiError> {
     let q = query.q.unwrap_or_default().trim().to_string();
@@ -148,7 +150,11 @@ async fn search(
               (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
               (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS variant_count,
               coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
-                        JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags
+                        JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
+              EXISTS (SELECT 1 FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = "#,
+    );
+    qb.push_bind(user.id).push(
+        r#") AS liked
          FROM models m LEFT JOIN creators c ON c.id = m.creator_id WHERE TRUE"#,
     );
     push_filters(&mut qb, &q, &tags, &vtags);
@@ -177,6 +183,7 @@ async fn search(
                     creator_name: row.try_get("creator_name")?,
                     primary_image_id: row.try_get("primary_image_id")?,
                     like_count: row.try_get("like_count")?,
+                    liked: row.try_get("liked")?,
                     variant_count: row.try_get("variant_count")?,
                     tags: row.try_get("tags")?,
                     matched_variant_ids: None,
@@ -481,7 +488,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
 /// Resolve a path segment that is either a model's UUID or its slug to the id.
 /// Canonical URLs use the slug; a UUID still resolves (the client redirects it
 /// to the slug), and so does an id typed by hand or held in an old bookmark.
-async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
+pub async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
     if let Ok(id) = Uuid::parse_str(key) {
         return Ok(id);
     }

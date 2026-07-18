@@ -37,11 +37,71 @@ pub struct BrowseItem {
     pub creator_name: Option<String>,
     pub primary_image_id: Option<Uuid>,
     pub tags: Vec<String>,
-    /// null for bundles (likes are model-only)
-    pub like_count: Option<i64>,
+    pub like_count: i64,
+    /// whether the *calling* user has liked it — what the heart button renders
+    pub liked: bool,
     /// variant_count for models, model_count for bundles
     pub count: i64,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The model half of a browse row (alias `m`, creator joined as `c`). Shared
+/// with `/api/likes`, which lists the same cards in a different order — the two
+/// must project identically or the same card renders differently depending on
+/// which page you found it on.
+///
+/// `viewer` is bound for the personal `liked` flag; a guest carries the nil id
+/// and so matches nothing.
+pub fn push_model_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) {
+    qb.push(
+        r#"'model' AS item_type, m.id, m.name, m.slug, m.creator_id, c.name AS creator_name,
+           model_preview_image(m.id) AS primary_image_id,
+           (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
+           EXISTS (SELECT 1 FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = "#,
+    )
+    .push_bind(viewer)
+    .push(
+        r#") AS liked,
+           (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS count,
+           coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
+                     JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
+           m.updated_at, "#,
+    );
+}
+
+/// The bundle half, column-for-column compatible with [`push_model_columns`].
+pub fn push_bundle_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) {
+    qb.push(
+        r#"'bundle' AS item_type, b.id, b.name, b.slug, b.creator_id, c.name AS creator_name,
+           bundle_preview_image(b.id) AS primary_image_id,
+           (SELECT count(*) FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked') AS like_count,
+           EXISTS (SELECT 1 FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked' AND k.user_id = "#,
+    )
+    .push_bind(viewer)
+    .push(
+        r#") AS liked,
+           (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS count,
+           coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
+                     JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags,
+           b.updated_at, "#,
+    );
+}
+
+pub fn decode_browse_item(row: &sqlx::postgres::PgRow) -> Result<BrowseItem, sqlx::Error> {
+    Ok(BrowseItem {
+        item_type: row.try_get("item_type")?,
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        slug: row.try_get("slug")?,
+        creator_id: row.try_get("creator_id")?,
+        creator_name: row.try_get("creator_name")?,
+        primary_image_id: row.try_get("primary_image_id")?,
+        tags: row.try_get("tags")?,
+        like_count: row.try_get("like_count")?,
+        liked: row.try_get("liked")?,
+        count: row.try_get("count")?,
+        updated_at: row.try_get("updated_at")?,
+    })
 }
 
 #[derive(Serialize, ToSchema)]
@@ -84,7 +144,7 @@ fn push_member_collapse(qb: &mut QueryBuilder<sqlx::Postgres>, idle: bool) {
 
 async fn browse(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<BrowseResults>, ApiError> {
     let q = query.q.unwrap_or_default().trim().to_string();
@@ -111,16 +171,8 @@ async fn browse(
     } else {
         "ts_rank(m.search, websearch_to_tsquery('english', ".to_string()
     };
-    let mut qb = QueryBuilder::new(
-        r#"SELECT * FROM (
-            SELECT 'model' AS item_type, m.id, m.name, m.slug, m.creator_id, c.name AS creator_name,
-                   model_preview_image(m.id) AS primary_image_id,
-                   (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
-                   (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS count,
-                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
-                             JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
-                   m.updated_at, "#,
-    );
+    let mut qb = QueryBuilder::new("SELECT * FROM (SELECT ");
+    push_model_columns(&mut qb, user.id);
     qb.push(&rank_model);
     if !q.is_empty() {
         qb.push_bind(q.clone()).push(")) AS rank");
@@ -131,16 +183,8 @@ async fn browse(
     push_filters(&mut qb, &q, &tags, &vtags);
     push_member_collapse(&mut qb, idle);
 
-    qb.push(
-        r#" UNION ALL
-            SELECT 'bundle' AS item_type, b.id, b.name, b.slug, b.creator_id, c.name AS creator_name,
-                   bundle_preview_image(b.id) AS primary_image_id,
-                   NULL::bigint AS like_count,
-                   (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS count,
-                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
-                             JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags,
-                   b.updated_at, "#,
-    );
+    qb.push(" UNION ALL SELECT ");
+    push_bundle_columns(&mut qb, user.id);
     if q.is_empty() {
         qb.push("0::float4 AS rank");
     } else {
@@ -159,21 +203,7 @@ async fn browse(
     let rows: Vec<sqlx::postgres::PgRow> = qb.build().fetch_all(&state.db).await?;
     let items = rows
         .iter()
-        .map(|row| -> Result<BrowseItem, sqlx::Error> {
-            Ok(BrowseItem {
-                item_type: row.try_get("item_type")?,
-                id: row.try_get("id")?,
-                name: row.try_get("name")?,
-                slug: row.try_get("slug")?,
-                creator_id: row.try_get("creator_id")?,
-                creator_name: row.try_get("creator_name")?,
-                primary_image_id: row.try_get("primary_image_id")?,
-                tags: row.try_get("tags")?,
-                like_count: row.try_get("like_count")?,
-                count: row.try_get("count")?,
-                updated_at: row.try_get("updated_at")?,
-            })
-        })
+        .map(decode_browse_item)
         .collect::<Result<_, _>>()
         .context("decoding browse row")?;
 

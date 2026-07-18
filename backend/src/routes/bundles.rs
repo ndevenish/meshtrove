@@ -315,15 +315,21 @@ async fn create(
     }
     tx.commit().await?;
 
-    fetch_detail(&state, bundle_id).await.map(Json)
+    fetch_detail(&state, bundle_id, user.id).await.map(Json)
 }
 
 /// The member models of a bundle, shaped as ModelSummary for reuse by the UI.
-async fn fetch_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<ModelSummary>, ApiError> {
+async fn fetch_members(
+    state: &AppState,
+    bundle_id: Uuid,
+    viewer: Uuid,
+) -> Result<Vec<ModelSummary>, ApiError> {
     let rows = sqlx::query!(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?", m.updated_at,
                   model_preview_image(m.id) as primary_image_id,
                   (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as "like_count!",
+                  EXISTS (SELECT 1 FROM user_model_marks k
+                           WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as "liked!",
                   (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as "variant_count!",
                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                             JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as "tags!"
@@ -331,6 +337,7 @@ async fn fetch_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<ModelSum
            WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)
            ORDER BY m.name"#,
         bundle_id,
+        viewer,
     )
     .fetch_all(&state.db)
     .await?;
@@ -344,6 +351,7 @@ async fn fetch_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<ModelSum
             creator_name: r.creator_name,
             primary_image_id: r.primary_image_id,
             like_count: r.like_count,
+            liked: r.liked,
             variant_count: r.variant_count,
             tags: r.tags,
             matched_variant_ids: None,
@@ -352,7 +360,7 @@ async fn fetch_members(state: &AppState, bundle_id: Uuid) -> Result<Vec<ModelSum
         .collect())
 }
 
-async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiError> {
+async fn fetch_detail(state: &AppState, id: Uuid, viewer: Uuid) -> Result<BundleDetail, ApiError> {
     let row = sqlx::query!(
         r#"SELECT b.id, b.name, b.slug, b.kind::text as "kind!", b.creator_id,
                   c.name as "creator_name?", b.source_url, b.created_by, b.created_at, b.updated_at,
@@ -376,7 +384,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiErr
     .fetch_all(&state.db)
     .await?;
 
-    let models = fetch_members(state, id).await?;
+    let models = fetch_members(state, id, viewer).await?;
 
     let categories: Vec<String> = sqlx::query_scalar!(
         r#"SELECT t.name::text as "name!" FROM bundle_categories bc
@@ -420,7 +428,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<BundleDetail, ApiErr
 
 /// Resolve a path segment that is either a bundle's UUID or its slug to the id.
 /// Canonical URLs use the slug; a UUID still resolves and the client redirects.
-async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
+pub async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
     if let Ok(id) = Uuid::parse_str(key) {
         return Ok(id);
     }
@@ -432,11 +440,11 @@ async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
 
 async fn detail(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Path(key): Path<String>,
 ) -> Result<Json<BundleDetail>, ApiError> {
     let id = resolve_id(&state, &key).await?;
-    fetch_detail(&state, id).await.map(Json)
+    fetch_detail(&state, id, user.id).await.map(Json)
 }
 
 async fn update(
@@ -475,7 +483,7 @@ async fn update(
     set_bundle_tags(&mut tx, id, &input.tags).await?;
     tx.commit().await?;
 
-    fetch_detail(&state, id).await.map(Json)
+    fetch_detail(&state, id, user.id).await.map(Json)
 }
 
 /// What to do with the bundle's member models when the bundle is deleted.
@@ -672,7 +680,7 @@ async fn set_categories(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    fetch_detail(&state, id).await.map(Json)
+    fetch_detail(&state, id, user.id).await.map(Json)
 }
 
 // ---------------------------------------------------------------------------

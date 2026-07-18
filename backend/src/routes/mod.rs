@@ -12,6 +12,7 @@ pub mod images;
 pub mod import_layouts;
 pub mod imports;
 pub mod jobs;
+pub mod likes;
 pub mod models;
 pub mod patch;
 pub mod tags;

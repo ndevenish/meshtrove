@@ -1,5 +1,10 @@
 import { createTheme } from '@mui/material/styles'
 
+/// The filled-heart colour on a liked card. Deliberately not `palette.primary`:
+/// the signature orange is the app's "act on this" colour, and a liked card is
+/// not a call to action. Change it here and every heart follows.
+export const LIKE_COLOR = '#e53935'
+
 // Printables-inspired: signature orange on clean surfaces, rounded cards,
 // dense grids. One theme per mode, switched by AppShell.
 export function buildTheme(mode: 'light' | 'dark') {

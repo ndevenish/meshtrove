@@ -8,14 +8,15 @@ import {
   Stack,
   Menu,
   MenuItem,
+  Link as MuiLink,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import { useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, Link } from 'react-router-dom'
 
 import { api } from '../api'
-import ModelCard from '../components/ModelCard'
-import BundleCard from '../components/BundleCard'
+import ItemGrid from '../components/ItemGrid'
 import FilterSidebar from '../components/FilterSidebar'
 import ModelEditDialog from '../components/ModelEditDialog'
 import BundleEditDialog from '../components/BundleEditDialog'
@@ -37,10 +38,44 @@ export default function BrowsePage() {
   const pageCount = data ? Math.max(1, Math.ceil(data.total / data.per_page)) : 1
   const canEdit = user && user.role !== 'viewer'
 
+  // The liked row is a *shortcut back to your own things*, which only makes
+  // sense on the plain front page: once there is a query or a filter, the page
+  // is answering a question, and a fixed row of favourites on top of the answer
+  // is noise. Same reason it stays on page 1 only.
+  const showLiked =
+    !!user && page === 1 && !params.get('q') && !params.get('tags') && !params.get('vtags')
+
+  // One row's worth is a viewport-dependent number; ask for enough to fill the
+  // widest plausible one and let the grid clip the rest.
+  const { data: liked } = useQuery({
+    queryKey: ['likes', 'row'],
+    queryFn: () => api.likes(new URLSearchParams({ per_page: '12' })),
+    enabled: showLiked,
+  })
+
   return (
     <Container maxWidth="xl" sx={{ py: 3, display: 'flex' }}>
       <FilterSidebar />
       <Box sx={{ flexGrow: 1 }}>
+        {showLiked && liked && liked.items.length > 0 && (
+          <Box sx={{ mb: 4 }}>
+            <MuiLink
+              component={Link}
+              to="/likes"
+              underline="none"
+              color="inherit"
+              sx={{ display: 'inline-flex', alignItems: 'center', mb: 2 }}
+            >
+              <Typography variant="h5">Liked</Typography>
+              <Typography component="span" color="text.secondary" sx={{ ml: 1 }}>
+                ({liked.total})
+              </Typography>
+              <ChevronRightIcon sx={{ color: 'text.secondary' }} />
+            </MuiLink>
+            <ItemGrid items={liked.items} singleRow />
+          </Box>
+        )}
+
         <Stack direction="row" sx={{ alignItems: 'center', mb: 2 }}>
           <Typography variant="h5">
             Browse{' '}
@@ -84,29 +119,7 @@ export default function BrowsePage() {
           )}
         </Stack>
 
-        <Box
-          sx={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
-            gap: 2,
-          }}
-        >
-          {(data?.items ?? []).map((item) =>
-            item.type === 'bundle' ? (
-              <BundleCard key={item.id} bundle={{ ...item, model_count: item.count }} />
-            ) : (
-              <ModelCard
-                key={item.id}
-                model={{
-                  ...item,
-                  variant_count: item.count,
-                  like_count: item.like_count ?? 0,
-                  matched_variant_ids: null,
-                }}
-              />
-            ),
-          )}
-        </Box>
+        <ItemGrid items={data?.items ?? []} />
 
         {!isLoading && data?.items.length === 0 && (
           <Typography color="text.secondary" sx={{ mt: 6, textAlign: 'center' }}>

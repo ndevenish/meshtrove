@@ -11,6 +11,7 @@ import AppShell from './components/AppShell'
 import BrowsePage from './pages/BrowsePage'
 import ModelPage from './pages/ModelPage'
 import BundlePage from './pages/BundlePage'
+import LikesPage from './pages/LikesPage'
 import ImportsPage from './pages/ImportsPage'
 import ImportPage from './pages/ImportPage'
 import ExportsPage from './pages/ExportsPage'
@@ -83,6 +84,7 @@ function App() {
               <Route path="/" element={<BrowsePage />} />
               <Route path="/models/:id" element={<ModelPage />} />
               <Route path="/bundles/:id" element={<BundlePage />} />
+              <Route path="/likes" element={<LikesPage />} />
               <Route path="/imports" element={<ImportsPage />} />
               <Route path="/imports/:id" element={<ImportPage />} />
               <Route path="/exports" element={<ExportsPage />} />

@@ -48,6 +48,8 @@ export interface ModelSummary {
   primary_image_id: string | null
   tags: string[]
   like_count: number
+  /** whether the *calling* user has liked it — what the heart button renders */
+  liked: boolean
   variant_count: number
   matched_variant_ids: string[] | null
   updated_at: string
@@ -182,7 +184,9 @@ export interface BrowseItem {
   creator_name: string | null
   primary_image_id: string | null
   tags: string[]
-  like_count: number | null
+  like_count: number
+  /** whether the *calling* user has liked it — what the heart button renders */
+  liked: boolean
   count: number
   updated_at: string
 }
@@ -527,6 +531,13 @@ export const api = {
     }),
 
   browse: (params: URLSearchParams) => request<BrowseResults>(`/api/browse?${params}`),
+
+  /** Everything the caller has liked, models and bundles mixed, newest first. */
+  likes: (params: URLSearchParams) => request<BrowseResults>(`/api/likes?${params}`),
+  /** Idempotent: liking twice is one like, so a double click is harmless. */
+  setLike: (kind: 'model' | 'bundle', id: string, liked: boolean) =>
+    request<void>(`/api/${kind}s/${id}/like`, { method: liked ? 'PUT' : 'DELETE' }),
+
   searchBundles: (params: URLSearchParams) => request<BundleResults>(`/api/bundles?${params}`),
   bundle: (id: string) => request<BundleDetail>(`/api/bundles/${id}`),
   createBundle: (body: unknown) => request<BundleDetail>('/api/bundles', json(body)),

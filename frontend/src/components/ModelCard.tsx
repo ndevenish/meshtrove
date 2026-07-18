@@ -4,6 +4,7 @@ import FavoriteIcon from '@mui/icons-material/Favorite'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 
 import { type ModelSummary, imageUrl } from '../api'
+import LikeButton from './LikeButton'
 
 export default function ModelCard({
   model,
@@ -15,7 +16,9 @@ export default function ModelCard({
   hideCreator?: boolean
 }) {
   return (
-    <Card variant="outlined" sx={{ height: '100%' }}>
+    // `position: relative` so the like button, which is not part of the link,
+    // can be pinned to the corner of the artwork.
+    <Card variant="outlined" sx={{ height: '100%', position: 'relative' }}>
       <CardActionArea
         component={Link}
         to={`/models/${model.slug}`}
@@ -53,10 +56,9 @@ export default function ModelCard({
             </Typography>
           )}
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.75 }}>
-            {/* Nothing can set a like yet (no endpoint, no button), so a heart on
-                every card is a row of honest zeroes telling the reader nothing.
-                Shown only once there is something to show — which is also what
-                makes this outlive the feature landing. */}
+            {/* The tally, distinct from the heart button above it: that one is
+                what *you* think, this is what everyone thinks. Hidden at zero —
+                a row of honest zeroes tells the reader nothing. */}
             {model.like_count > 0 && (
               <>
                 <FavoriteIcon sx={{ fontSize: 16, color: 'primary.main' }} />
@@ -70,6 +72,7 @@ export default function ModelCard({
           </Stack>
         </CardContent>
       </CardActionArea>
+      <LikeButton kind="model" id={model.id} liked={model.liked} />
     </Card>
   )
 }
