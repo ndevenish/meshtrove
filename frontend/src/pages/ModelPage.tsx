@@ -357,6 +357,18 @@ export default function ModelPage() {
             )}
             {canEdit && editing && (
               <Stack direction="row" spacing={1}>
+                {/* Delete leads, kept clear of Save/Cancel: it sits at the far
+                    end from where a double-click on the primary action would
+                    land, so a stray second click can't fall on it. */}
+                <Button
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  disabled={saving}
+                  onClick={() => setDeleteOpen(true)}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Delete model
+                </Button>
                 <Button
                   variant="contained"
                   disabled={saving}
@@ -371,15 +383,6 @@ export default function ModelPage() {
                 </Button>
                 <Button disabled={saving} onClick={() => setEditing(false)}>
                   Cancel
-                </Button>
-                <Button
-                  color="error"
-                  startIcon={<DeleteIcon />}
-                  disabled={saving}
-                  onClick={() => setDeleteOpen(true)}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Delete model
                 </Button>
               </Stack>
             )}
