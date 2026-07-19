@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Alert,
@@ -25,6 +25,7 @@ import {
   api,
   type BundleSummary,
   type CommitTarget,
+  type FileRecord,
   type LayoutPlan,
   type LayoutSpec,
 } from '../api'
@@ -34,6 +35,10 @@ import ImportRestorePanel from '../components/ImportRestorePanel'
 import { useImportDraftState, clearImportDraft } from '../importDraft'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
+
+// A stable stand-in while the files query is loading: `files ?? []` would mint
+// a fresh array every render and defeat the file list's memo.
+const NO_FILES: FileRecord[] = []
 
 /// The one place the model-vs-bundle question gets asked — after the archive has
 /// unpacked and you can see what's actually in it. Committing moves every staged
@@ -116,6 +121,15 @@ function ImportWorkbench() {
     queryFn: () => api.searchBundles(new URLSearchParams({ per_page: '100' })),
   })
   const target: BundleSummary | null = bundles?.bundles.find((b) => b.id === targetId) ?? null
+  const fileList = files ?? NO_FILES
+
+  // Referentially stable so the memoised layout panel isn't re-rendered by
+  // every keystroke in the form around it.
+  const handlePlan = useCallback(
+    (spec: LayoutSpec | null, plan: LayoutPlan | null) =>
+      setLayout(spec && plan ? { spec, plan } : null),
+    [],
+  )
 
   // Seed the editable name once the import loads, and preselect the bundle when
   // the drop happened on a bundle page (?bundle=…).
@@ -339,7 +353,11 @@ function ImportWorkbench() {
               <Autocomplete
                 freeSolo
                 options={(creators ?? []).map((c) => c.name)}
-                value={creatorName}
+                // The typed text *is* the state here (commit trims and get-or-creates
+                // from it), so control inputValue, not value: driving the selection
+                // from keystrokes makes the widget reconcile a changed selection
+                // against its options on every character.
+                inputValue={creatorName}
                 onInputChange={(_, value) => setCreatorName(value)}
                 renderInput={(props) => (
                   <TextField {...props} size="small" label="Creator (author / company / site)" />
@@ -376,11 +394,11 @@ function ImportWorkbench() {
             </Typography>
             <ImportLayoutPanel
               importId={staged.id}
-              fileCount={(files ?? []).filter((f) => f.kind !== 'archive').length}
+              fileCount={fileList.filter((f) => f.kind !== 'archive').length}
               unpacking={staged.unpacking}
               target={dest === 'new_model' ? 'model' : 'bundle'}
               bundleId={dest === 'bundle' ? target?.id : undefined}
-              onPlan={(spec, plan) => setLayout(spec && plan ? { spec, plan } : null)}
+              onPlan={handlePlan}
               onMergeTargets={setMergeTargets}
             />
 
@@ -439,12 +457,12 @@ function ImportWorkbench() {
           </Typography>
           {layout ? (
             <AnnotatedFileList
-              files={files ?? []}
+              files={fileList}
               annotations={layout.plan.annotations}
               rules={layout.spec.rules}
             />
           ) : (
-            <FileTree files={files ?? []} />
+            <FileTree files={fileList} />
           )}
         </Box>
       </Box>

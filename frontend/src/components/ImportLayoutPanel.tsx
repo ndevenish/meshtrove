@@ -77,7 +77,11 @@ const blankRule = (): LayoutRule => ({
 /// tags, and preview the merged result. All matching happens server-side
 /// (`POST /api/imports/{id}/plan`) — patterns are opaque strings here, and the
 /// commit runs the same analysis, so what this previews is exactly what commits.
-export default function ImportLayoutPanel({
+/// Memoised: a Loot-style layout mounts dozens of Autocompletes and radio rows,
+/// and the import page re-renders on every form keystroke — the panel's own
+/// inputs only change when the import or destination does (callers keep the
+/// callback props referentially stable).
+export default memo(function ImportLayoutPanel({
   importId,
   fileCount,
   unpacking,
@@ -734,7 +738,7 @@ export default function ImportLayoutPanel({
       )}
     </Box>
   )
-}
+})
 
 /// One row of the annotated list, memoised. The list runs to *every* staged
 /// file — thousands, not a 400-row excerpt — so a row must only re-render when

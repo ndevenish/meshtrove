@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import {
   Box,
   Typography,
@@ -327,7 +327,10 @@ export const FILE_KINDS: FileRecord['kind'][] = [
 /// Rebuild the kept folder structure from the flat path column. When the
 /// optional editing props are supplied (used by the recategorisation UI), each
 /// row gains a select checkbox, an inline kind selector, and a delete button.
-export function FileTree({
+/// Memoised: the import page mounts this with thousands of rows and re-renders
+/// on every form keystroke, while the file list itself only changes when a
+/// fetch lands.
+export const FileTree = memo(function FileTree({
   files,
   selectable = false,
   selected,
@@ -558,7 +561,7 @@ export function FileTree({
       ))}
     </Box>
   )
-}
+})
 
 /// A variant is its tag set, so the tags are the substantive field here and the
 /// name is just a label. Leaving the tags empty is legitimate — it addresses the
