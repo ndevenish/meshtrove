@@ -33,7 +33,7 @@ import { FileTree } from '../components/VariantSection'
 import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayoutPanel'
 import ImportRestorePanel from '../components/ImportRestorePanel'
 import { useImportDraftState, clearImportDraft } from '../importDraft'
-import { pasteTags, splitTags } from '../tags'
+import { changeTags, pasteTags } from '../tags'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
 
@@ -369,7 +369,7 @@ function ImportWorkbench() {
                 freeSolo
                 options={(allTags ?? []).map((t) => t.name)}
                 value={tags}
-                onChange={(_, value) => setTags(splitTags(value))}
+                onChange={changeTags(setTags)}
                 renderInput={(props) => (
                   <TextField
                     {...props}

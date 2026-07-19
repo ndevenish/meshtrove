@@ -15,7 +15,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 
 import { api, type BundleDetail } from '../api'
-import { pasteTags, splitTags } from '../tags'
+import { changeTags, pasteTags } from '../tags'
 
 /// Create (no `bundle`) or edit a bundle's metadata and tags. Trimmed clone of
 /// ModelEditDialog — bundles have a `kind` but no price/variant/archive fields.
@@ -125,7 +125,7 @@ export default function BundleEditDialog({
             freeSolo
             options={(allTags ?? []).map((t) => t.name)}
             value={tags}
-            onChange={(_, value) => setTags(splitTags(value))}
+            onChange={changeTags(setTags)}
             renderInput={(params) => (
               <TextField
                 {...params}

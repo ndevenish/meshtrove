@@ -41,7 +41,7 @@ import {
   type PlanTarget,
 } from '../api'
 import { useImportDraftState } from '../importDraft'
-import { pasteTags, splitTags } from '../tags'
+import { changeTags, pasteTags } from '../tags'
 
 /// A planned model's stable identity across re-plans (name + its tag set),
 /// so a retarget choice survives an edit to the pattern that reorders the list.
@@ -313,7 +313,7 @@ export default memo(function ImportLayoutPanel({
         disabled={disabled}
         options={(vocab ?? []).map((t) => t.name)}
         value={mapped ?? []}
-        onChange={(_, tags) => setMapping(index, mapKey, splitTags(tags))}
+        onChange={changeTags((tags) => setMapping(index, mapKey, tags))}
         renderInput={(props) => (
           <TextField
             {...props}

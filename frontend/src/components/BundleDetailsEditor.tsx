@@ -4,7 +4,7 @@ import { Alert, Autocomplete, MenuItem, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type BundleDetail } from '../api'
-import { pasteTags, splitTags } from '../tags'
+import { changeTags, pasteTags } from '../tags'
 import type { DetailsEditorHandle } from './ModelDetailsEditor'
 
 /// The bundle's fields, edited in place. Mirrors ModelDetailsEditor — a bundle
@@ -99,7 +99,7 @@ const BundleDetailsEditor = forwardRef<
         freeSolo
         options={(allTags ?? []).map((t) => t.name)}
         value={tags}
-        onChange={(_, value) => setTags(splitTags(value))}
+        onChange={changeTags(setTags)}
         renderInput={(props) => (
           <TextField
             {...props}
