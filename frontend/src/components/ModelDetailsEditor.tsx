@@ -4,6 +4,7 @@ import { Alert, Autocomplete, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, uploadWithProgress, type FileRecord, type ModelDetail } from '../api'
+import { pasteTags, splitTags } from '../tags'
 import { useSuppressGlobalDrop } from '../globalDrop'
 import Dropzone from './Dropzone'
 
@@ -150,8 +151,15 @@ const ModelDetailsEditor = forwardRef<
         freeSolo
         options={(allTags ?? []).map((t) => t.name)}
         value={tags}
-        onChange={(_, value) => setTags(value)}
-        renderInput={(props) => <TextField {...props} label="Tags" placeholder="add tag…" />}
+        onChange={(_, value) => setTags(splitTags(value))}
+        renderInput={(props) => (
+          <TextField
+            {...props}
+            onPaste={pasteTags(tags, setTags)}
+            label="Tags"
+            placeholder="add tag…"
+          />
+        )}
       />
       <TextField
         label="Source URL"

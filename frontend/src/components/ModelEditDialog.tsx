@@ -14,6 +14,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 
 import { api, uploadWithProgress, type FileRecord, type ModelDetail } from '../api'
+import { pasteTags, splitTags } from '../tags'
 import Dropzone from './Dropzone'
 import type { Drop } from '../upload'
 
@@ -156,8 +157,15 @@ export default function ModelEditDialog({
             freeSolo
             options={(allTags ?? []).map((t) => t.name)}
             value={tags}
-            onChange={(_, value) => setTags(value)}
-            renderInput={(params) => <TextField {...params} label="Tags" placeholder="add tag…" />}
+            onChange={(_, value) => setTags(splitTags(value))}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                onPaste={pasteTags(tags, setTags)}
+                label="Tags"
+                placeholder="add tag…"
+              />
+            )}
           />
           <TextField
             label="Source URL"

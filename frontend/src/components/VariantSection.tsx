@@ -46,6 +46,7 @@ import {
   type ModelDetail,
   type VariantDetail,
 } from '../api'
+import { pasteTags, splitTags } from '../tags'
 
 /// Wait for one job to settle. The render is the *job's* doing, so the picture is
 /// there when the job says so — no inferring it from the shape of the queue.
@@ -637,12 +638,11 @@ function VariantEditDialog({
             autoFocus
             options={(vocabulary ?? []).map((t) => t.name)}
             value={tags}
-            onChange={(_, value) =>
-              setTags([...new Set(value.map((t) => t.trim()).filter(Boolean))])
-            }
+            onChange={(_, value) => setTags(splitTags(value))}
             renderInput={(params) => (
               <TextField
                 {...params}
+                onPaste={pasteTags(tags, setTags)}
                 label="Variant tags"
                 placeholder="32mm, supported, lychee…"
                 helperText={
