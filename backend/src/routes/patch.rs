@@ -75,12 +75,21 @@ struct PatchBundle {
 
 #[derive(Deserialize, Default)]
 struct PatchModel {
+    /// The library model this entry *is*, when the scraper already knows —
+    /// the strongest match signal, consulted before any name matching. Lenient
+    /// on the way in: `""` (a hand-fill file's unmatched rows) reads as absent.
+    #[serde(default, deserialize_with = "de_opt_uuid")]
+    uuid: Option<Uuid>,
     #[serde(default, rename = "match")]
     match_hint: MatchHint,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    /// Model description (markdown) — becomes a new description revision on
+    /// the matched model when the apply opts in.
+    #[serde(default)]
+    description_md: Option<String>,
     /// Relative path into the zip, or null.
     #[serde(default)]
     image: Option<String>,
@@ -88,6 +97,18 @@ struct PatchModel {
     /// same-named models apart.
     #[serde(default)]
     category: Option<String>,
+}
+
+/// An optional uuid that tolerates `""`/whitespace as "not given" — annotated
+/// scraper files keep the field on every row and blank it where unknown.
+fn de_opt_uuid<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Uuid>, D::Error> {
+    let s: Option<String> = Option::deserialize(d)?;
+    match s.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(v) => Uuid::parse_str(v)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -274,6 +295,19 @@ fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
         .models
         .iter()
         .map(|pm| {
+            // Tier 0: an explicit uuid is the patch pointing at the member
+            // itself — it decides alone, names never overrule it. A uuid that
+            // is not a member of this bundle matches *nothing* rather than
+            // falling back to name guessing: the id says the scraper meant one
+            // specific model, and that model isn't here.
+            if let Some(id) = pm.uuid {
+                return if members.iter().any(|m| m.id == id) {
+                    vec![id]
+                } else {
+                    Vec::new()
+                };
+            }
+
             // Tier 1: exact on the collapsed name (or any alias).
             let mut ids: Vec<Uuid> = Vec::new();
             for key in pm.match_keys() {
@@ -370,6 +404,8 @@ struct MatchedRow {
     /// Tags the patch would add that the model does not already have.
     add_tags: Vec<String>,
     has_image: bool,
+    /// The patch carries a description for this model.
+    has_description: bool,
     category: Option<String>,
 }
 
@@ -382,6 +418,8 @@ struct UnresolvedRow {
     patch_name: String,
     patch_tags: Vec<String>,
     has_image: bool,
+    /// The patch carries a description for this model.
+    has_description: bool,
     category: Option<String>,
     /// Present for ambiguous rows (the members it could be); empty when the UI
     /// should offer the whole member list.
@@ -429,6 +467,11 @@ async fn preview(
             .as_deref()
             .is_some_and(|p| archive.images.contains_key(p))
     };
+    let has_description = |pm: &PatchModel| {
+        pm.description_md
+            .as_deref()
+            .is_some_and(|d| !d.trim().is_empty())
+    };
 
     // A member is "contested" when it is the sole match of more than one patch
     // model — two patch entries named "Gold" (Heroes and Busts) both landing on a
@@ -449,6 +492,7 @@ async fn preview(
                 patch_name: pm.label(),
                 patch_tags: patch_tags(pm),
                 has_image: has_image(pm),
+                has_description: has_description(pm),
                 category: pm.category.clone(),
                 candidates: Vec::new(),
             }),
@@ -459,6 +503,7 @@ async fn preview(
                     patch_name: pm.label(),
                     patch_tags: patch_tags(pm),
                     has_image: has_image(pm),
+                    has_description: has_description(pm),
                     category: pm.category.clone(),
                     candidates: member_of(*id).map(candidate_of).into_iter().collect(),
                 });
@@ -480,6 +525,7 @@ async fn preview(
                     model_name: member.map(|m| m.name.clone()).unwrap_or_default(),
                     add_tags,
                     has_image: has_image(pm),
+                    has_description: has_description(pm),
                     category: pm.category.clone(),
                 });
             }
@@ -492,6 +538,7 @@ async fn preview(
                     patch_name: pm.label(),
                     patch_tags: patch_tags(pm),
                     has_image: has_image(pm),
+                    has_description: has_description(pm),
                     category: pm.category.clone(),
                     candidates: many
                         .iter()
@@ -577,6 +624,10 @@ struct ApplyOptions {
     model_tags: TagMode,
     #[serde(default)]
     model_images: ImageMode,
+    /// Insert each patch model's `description_md` as a new description
+    /// revision on its matched model.
+    #[serde(default)]
+    model_descriptions: bool,
     #[serde(default)]
     bundle_cover: bool,
     #[serde(default)]
@@ -594,6 +645,7 @@ struct ApplyResult {
     images_added: usize,
     tags_added: usize,
     aliases_added: usize,
+    descriptions_added: usize,
 }
 
 /// A blob already put into the store, ready to become an image row.
@@ -732,6 +784,7 @@ async fn apply(
         images_added: 0,
         tags_added: 0,
         aliases_added: 0,
+        descriptions_added: 0,
     };
     let mut tx = state.db.begin().await?;
 
@@ -924,6 +977,39 @@ async fn apply(
             touched = true;
         }
 
+        // A model description becomes a revision, like every description edit
+        // (newest = current, history kept) — but only when it would change
+        // something: re-applying the same patch must not stack duplicate
+        // revisions the way it must not re-add tags or images.
+        if options.model_descriptions
+            && let Some(body) = pm
+                .description_md
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+        {
+            let current = sqlx::query_scalar!(
+                "SELECT body_md FROM model_description_revisions
+                 WHERE model_id = $1 ORDER BY created_at DESC LIMIT 1",
+                model_id,
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current.as_deref() != Some(body) {
+                sqlx::query!(
+                    "INSERT INTO model_description_revisions (model_id, body_md, created_by)
+                     VALUES ($1, $2, $3)",
+                    model_id,
+                    body,
+                    user.id,
+                )
+                .execute(&mut *tx)
+                .await?;
+                result.descriptions_added += 1;
+                touched = true;
+            }
+        }
+
         if let Some(img) = model_images.get(idx) {
             if options.model_images == ImageMode::ReplaceGenerated {
                 // The auto previews live on the model's variants (and, rarely, the
@@ -1003,6 +1089,7 @@ async fn apply(
         images = result.images_added,
         tags = result.tags_added,
         aliases = result.aliases_added,
+        descriptions = result.descriptions_added,
         "patch apply: committed"
     );
     Ok(Json(result))
@@ -1089,6 +1176,7 @@ fn decode_entities(patch: &mut Patch) {
     for m in &mut patch.models {
         dec(&mut m.name);
         dec(&mut m.category);
+        dec(&mut m.description_md);
         dec_all(&mut m.tags);
         dec(&mut m.match_hint.name);
         dec_all(&mut m.match_hint.aliases);
@@ -1194,12 +1282,14 @@ mod tests {
     /// A patch model that matches on `scraped` (its scrape name), with a category.
     fn pm(scraped: &str, category: Option<&str>) -> PatchModel {
         PatchModel {
+            uuid: None,
             match_hint: MatchHint {
                 name: Some(scraped.into()),
                 aliases: Vec::new(),
             },
             name: None,
             tags: Vec::new(),
+            description_md: None,
             image: None,
             category: category.map(str::to_string),
         }
@@ -1212,6 +1302,36 @@ mod tests {
             models: vec![pm],
         };
         resolve(&patch, members).pop().unwrap()
+    }
+
+    #[test]
+    fn uuid_matches_directly_and_beats_names() {
+        let members = [member("Crocodile", &[]), member("Camel", &[])];
+        let mut p = pm("Camel", None); // the name says Camel…
+        p.uuid = Some(members[0].id); // …the uuid says Crocodile; the uuid wins
+        assert_eq!(resolve_one(p, &members), vec![members[0].id]);
+    }
+
+    #[test]
+    fn unknown_uuid_matches_nothing_rather_than_falling_back() {
+        // The id says the scraper meant one specific model; if it isn't a
+        // member here, guessing by name would be exactly the mistake an id is
+        // there to prevent.
+        let members = [member("Camel", &[])];
+        let mut p = pm("Camel", None);
+        p.uuid = Some(Uuid::new_v4());
+        assert!(resolve_one(p, &members).is_empty());
+    }
+
+    #[test]
+    fn blank_or_absent_uuid_reads_as_none() {
+        let p: PatchModel = serde_json::from_str(r#"{"uuid": "", "name": "Camel"}"#).unwrap();
+        assert!(p.uuid.is_none());
+        let p: PatchModel = serde_json::from_str(r#"{"uuid": null, "name": "Camel"}"#).unwrap();
+        assert!(p.uuid.is_none());
+        let p: PatchModel = serde_json::from_str(r#"{"name": "Camel"}"#).unwrap();
+        assert!(p.uuid.is_none());
+        assert!(serde_json::from_str::<PatchModel>(r#"{"uuid": "not-a-uuid"}"#).is_err());
     }
 
     #[test]
@@ -1329,12 +1449,14 @@ mod tests {
                 images: vec!["cover&#8211;.png".into()],
             },
             models: vec![PatchModel {
+                uuid: None,
                 match_hint: MatchHint {
                     name: Some("Crocodile &amp; Camel".into()),
                     aliases: vec!["Croc &#8211; v2".into()],
                 },
                 name: Some("Crocodile &#8211; Buried".into()),
                 tags: vec!["large &amp; scaly".into()],
+                description_md: Some("A croc &amp; his tomb".into()),
                 image: Some("model&#8211;.png".into()),
                 category: Some("Enemies &amp; Foes".into()),
             }],
@@ -1349,6 +1471,10 @@ mod tests {
         );
         assert_eq!(patch.models[0].name.as_deref(), Some("Crocodile – Buried"));
         assert_eq!(patch.models[0].tags, vec!["large & scaly"]);
+        assert_eq!(
+            patch.models[0].description_md.as_deref(),
+            Some("A croc & his tomb")
+        );
         assert_eq!(patch.models[0].category.as_deref(), Some("Enemies & Foes"));
         assert_eq!(
             patch.models[0].match_hint.name.as_deref(),

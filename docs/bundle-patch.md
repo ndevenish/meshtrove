@@ -56,12 +56,15 @@ your own use.
   },
   "models": [
     {
+      "uuid": "ef23a690-…",               // READ: the library model's id, when known —
+                                          // strongest match signal ("" reads as absent)
       "match": {                          // how to find this model in the library
         "name": "Gold",                   // the site's name for it
         "aliases": ["Gold", "gold-32mm"]  // other spellings it might be filed under
       },
       "name": "Gold",                     // rename target (applied only if the user opts in)
       "tags": ["catfolk", "bard", "heroes"], // model tags (what it IS) — lowercase them
+      "description_md": "…",              // READ: markdown; becomes a model description revision
       "image": "images/fn2110ac01.png",   // ONE sample render, zip path, or null
       "category": "Heroes",               // the shop category; disambiguates duplicates
       "source_ref": "FN2110AC01"          // the site's own id; not read (yet)
@@ -76,8 +79,8 @@ ignores them today and may use them later.
 ### Text encoding
 
 All read text fields (`source.url`, `bundle.name/creator/description_md`,
-`models[].name/category/tags`, `match.name/aliases`) are **HTML-entity-decoded
-on ingest** — `&amp;` → `&`, `&#8211;` → `–` — so a scraper that lifts strings
+`models[].name/category/tags/description_md`, `match.name/aliases`) are
+**HTML-entity-decoded on ingest** — `&amp;` → `&`, `&#8211;` → `–` — so a scraper that lifts strings
 straight out of markup doesn't have to clean them. The two exceptions are
 `bundle.images` and `models[].image`: image references are left untouched so
 they keep matching zip entry names byte for byte. Prefer emitting clean text
@@ -85,10 +88,16 @@ anyway; the decoding is a safety net, not a feature to lean on.
 
 ## Matching: how a patch model finds its library model
 
-There is **no id-based matching** — a patch names models, it does not point at
-uuids. Resolution is two tiers, per patch model, against every bundle member's
-name **and its stored aliases** (names taught by earlier patches/renames):
+Resolution is three tiers, per patch model. Tier 0 is by id; the name tiers
+run against every bundle member's name **and its stored aliases** (names
+taught by earlier patches/renames):
 
+0. **By uuid.** A patch model carrying `uuid` points at the member itself —
+   the strongest signal, and it decides alone: names never overrule it. A
+   uuid that is *not* a member of this bundle matches **nothing** (no name
+   fallback — the id says the scraper meant one specific model, and it isn't
+   here); the row surfaces as unmatched for hand assignment. `""` and `null`
+   mean "no uuid"; any other non-uuid string rejects the whole patch.
 1. **Exact, collapsed.** Every spelling the patch offers — `name`,
    `match.name`, each of `match.aliases` — is collapsed (strip every
    non-alphanumeric character, lowercase) and looked up. `"Warrior Mummy"`
@@ -109,9 +118,12 @@ nothing (they are *not* created); unmatched members are left untouched.
 
 **Scraper guidance:**
 
-- If you already know the library's exact name for a model (from a previous
-  export, or a hand-matched list), put it in `match.aliases` — an exact
-  collapsed match ends the search before any guessing starts.
+- If you know the library model's id (from the API, an export, or a
+  hand-matched list), emit it as `uuid` — matching is then exact and the
+  review has nothing to question.
+- Failing that, if you know the library's exact *name* for a model, put it in
+  `match.aliases` — an exact collapsed match ends the search before any
+  guessing starts.
 - Emit the spellings a carve is likely to have produced: the squashed name
   (`WarriorMummy`), a slug (`warrior-mummy`), an underscored slug. Harmless
   when redundant, decisive when the folder name was the model name.
@@ -134,6 +146,7 @@ written until apply, and apply only touches what the options ask for.
 | `bundle.images` | Gated by `bundle_cover`. All added to the bundle; the **first becomes primary**, existing primaries demoted (not deleted). Deduped by content hash — re-applying the same patch adds nothing. |
 | `models[].name` | A **per-model, opt-in rename** (`options.rename`); never automatic. Slug regenerated with its token kept. The old name is recorded as an alias. A *declined* rename is also recorded as an alias, so the next scrape recognises the model and doesn't re-offer it. |
 | `models[].tags` | **Model** tags (what the model *is*) — never variant tags. Upserted into the shared tag vocabulary. Mode `merge` (default: add, never remove), `replace` (drop the model's tags first), or `skip`. |
+| `models[].description_md` | Inserted as a new **model** description revision (newest = current; history kept). Gated by `model_descriptions`. Skipped when it equals the model's current description, so re-applying a patch doesn't stack duplicate revisions. |
 | `models[].image` | One image per model, made **primary**. Mode `replace_generated` (default: delete the model's auto-rendered previews so the scrape's shot is what shows), `add` (keep renders alongside), or `skip`. Deduped by content hash. |
 | `match.aliases` | Every alias is stored on the matched model (deduped case-insensitively, ones equal to the model's final name dropped) — the patch *teaches* the library its other names, so the next import or patch resolves exactly. |
 
@@ -151,8 +164,8 @@ POST /api/bundles/{id}/patch/preview
 → 200 {
     bundle_description,        // what the patch carries, or null
     bundle_covers: [dataUrl],  // primary first
-    matched:        [{key, patch_name, model_id, model_name, add_tags, has_image, category}],
-    ambiguous:      [{key, patch_name, patch_tags, has_image, category, candidates}],
+    matched:        [{key, patch_name, model_id, model_name, add_tags, has_image, has_description, category}],
+    ambiguous:      [{key, patch_name, patch_tags, has_image, has_description, category, candidates}],
     unmatched_patch:[{…, candidates: []}],   // user may still assign manually
     unmatched_members: [name],               // members the patch says nothing about
     members:        [{id, name, tags, aliases}]  // full list, for manual assignment
@@ -164,11 +177,12 @@ POST /api/bundles/{id}/patch
     rename:        ["3", "7"],          // patch-model KEYS whose rename to apply
     model_tags:    "merge" | "replace" | "skip",           // default merge
     model_images:  "replace_generated" | "add" | "skip",   // default replace_generated
+    model_descriptions: bool,           // default false
     bundle_cover:       bool,           // default false
     bundle_description: bool,           // default false
     matches: { "5": "<member-uuid>" }   // resolve ambiguous/contested/unmatched rows,
   }                                     // or override an automatic match
-→ 200 { models_updated, images_added, tags_added, aliases_added }
+→ 200 { models_updated, images_added, tags_added, aliases_added, descriptions_added }
 ```
 
 `key` is the patch model's **index** in `models[]` — its stable identity across

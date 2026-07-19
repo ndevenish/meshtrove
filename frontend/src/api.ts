@@ -722,6 +722,7 @@ export interface PatchUnresolvedRow {
   patch_name: string
   patch_tags: string[]
   has_image: boolean
+  has_description: boolean
   category: string | null
   /** non-empty for ambiguous rows; empty means "offer the whole member list" */
   candidates: PatchMember[]
@@ -739,6 +740,7 @@ export interface PatchPreview {
     model_name: string
     add_tags: string[]
     has_image: boolean
+    has_description: boolean
     category: string | null
   }[]
   ambiguous: PatchUnresolvedRow[]
@@ -752,6 +754,8 @@ export interface PatchApplyOptions {
   rename: string[]
   model_tags: 'merge' | 'replace' | 'skip'
   model_images: 'replace_generated' | 'add' | 'skip'
+  /** apply each patch model's description as a new revision */
+  model_descriptions: boolean
   bundle_cover: boolean
   bundle_description: boolean
   /** patch model label -> chosen member id; resolves ambiguous / adopts unmatched */
@@ -763,6 +767,7 @@ export interface PatchApplyResult {
   images_added: number
   tags_added: number
   aliases_added: number
+  descriptions_added: number
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`

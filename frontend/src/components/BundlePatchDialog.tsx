@@ -60,6 +60,7 @@ export default function BundlePatchDialog({
   const [opts, setOpts] = useState<Omit<PatchApplyOptions, 'matches' | 'rename'>>({
     model_tags: 'merge',
     model_images: 'replace_generated',
+    model_descriptions: true,
     bundle_cover: true,
     bundle_description: true,
   })
@@ -144,7 +145,8 @@ export default function BundlePatchDialog({
       onApplied()
       setDone(
         `Applied: ${result.models_updated} model(s) updated, ${result.tags_added} tag(s) added, ` +
-          `${result.images_added} image(s) added, ${result.aliases_added} alias(es) recorded.`,
+          `${result.images_added} image(s) added, ${result.descriptions_added} description(s) set, ` +
+          `${result.aliases_added} alias(es) recorded.`,
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -162,6 +164,7 @@ export default function BundlePatchDialog({
     category: string | null
     patchTags: string[]
     hasImage: boolean
+    hasDescription: boolean
     fixed?: { id: string; name: string }
     choices?: PatchMember[]
     /** how many leading `choices` are the suggested candidates (rest is every
@@ -176,6 +179,7 @@ export default function BundlePatchDialog({
       category: m.category,
       patchTags: m.add_tags,
       hasImage: m.has_image,
+      hasDescription: m.has_description,
       fixed: { id: m.model_id, name: m.model_name },
     }))
     for (const u of [...preview.ambiguous, ...preview.unmatched_patch]) {
@@ -189,6 +193,7 @@ export default function BundlePatchDialog({
         category: u.category,
         patchTags: u.patch_tags,
         hasImage: u.has_image,
+        hasDescription: u.has_description,
         choices: [...u.candidates, ...others],
         shortlist: u.candidates.length,
       })
@@ -488,6 +493,9 @@ export default function BundlePatchDialog({
                         sx={{ flexWrap: 'wrap', alignItems: 'center' }}
                       >
                         {r.hasImage && <Chip size="small" label="image" variant="outlined" />}
+                        {r.hasDescription && (
+                          <Chip size="small" label="description" variant="outlined" />
+                        )}
                         {addTags(r).map((t) => (
                           <Chip
                             key={t}
@@ -497,7 +505,7 @@ export default function BundlePatchDialog({
                             variant="outlined"
                           />
                         ))}
-                        {id && !r.hasImage && addTags(r).length === 0 && (
+                        {id && !r.hasImage && !r.hasDescription && addTags(r).length === 0 && (
                           <Typography variant="caption" color="text.secondary">
                             nothing new
                           </Typography>
@@ -547,6 +555,21 @@ export default function BundlePatchDialog({
                 >
                   <MenuItem value="replace_generated">Replace the render</MenuItem>
                   <MenuItem value="add">Add alongside</MenuItem>
+                  <MenuItem value="skip">Skip</MenuItem>
+                </Select>
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 1 }}>
+                <Typography variant="body2" sx={{ minWidth: 120 }}>
+                  Model descriptions
+                </Typography>
+                <Select
+                  size="small"
+                  value={opts.model_descriptions ? 'apply' : 'skip'}
+                  onChange={(e) =>
+                    setOpts((o) => ({ ...o, model_descriptions: e.target.value === 'apply' }))
+                  }
+                >
+                  <MenuItem value="apply">Set (adds a revision)</MenuItem>
                   <MenuItem value="skip">Skip</MenuItem>
                 </Select>
               </Stack>
