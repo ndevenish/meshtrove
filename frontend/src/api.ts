@@ -212,6 +212,9 @@ export interface ImportSummary {
   unpacking: boolean
   /** the dropped archive is a MeshTrove export — restore it rather than carve it */
   is_export: boolean
+  /** a "keep unmatched files" carve already placed some of this import; what's
+      staged now is the remainder, awaiting another pass */
+  partial: boolean
 }
 
 /// One entry sitting in the server-side dropbox (`<store>/imports`) — an archive
@@ -269,6 +272,10 @@ export interface LayoutSpec {
   rules: LayoutRule[]
   /** drop the folders once the carve has read them: files land with no path */
   flatten?: boolean
+  /** commit only what the rules matched: unmatched files stay staged in the
+      import, which survives the commit (flagged partial) for another pass.
+      Per-import working state — not saved into layout templates. */
+  keep_unmatched?: boolean
 }
 
 export interface ImportLayout extends LayoutSpec {

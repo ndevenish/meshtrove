@@ -113,6 +113,15 @@ export default function ImportLayoutPanel({
   const [plan, setPlan] = useState<LayoutPlan | null>(null)
   const [planError, setPlanError] = useState('')
   const [flatten, setFlatten] = useImportDraftState(importId, 'layout.flatten', false)
+  // Commit only the matched files and keep the rest staged here. Per-import
+  // working state (like the enabled toggles' current values), never part of a
+  // saved template — whether a drop is being split across targets is a fact
+  // about this drop, not about the publisher's tree.
+  const [keepUnmatched, setKeepUnmatched] = useImportDraftState(
+    importId,
+    'layout.keepUnmatched',
+    false,
+  )
   // Retarget choices, keyed by planned-model identity so they survive re-plans:
   // a member id, or 'new' to force a fresh member. An unset model rides on the
   // plan's auto-matched `merge_target`.
@@ -164,6 +173,7 @@ export default function ImportLayoutPanel({
   const clear = () => {
     setRules([])
     setFlatten(false)
+    setKeepUnmatched(false)
     setPlan(null)
     setPlanError('')
   }
@@ -191,7 +201,7 @@ export default function ImportLayoutPanel({
     if (unpacking) return
     // Every rule is sent, blanks included, so `plan.rules` stays index-aligned
     // with the editor blocks on screen.
-    const spec: LayoutSpec = { rules, flatten }
+    const spec: LayoutSpec = { rules, flatten, keep_unmatched: keepUnmatched }
     const timer = setTimeout(async () => {
       try {
         const result = await api.planImport(importId, spec, target, bundleId)
@@ -206,7 +216,7 @@ export default function ImportLayoutPanel({
     }, 400)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [importId, rules, target, fileCount, unpacking, flatten, bundleId, live.length])
+  }, [importId, rules, target, fileCount, unpacking, flatten, keepUnmatched, bundleId, live.length])
 
   // The member each planned model resolves to: an explicit dropdown choice, else
   // the plan's auto-match. Reported up so the commit sends the same array.
@@ -539,7 +549,8 @@ export default function ImportLayoutPanel({
           <Typography variant="body2" color="text.secondary">
             matches {plan.matched} of {plan.total} files
             {plan.carved !== plan.matched && ` (${plan.carved} carved)`}
-            {plan.matched < plan.total && ' — the rest land unsorted'}
+            {plan.matched < plan.total &&
+              (keepUnmatched ? ' — the rest stay staged here' : ' — the rest land unsorted')}
           </Typography>
         )}
       </Stack>
@@ -552,8 +563,10 @@ export default function ImportLayoutPanel({
             </Typography>
           )}
 
+          {/* display:flex stacks the two option rows; inline-flex would let them
+              sit side by side and ragged. */}
           <FormControlLabel
-            sx={{ mb: 1 }}
+            sx={{ mb: 1, display: 'flex' }}
             control={
               <Checkbox
                 size="small"
@@ -567,6 +580,27 @@ export default function ImportLayoutPanel({
                 <Typography variant="caption" color="text.secondary">
                   The carve has already read them — keep the files flat inside the model instead of
                   nested under the folders they came in.
+                </Typography>
+              </Box>
+            }
+          />
+
+          <FormControlLabel
+            sx={{ mb: 1, display: 'flex' }}
+            control={
+              <Checkbox
+                size="small"
+                checked={keepUnmatched}
+                onChange={(e) => setKeepUnmatched(e.target.checked)}
+              />
+            }
+            label={
+              <Box>
+                <Typography variant="body2">Keep unmatched files staged</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Import only what the rules match — matched files leave the import; the rest stay
+                  here (instead of landing unsorted), so you can carve them at a different target in
+                  another pass.
                 </Typography>
               </Box>
             }

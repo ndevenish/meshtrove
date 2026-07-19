@@ -70,6 +70,9 @@ function ImportWorkbench() {
   const [mergeTargets, setMergeTargets] = useState<(string | null)[] | null>(null)
   const [committing, setCommitting] = useState(false)
   const [error, setError] = useState('')
+  // Set after a partial ("keep unmatched files") commit, which stays on this
+  // page: the import survived with the remainder, ready for another pass.
+  const [notice, setNotice] = useState('')
 
   // The facts about the drop, typed once. A box set is bought once, from one
   // creator, under one licence — so on a bundle commit these land on every member
@@ -179,6 +182,15 @@ function ImportWorkbench() {
               }
             : { target: 'new_model', name: name.trim(), layout: spec, ...meta }
       const result = await api.commitImport(staged.id, body)
+      // A "keep unmatched files" commit leaves the import alive with the
+      // remainder, so stay here for the next pass — the draft (rules, choices)
+      // stays too. The re-plan happens by itself as the file list refetches.
+      if (spec?.keep_unmatched) {
+        await queryClient.invalidateQueries()
+        setCommitting(false)
+        setNotice('Matched files imported — the rest are still staged here.')
+        return
+      }
       clearImportDraft(staged.id)
       await queryClient.invalidateQueries()
       navigate(result.type === 'model' ? `/models/${result.slug}` : `/bundles/${result.slug}`)
@@ -240,8 +252,10 @@ function ImportWorkbench() {
         <Box sx={{ flexGrow: 1 }}>
           <Typography variant="h5">Importing</Typography>
           <Typography color="text.secondary" variant="body2">
-            {staged.file_count} file{staged.file_count === 1 ? '' : 's'} staged — not in your
-            library until you place it below.
+            {staged.file_count} file{staged.file_count === 1 ? '' : 's'} staged
+            {staged.partial
+              ? ' — the rest of this drop has already been placed; carve what remains below.'
+              : ' — not in your library until you place it below.'}
           </Typography>
         </Box>
         <Button color="error" startIcon={<DeleteIcon />} onClick={discard} disabled={committing}>
@@ -388,8 +402,8 @@ function ImportWorkbench() {
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               {layout
                 ? dest === 'new_model'
-                  ? `Matched files are carved into ${layout.plan.models[0]?.variants.length ?? 0} variant(s); the rest land in the model’s unsorted list.`
-                  : `Matched files are carved into ${layout.plan.models.length} member model(s) with their variants; the rest land in the bundle’s unsorted list.`
+                  ? `Matched files are carved into ${layout.plan.models[0]?.variants.length ?? 0} variant(s); the rest ${layout.spec.keep_unmatched ? 'stay staged here for another pass' : 'land in the model’s unsorted list'}.`
+                  : `Matched files are carved into ${layout.plan.models.length} member model(s) with their variants; the rest ${layout.spec.keep_unmatched ? 'stay staged here for another pass' : 'land in the bundle’s unsorted list'}.`
                 : dest === 'new_model'
                   ? 'Files land in the model’s unsorted list; sort them into variants on the model page.'
                   : 'Files land in the bundle’s unsorted list; carve them into member models on the bundle page.'}
@@ -443,6 +457,16 @@ function ImportWorkbench() {
       >
         <Alert severity="error" onClose={() => setError('')}>
           {error}
+        </Alert>
+      </Snackbar>
+      <Snackbar
+        open={!!notice}
+        autoHideDuration={8000}
+        onClose={() => setNotice('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="success" onClose={() => setNotice('')}>
+          {notice}
         </Alert>
       </Snackbar>
     </Container>

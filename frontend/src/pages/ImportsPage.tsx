@@ -64,6 +64,10 @@ export default function ImportsPage() {
                   icon={<CircularProgress size={12} sx={{ ml: 1 }} />}
                   label="Unpacking"
                 />
+              ) : item.partial ? (
+                // A "keep unmatched files" carve already placed some of this
+                // drop; what's staged is the remainder.
+                <Chip size="small" color="warning" label="Partially imported" />
               ) : (
                 <Chip size="small" color="primary" label="Ready to place" />
               )}
