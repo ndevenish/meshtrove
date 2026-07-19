@@ -93,6 +93,13 @@ pub struct LayoutSpec {
     /// and repeating it as a folder inside that variant only buries the files.
     #[serde(default)]
     pub flatten: bool,
+    /// Commit only what the rules matched: unmatched files stay staged in the
+    /// import (instead of landing unsorted on the destination), and the import
+    /// survives the commit — flagged partial — so the rest can be carved at a
+    /// different target later. Per-import working state, not part of a saved
+    /// template.
+    #[serde(default)]
+    pub keep_unmatched: bool,
 }
 
 /// Whether the carve targets one model (variants only; model-name captures
@@ -737,6 +744,7 @@ mod tests {
         LayoutSpec {
             rules,
             flatten: false,
+            keep_unmatched: false,
         }
     }
 

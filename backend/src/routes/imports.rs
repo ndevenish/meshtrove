@@ -58,6 +58,9 @@ pub struct ImportSummary {
     /// models/bundles it holds), not carved. The Import page shows a restore
     /// panel rather than the layout UI.
     pub is_export: bool,
+    /// A "keep unmatched files" carve has already placed some of this import:
+    /// what's staged now is the remainder, awaiting another pass.
+    pub partial: bool,
 }
 
 /// An import's files are listed via `GET /api/imports/{id}/files` (files.rs),
@@ -68,7 +71,7 @@ async fn list(
 ) -> Result<Json<Vec<ImportSummary>>, ApiError> {
     user.require_editor()?;
     let rows = sqlx::query!(
-        r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,
+        r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
                   (EXISTS (
                     SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
@@ -96,6 +99,7 @@ async fn list(
                 file_count: r.file_count,
                 unpacking: r.unpacking,
                 is_export: r.is_export,
+                partial: r.partial,
             })
             .collect(),
     ))
@@ -103,7 +107,7 @@ async fn list(
 
 pub async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, ApiError> {
     let r = sqlx::query!(
-        r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,
+        r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
                   (EXISTS (
                     SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
@@ -130,6 +134,7 @@ pub async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, A
         file_count: r.file_count,
         unpacking: r.unpacking,
         is_export: r.is_export,
+        partial: r.partial,
     })
 }
 
@@ -487,11 +492,6 @@ async fn commit(
 
     let mut tx = state.db.begin().await?;
 
-    // What the import was unpacked *from*. Read while the files still carry
-    // `import_id`; the rows themselves are dropped further down, once the commit
-    // knows which model or bundle to hang the provenance off.
-    let archives = gc::redundant_archives(&mut tx, id).await?;
-
     // Dry-run the layout carve first: a bad pattern or an unmapped value must
     // fail the commit before anything is created. Same `analyze` as the plan
     // endpoint, so the preview the user confirmed is exactly what happens.
@@ -501,16 +501,20 @@ async fn commit(
             (CarveTarget::Bundle, layout)
         }
     };
-    // The folders a carve has already read. Collected *before* anything moves,
-    // because the carve matches on `path` — flattening first would pull the tree
-    // out from under the pattern that is reading it — and because a file on its
-    // way to a variant no longer has an `import_id` to find it by afterwards.
-    let flatten_ids: Vec<Uuid> = if layout_spec.as_ref().is_some_and(|spec| spec.flatten) {
-        sqlx::query_scalar!("SELECT id FROM files WHERE import_id = $1", id)
-            .fetch_all(&mut *tx)
-            .await?
-    } else {
+    // Commit only what the rules match: unmatched files stay staged on the
+    // import, which survives the commit (flagged partial) for another pass.
+    let keep_unmatched = layout_spec.as_ref().is_some_and(|spec| spec.keep_unmatched);
+
+    // What the import was unpacked *from*. Read while the files still carry
+    // `import_id`; the rows themselves are dropped further down, once the commit
+    // knows which model or bundle to hang the provenance off. On a partial
+    // commit the archive isn't redundant yet — it stays staged with the
+    // remainder, and its provenance follows whichever commit finally empties
+    // the import.
+    let archives = if keep_unmatched {
         Vec::new()
+    } else {
+        gc::redundant_archives(&mut tx, id).await?
     };
 
     let carve = match layout_spec {
@@ -528,6 +532,47 @@ async fn commit(
             Some(plan)
         }
         None => None,
+    };
+
+    // The files this commit claims off the import: everything (None), or — when
+    // keeping unmatched files — exactly the ones the plan matched. Every matched
+    // file leaves the import: carved ones onto their variants, matched-but-
+    // uncarvable ones (no model name under a bundle target) into unsorted.
+    let claimed: Option<Vec<Uuid>> = if keep_unmatched {
+        let plan = carve.as_ref().expect("keep_unmatched implies a layout");
+        let ids: Vec<Uuid> = plan
+            .annotations
+            .iter()
+            .filter(|a| a.matched)
+            .map(|a| a.id)
+            .collect();
+        if ids.is_empty() {
+            return Err(ApiError::BadRequest(
+                "no staged file matches the layout — nothing would be imported".into(),
+            ));
+        }
+        Some(ids)
+    } else {
+        None
+    };
+
+    // The folders a carve has already read. Collected *before* anything moves,
+    // because the carve matches on `path` — flattening first would pull the tree
+    // out from under the pattern that is reading it — and because a file on its
+    // way to a variant no longer has an `import_id` to find it by afterwards.
+    // Only the claimed files flatten: what stays staged keeps its tree, or the
+    // next pass would have nothing left to match on.
+    let flatten_ids: Vec<Uuid> = if layout_spec.as_ref().is_some_and(|spec| spec.flatten) {
+        match &claimed {
+            Some(ids) => ids.clone(),
+            None => {
+                sqlx::query_scalar!("SELECT id FROM files WHERE import_id = $1", id)
+                    .fetch_all(&mut *tx)
+                    .await?
+            }
+        }
+    } else {
+        Vec::new()
     };
 
     // Resolve every tag name the carve and the typed metadata need in two bulk
@@ -596,14 +641,9 @@ async fn commit(
                 .await?;
             }
             // Whatever the carve didn't claim (or all of it, with no layout)
-            // lands in the model's unsorted bucket.
-            sqlx::query!(
-                "UPDATE files SET model_id = $2, import_id = NULL WHERE import_id = $1",
-                id,
-                model_id,
-            )
-            .execute(&mut *tx)
-            .await?;
+            // lands in the model's unsorted bucket — unless unmatched files are
+            // staying staged, in which case only the matched ones move.
+            claim_files(&mut tx, id, Some(model_id), None, claimed.as_deref()).await?;
             // Any images among those files are pictures of the model — pull them
             // out of the file list and into its gallery.
             adopt_model_images(&mut tx, model_id, user.id).await?;
@@ -655,13 +695,7 @@ async fn commit(
                 apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model).await?;
                 render_models.extend(created);
             }
-            sqlx::query!(
-                "UPDATE files SET bundle_id = $2, import_id = NULL WHERE import_id = $1",
-                id,
-                bundle_id,
-            )
-            .execute(&mut *tx)
-            .await?;
+            claim_files(&mut tx, id, None, Some(bundle_id), claimed.as_deref()).await?;
             CommitResult {
                 kind: "bundle".into(),
                 id: bundle_id,
@@ -700,13 +734,7 @@ async fn commit(
                 apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model).await?;
                 render_models.extend(created);
             }
-            sqlx::query!(
-                "UPDATE files SET bundle_id = $2, import_id = NULL WHERE import_id = $1",
-                id,
-                bundle_id,
-            )
-            .execute(&mut *tx)
-            .await?;
+            claim_files(&mut tx, id, None, Some(*bundle_id), claimed.as_deref()).await?;
             sqlx::query!(
                 "UPDATE bundles SET updated_at = now() WHERE id = $1",
                 bundle_id,
@@ -758,9 +786,21 @@ async fn commit(
             .await?;
     }
 
-    sqlx::query!("DELETE FROM imports WHERE id = $1", id)
+    if keep_unmatched {
+        // The unmatched files are still staged, so the import lives on — marked
+        // partial, so the Importing list can say some of it is already placed.
+        // The next commit can target anything, including a different bundle.
+        sqlx::query!(
+            "UPDATE imports SET partial = true, updated_at = now() WHERE id = $1",
+            id,
+        )
         .execute(&mut *tx)
         .await?;
+    } else {
+        sqlx::query!("DELETE FROM imports WHERE id = $1", id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
 
     // Only now that the last reference is committed can the bytes go: a rollback
@@ -833,6 +873,31 @@ async fn commit(
 
     tracing::info!(import = %id, into = %result.kind, id = %result.id, "import committed");
     Ok(Json(result))
+}
+
+/// Move the files a commit claims off the import and onto its destination —
+/// exactly one of `model_id`/`bundle_id`. `only = None` claims everything still
+/// staged; `Some(ids)` (a "keep unmatched files" carve) claims just those,
+/// leaving the rest owned by the import. Files the carve already placed on
+/// variants have no `import_id` any more, so they're untouched either way.
+async fn claim_files(
+    tx: &mut sqlx::PgConnection,
+    import_id: Uuid,
+    model_id: Option<Uuid>,
+    bundle_id: Option<Uuid>,
+    only: Option<&[Uuid]>,
+) -> Result<(), ApiError> {
+    sqlx::query!(
+        "UPDATE files SET model_id = $2, bundle_id = $3, import_id = NULL
+         WHERE import_id = $1 AND ($4::uuid[] IS NULL OR id = ANY($4))",
+        import_id,
+        model_id,
+        bundle_id,
+        only,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
