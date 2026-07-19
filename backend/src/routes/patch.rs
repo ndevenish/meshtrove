@@ -4,7 +4,8 @@
 //! `preview` returns the match diff to confirm, `apply` writes it.
 //!
 //! Generic on purpose: it knows the `meshtrove.bundle-patch/1` schema, not Loot.
-//! The upload is the scraper's zip — `{ patch.json, images/* }`.
+//! The upload is the scraper's zip — `{ patch.json, images/* }`. The format and
+//! these merge rules are specified in `docs/bundle-patch.md` — keep it true.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
