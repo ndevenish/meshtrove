@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.name, i.created_by, i.created_at, i.is_export,\n                  (SELECT count(*) FROM files f WHERE f.import_id = i.id) as \"file_count!\",\n                  (EXISTS (\n                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'archive_file_id' = f.id::text\n                  ) OR EXISTS (\n                    SELECT 1 FROM jobs j\n                    WHERE j.kind = 'dropbox_import'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'import_id' = i.id::text\n                  )) as \"unpacking!\"\n           FROM imports i WHERE i.id = $1",
+  "query": "SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,\n                  (SELECT count(*) FROM files f WHERE f.import_id = i.id) as \"file_count!\",\n                  (EXISTS (\n                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'archive_file_id' = f.id::text\n                  ) OR EXISTS (\n                    SELECT 1 FROM jobs j\n                    WHERE j.kind = 'dropbox_import'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'import_id' = i.id::text\n                  )) as \"unpacking!\"\n           FROM imports i\n           ORDER BY i.created_at DESC",
   "describe": {
     "columns": [
       {
@@ -60,23 +60,33 @@
       },
       {
         "ordinal": 5,
+        "name": "partial",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "imports",
+            "name": "partial"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "file_count!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "unpacking!",
         "type_info": "Bool",
         "origin": "Expression"
       }
     ],
     "parameters": {
-      "Left": [
-        "Uuid"
-      ]
+      "Left": []
     },
     "nullable": [
+      false,
       false,
       false,
       false,
@@ -86,5 +96,5 @@
       null
     ]
   },
-  "hash": "0cbabf119070e94d15ee4c2c4ff8e2986174b10c6fbb7158e52b07f1ad12d26e"
+  "hash": "0276bab8318875507e74cb82b64e072e14a698af3058e8696fc9c7a4a9cb7877"
 }
