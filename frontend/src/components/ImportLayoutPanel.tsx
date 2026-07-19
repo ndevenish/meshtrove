@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Autocomplete,
   Box,
@@ -20,6 +20,7 @@ import {
   Typography,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlined'
 import SaveIcon from '@mui/icons-material/Save'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
@@ -735,9 +736,125 @@ export default function ImportLayoutPanel({
   )
 }
 
-/// The staged file list, annotated by the active plan: capture groups
-/// highlighted in role colours, resolved model/tags chips trailing each row.
-export function AnnotatedFileList({
+/// One row of the annotated list, memoised. The list runs to *every* staged
+/// file — thousands, not a 400-row excerpt — so a row must only re-render when
+/// its own inputs change: without the memo, each keystroke anywhere on the
+/// import page (or a jump-highlight two rows away) rebuilds the whole archive.
+/// `content-visibility: auto` completes the picture: the browser skips layout
+/// and paint for offscreen rows (the intrinsic-size hint holds the scrollbar
+/// steady), so a re-plan costs roughly the visible screenful.
+const AnnotatedFileRow = memo(function AnnotatedFileRow({
+  file,
+  annotation,
+  rules,
+  highlighted,
+}: {
+  file: FileRecord
+  annotation?: FileAnnotation
+  /** the active rules, only so a self-contradicting one can be named in the
+      warning marker */
+  rules?: LayoutRule[]
+  /** the row "Next unmatched" last jumped to */
+  highlighted: boolean
+}) {
+  const parts = annotation?.parts ?? [
+    { text: file.path ? `${file.path}/${file.filename}` : file.filename },
+  ]
+  const invalid = annotation?.invalid_rules ?? []
+  return (
+    <Stack
+      id={`import-file-${file.id}`}
+      direction="row"
+      spacing={1}
+      sx={{
+        alignItems: 'flex-start',
+        py: 0.25,
+        opacity: annotation?.matched ? 1 : 0.6,
+        contentVisibility: 'auto',
+        containIntrinsicBlockSize: 'auto 26px',
+        ...(highlighted && { bgcolor: 'action.selected', borderRadius: 0.5 }),
+      }}
+    >
+      <InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.5, flexShrink: 0, mt: '2px' }} />
+      {/* The full path must always be legible and never clipped, so it wraps
+          rather than scrolling. Wrapping breaks *only* after a path divider
+          ('/'): each segment is an unbreakable unit (so a filename with spaces
+          never splits mid-word) and a <wbr> after each slash is the sole break
+          opportunity — see WrappedPath. Continuation lines hang-indent
+          (paddingLeft + negative textIndent) so a wrapped path reads as one
+          path, not a new row. */}
+      <Typography
+        variant="body2"
+        sx={{
+          fontFamily: 'monospace',
+          fontSize: 12,
+          flexGrow: 1,
+          minWidth: 0,
+          whiteSpace: 'normal',
+          pl: '1.5em',
+          textIndent: '-1.5em',
+        }}
+      >
+        <WrappedPath parts={parts} />
+      </Typography>
+      <Stack direction="row" spacing={0.5} sx={{ flexShrink: 0, alignItems: 'center' }}>
+        {invalid.length > 0 && (
+          // Not a blocker: the rule found two different answers here, so it
+          // was dropped for this file and the others carried on.
+          <Tooltip
+            title={`${invalid
+              .map((i) => (rules?.[i] ? ruleLabel(rules[i], i) : `Rule ${i + 1}`))
+              .join(', ')} captured two different values in this path, so ${
+              invalid.length === 1 ? 'it was' : 'they were'
+            } ignored for this file.`}
+          >
+            <WarningAmberIcon color="warning" sx={{ fontSize: 16 }} />
+          </Tooltip>
+        )}
+        {annotation?.matched && (
+          <>
+            {annotation.model_name && (
+              <Chip
+                size="small"
+                label={annotation.model_name}
+                sx={{ bgcolor: ROLE_STYLES.model_name.bg }}
+              />
+            )}
+            {annotation.creator_ref && (
+              <Chip
+                size="small"
+                label={annotation.creator_ref}
+                sx={{ bgcolor: ROLE_STYLES.creator_ref.bg }}
+              />
+            )}
+            {annotation.model_tags.map((tag) => (
+              <Chip key={tag} size="small" label={tag} sx={{ bgcolor: ROLE_STYLES.model_tag.bg }} />
+            ))}
+            {annotation.variant_tags.map((tag) => (
+              <Chip
+                key={tag}
+                size="small"
+                label={tag}
+                sx={{ bgcolor: ROLE_STYLES.variant_tag.bg }}
+              />
+            ))}
+            {annotation.unmapped.map((raw) => (
+              <Chip key={raw} size="small" label={`${raw}?`} color="warning" variant="outlined" />
+            ))}
+          </>
+        )}
+      </Stack>
+    </Stack>
+  )
+})
+
+/// The staged file list — all of it — annotated by the active plan: capture
+/// groups highlighted in role colours, resolved model/tags chips trailing each
+/// row. A sticky toolbar jumps to the next file no rule matched, so tuning a
+/// layout towards full coverage doesn't mean scrolling a few thousand rows by
+/// eye. Memoised because the parent re-renders on every form keystroke while
+/// this component's inputs only change when a new plan lands.
+export const AnnotatedFileList = memo(function AnnotatedFileList({
   files,
   annotations,
   rules,
@@ -749,112 +866,68 @@ export function AnnotatedFileList({
   rules?: LayoutRule[]
 }) {
   const byId = useMemo(() => new Map(annotations.map((a) => [a.id, a])), [annotations])
-  const shown = files.slice(0, 400)
+  // The rows "Next unmatched" cycles through. A file with no annotation at all
+  // (the archive itself) was never a carve candidate, so it doesn't count.
+  const unmatched = useMemo(
+    () => files.filter((f) => byId.get(f.id)?.matched === false).map((f) => f.id),
+    [files, byId],
+  )
+  // Where the last jump landed (a file id, so a re-plan that reshuffles the
+  // unmatched set just restarts the cycle from the top instead of pointing at
+  // a row that may have since matched).
+  const [cursor, setCursor] = useState('')
+  const jumpNext = () => {
+    if (unmatched.length === 0) return
+    // indexOf -1 (no jump yet, or the cursor's file got matched) rolls to 0.
+    const next = unmatched[(unmatched.indexOf(cursor) + 1) % unmatched.length]
+    setCursor(next)
+    // Instant, not smooth: with content-visibility the browser estimates
+    // offscreen heights, and a long smooth scroll drifts as they realise.
+    document.getElementById(`import-file-${next}`)?.scrollIntoView({ block: 'center' })
+  }
   return (
-    // The full path must always be legible and never clipped, so it wraps rather
-    // than scrolling. Wrapping breaks *only* after a path divider ('/'): each
-    // segment is an unbreakable unit (so a filename with spaces never splits mid-
-    // word) and a <wbr> after each slash is the sole break opportunity — see
-    // WrappedPath. Continuation lines hang-indent (paddingLeft + negative
-    // textIndent) so a wrapped path reads as one path, not a new row.
     <Box>
-      {shown.map((file) => {
-        const annotation = byId.get(file.id)
-        const parts = annotation?.parts ?? [
-          { text: file.path ? `${file.path}/${file.filename}` : file.filename },
-        ]
-        const invalid = annotation?.invalid_rules ?? []
-        return (
-          <Stack
-            key={file.id}
-            direction="row"
-            spacing={1}
-            sx={{ alignItems: 'flex-start', py: 0.25, opacity: annotation?.matched ? 1 : 0.6 }}
-          >
-            <InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.5, flexShrink: 0, mt: '2px' }} />
-            <Typography
-              variant="body2"
-              sx={{
-                fontFamily: 'monospace',
-                fontSize: 12,
-                flexGrow: 1,
-                minWidth: 0,
-                whiteSpace: 'normal',
-                pl: '1.5em',
-                textIndent: '-1.5em',
-              }}
-            >
-              <WrappedPath parts={parts} />
-            </Typography>
-            <Stack direction="row" spacing={0.5} sx={{ flexShrink: 0, alignItems: 'center' }}>
-              {invalid.length > 0 && (
-                // Not a blocker: the rule found two different answers here, so it
-                // was dropped for this file and the others carried on.
-                <Tooltip
-                  title={`${invalid
-                    .map((i) => (rules?.[i] ? ruleLabel(rules[i], i) : `Rule ${i + 1}`))
-                    .join(', ')} captured two different values in this path, so ${
-                    invalid.length === 1 ? 'it was' : 'they were'
-                  } ignored for this file.`}
-                >
-                  <WarningAmberIcon color="warning" sx={{ fontSize: 16 }} />
-                </Tooltip>
-              )}
-              {annotation?.matched && (
-                <>
-                  {annotation.model_name && (
-                    <Chip
-                      size="small"
-                      label={annotation.model_name}
-                      sx={{ bgcolor: ROLE_STYLES.model_name.bg }}
-                    />
-                  )}
-                  {annotation.creator_ref && (
-                    <Chip
-                      size="small"
-                      label={annotation.creator_ref}
-                      sx={{ bgcolor: ROLE_STYLES.creator_ref.bg }}
-                    />
-                  )}
-                  {annotation.model_tags.map((tag) => (
-                    <Chip
-                      key={tag}
-                      size="small"
-                      label={tag}
-                      sx={{ bgcolor: ROLE_STYLES.model_tag.bg }}
-                    />
-                  ))}
-                  {annotation.variant_tags.map((tag) => (
-                    <Chip
-                      key={tag}
-                      size="small"
-                      label={tag}
-                      sx={{ bgcolor: ROLE_STYLES.variant_tag.bg }}
-                    />
-                  ))}
-                  {annotation.unmapped.map((raw) => (
-                    <Chip
-                      key={raw}
-                      size="small"
-                      label={`${raw}?`}
-                      color="warning"
-                      variant="outlined"
-                    />
-                  ))}
-                </>
-              )}
-            </Stack>
-          </Stack>
-        )
-      })}
-      {files.length > shown.length && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          …and {files.length - shown.length} more files
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: 'center',
+          position: 'sticky',
+          // Below md the page itself scrolls, so "top" is under the sticky app
+          // bar (56px on xs, 64px from sm); on md+ the Contents column is its
+          // own scroll container and the toolbar pins to its top edge.
+          top: { xs: 56, sm: 64, md: 0 },
+          zIndex: 1,
+          bgcolor: 'background.default',
+          py: 0.5,
+        }}
+      >
+        <Button
+          size="small"
+          startIcon={<ArrowDownwardIcon />}
+          onClick={jumpNext}
+          disabled={unmatched.length === 0}
+        >
+          Next unmatched
+        </Button>
+        <Typography variant="body2" color="text.secondary">
+          {unmatched.length === 0
+            ? 'every file matches'
+            : `${unmatched.length} of ${files.length} unmatched`}
         </Typography>
-      )}
+      </Stack>
+      {files.map((file) => (
+        <AnnotatedFileRow
+          key={file.id}
+          file={file}
+          annotation={byId.get(file.id)}
+          rules={rules}
+          highlighted={cursor === file.id}
+        />
+      ))}
     </Box>
   )
-}
+})
 
 /// Render a file's path so it wraps only after a slash. The path is split into
 /// '/'-delimited segments (the slash kept on the end of its segment, so the break
