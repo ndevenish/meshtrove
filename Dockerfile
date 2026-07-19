@@ -28,10 +28,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/backend
 ENV SQLX_OFFLINE=true
-# Version string baked into the binary (`meshtrove --version`); the .git dir is
-# not in the build context, so build.rs reads this instead of calling git.
-ARG APP_VERSION=docker
-ENV APP_VERSION=${APP_VERSION}
 
 # Warm the dependency cache: compile just the deps against a stub main, so a pure
 # source change doesn't re-download and rebuild the whole dependency graph.
@@ -40,6 +36,13 @@ RUN mkdir src \
     && echo 'fn main() {}' > src/main.rs \
     && cargo build --release \
     && rm -rf src
+
+# Version string baked into the binary (`meshtrove --version`); the .git dir is
+# not in the build context, so build.rs reads this instead of calling git.
+# Declared only now: the value changes every build, so putting it any earlier
+# would invalidate the dependency-warm layer above on every commit.
+ARG APP_VERSION=docker
+ENV APP_VERSION=${APP_VERSION}
 
 # Real sources (includes migrations/ and .sqlx/), then the actual build.
 COPY backend/ ./
