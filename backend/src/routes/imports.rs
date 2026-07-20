@@ -940,6 +940,13 @@ async fn upsert_variant_tags_bulk(
     // invisible to that scan (a data-modifying CTE's writes aren't seen by sibling
     // reads), so they come from `ins` RETURNING instead — the same split the
     // single-name upsert uses to dodge the DO NOTHING/SELECT race.
+    //
+    // The scan compares `name::citext`, not the raw text: `name` is citext, so
+    // ON CONFLICT collides case-insensitively. A capture differing from an
+    // existing row only in case (`Monster` vs a stored `monster`) is then neither
+    // inserted (conflict → DO NOTHING) nor found by a case-sensitive text scan —
+    // it would fall through both branches and vanish from the map, silently
+    // dropping the tag on every model and bundle category that needed it.
     let rows = sqlx::query!(
         r#"WITH input AS (SELECT DISTINCT unnest($1::text[]) AS name),
                 ins AS (
@@ -951,7 +958,7 @@ async fn upsert_variant_tags_bulk(
            SELECT id AS "id!", name::text AS "name!" FROM ins
            UNION ALL
            SELECT vt.id, vt.name::text FROM variant_tags vt
-            WHERE vt.name IN (SELECT name FROM input)
+            WHERE vt.name IN (SELECT name::citext FROM input)
               AND vt.name NOT IN (SELECT name FROM ins)"#,
         &cleaned,
     )
@@ -987,7 +994,7 @@ async fn upsert_tags_bulk(
            SELECT id AS "id!", name::text AS "name!" FROM ins
            UNION ALL
            SELECT t.id, t.name::text FROM tags t
-            WHERE t.name IN (SELECT name FROM input)
+            WHERE t.name IN (SELECT name::citext FROM input)
               AND t.name NOT IN (SELECT name FROM ins)"#,
         &cleaned,
     )

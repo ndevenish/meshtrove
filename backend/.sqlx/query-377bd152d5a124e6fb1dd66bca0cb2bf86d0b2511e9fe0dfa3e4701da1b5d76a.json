@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH input AS (SELECT DISTINCT unnest($1::text[]) AS name),\n                ins AS (\n                    INSERT INTO variant_tags (name)\n                    SELECT name FROM input\n                    ON CONFLICT (name) DO NOTHING\n                    RETURNING id, name\n                )\n           SELECT id AS \"id!\", name::text AS \"name!\" FROM ins\n           UNION ALL\n           SELECT vt.id, vt.name::text FROM variant_tags vt\n            WHERE vt.name IN (SELECT name::citext FROM input)\n              AND vt.name NOT IN (SELECT name FROM ins)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "377bd152d5a124e6fb1dd66bca0cb2bf86d0b2511e9fe0dfa3e4701da1b5d76a"
+}
