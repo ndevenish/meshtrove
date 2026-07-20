@@ -78,6 +78,11 @@ pub struct FileRecord {
     pub kind: FileKind,
     pub size: i64,
     pub created_at: DateTime<Utc>,
+    /// An `archive` staged in an import whose unpack has not run yet — queued
+    /// behind the rest of its batch, or still going. False everywhere else: a
+    /// committed model's files were unpacked long ago, and a non-archive never
+    /// unpacks at all.
+    pub unpacking: bool,
 }
 
 /// Kind heuristic from the filename; an explicit `kind` form field overrides.
@@ -424,6 +429,7 @@ pub(crate) async fn insert_file(
         kind: record.kind,
         size,
         created_at: record.created_at,
+        unpacking: false,
     })
 }
 
@@ -453,6 +459,7 @@ async fn list_variant_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
+                unpacking: false,
             })
             .collect(),
     ))
@@ -487,6 +494,7 @@ async fn list_model_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
+                unpacking: false,
             })
             .collect(),
     ))
@@ -520,6 +528,7 @@ async fn list_bundle_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
+                unpacking: false,
             })
             .collect(),
     ))
@@ -536,9 +545,19 @@ async fn list_import_files(
     // don't list them to a signed-out visitor (a guest viewer). The model/bundle
     // listings above stay open — those own committed, browsable content.
     user.require_editor()?;
+    // Whether *this* archive has unpacked yet, not whether the import as a whole
+    // is busy: a pickup holds every unpack until the batch is staged, so the
+    // zips sit there waiting their turn and one that has landed must not be
+    // lumped in with one that hasn't.
     let rows = sqlx::query!(
         r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
-                  f.kind as "kind: FileKind", f.created_at, b.size
+                  f.kind as "kind: FileKind", f.created_at, b.size,
+                  EXISTS (
+                    SELECT 1 FROM jobs j
+                    WHERE j.kind = 'import_archive'
+                      AND j.status IN ('queued', 'running')
+                      AND j.payload->>'archive_file_id' = f.id::text
+                  ) as "unpacking!"
            FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256
            WHERE f.import_id = $1
            ORDER BY f.path, f.filename"#,
@@ -557,6 +576,7 @@ async fn list_import_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
+                unpacking: r.unpacking,
             })
             .collect(),
     ))
@@ -795,6 +815,7 @@ async fn update_file(
         kind: record.kind,
         size: record.size,
         created_at: record.created_at,
+        unpacking: false,
     }))
 }
 

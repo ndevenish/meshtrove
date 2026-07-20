@@ -554,17 +554,24 @@ export const FileTree = memo(function FileTree({
                   </IconButton>
                 </Tooltip>
               )}
-              {/* Its contents are already staged here — say so, or the zip reads
-                  as one more thing waiting to be dealt with. It is kept only as
-                  the record of what was dropped, and never carved. */}
+              {/* Say where the zip has got to, or it reads as one more thing
+                  waiting to be dealt with. Once unpacked it is kept only as the
+                  record of what was dropped, and is never carved. */}
               {archivesExtracted && file.kind === 'archive' && (
-                <Tooltip title="Already unpacked into this import. The zip is kept as a record of what was dropped, and is never carved into a model.">
+                <Tooltip
+                  title={
+                    file.unpacking
+                      ? 'Waiting for the rest of the drop to be staged, then unpacking into this import.'
+                      : 'Already unpacked into this import. The zip is kept as a record of what was dropped, and is never carved into a model.'
+                  }
+                >
                   <Chip
                     icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
-                    label="extracted"
+                    label={file.unpacking ? 'extracting…' : 'extracted'}
                     size="small"
                     variant="outlined"
-                    sx={{ height: 20, opacity: 0.7 }}
+                    color={file.unpacking ? 'info' : 'default'}
+                    sx={{ height: 20, opacity: file.unpacking ? 1 : 0.7 }}
                   />
                 </Tooltip>
               )}

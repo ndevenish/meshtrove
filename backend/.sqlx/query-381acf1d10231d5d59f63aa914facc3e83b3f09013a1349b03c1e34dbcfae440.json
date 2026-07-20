@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,\n                  f.kind as \"kind: FileKind\", f.created_at, b.size\n           FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE f.import_id = $1\n           ORDER BY f.path, f.filename",
+  "query": "SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,\n                  f.kind as \"kind: FileKind\", f.created_at, b.size,\n                  EXISTS (\n                    SELECT 1 FROM jobs j\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'archive_file_id' = f.id::text\n                  ) as \"unpacking!\"\n           FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE f.import_id = $1\n           ORDER BY f.path, f.filename",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,12 @@
             "name": "size"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "unpacking!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -119,8 +125,9 @@
       true,
       false,
       false,
-      false
+      false,
+      null
     ]
   },
-  "hash": "deed24daffb2d98e2178e1492e2159658e679be55d42422c66a4c7ec71bb4f48"
+  "hash": "381acf1d10231d5d59f63aa914facc3e83b3f09013a1349b03c1e34dbcfae440"
 }

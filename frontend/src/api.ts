@@ -71,6 +71,9 @@ export interface FileRecord {
   kind: 'model' | 'project' | 'raw' | 'document' | 'archive' | 'other'
   size: number
   created_at: string
+  /** An archive staged in an import that has not unpacked yet — its job is
+      queued behind the rest of the batch, or still running. */
+  unpacking: boolean
 }
 
 export interface VariantDetail {
