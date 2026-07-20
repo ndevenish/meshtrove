@@ -15,12 +15,6 @@ use crate::state::AppState;
 struct ImportPayload {
     /// The files.id of the uploaded archive (kind='archive')
     archive_file_id: Uuid,
-    /// Where the entries land, in place of the archive's own folder. Set when an
-    /// admin extracts a nested archive staged inside an import
-    /// (routes/imports.rs), which unpacks it into a folder of its own rather than
-    /// loose beside its siblings.
-    #[serde(default)]
-    dest_path: Option<String>,
 }
 
 pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
@@ -59,7 +53,19 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     };
 
     let archive_path = state.store.path_for(&archive.blob_sha256);
-    let base_path = payload.dest_path.unwrap_or_else(|| archive.path.clone());
+    let base_path = match import_id {
+        Some(import) => {
+            unpack_dest(
+                &state.db,
+                import,
+                payload.archive_file_id,
+                &archive.path,
+                &archive.filename,
+            )
+            .await?
+        }
+        None => archive.path.clone(),
+    };
 
     // Extract entries to temp files in a blocking task (the zip crate is
     // sync), then stream each into the content-addressed store.
@@ -111,7 +117,8 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
             Some((dir, name)) => (dir, name),
             None => ("", logical.as_str()),
         };
-        // Entries land under the archive's own upload path
+        // Entries land under base_path — the archive's own folder, or a folder
+        // named after the archive when it shares that folder (see unpack_dest).
         let full_path = if base_path.is_empty() {
             dir.to_string()
         } else if dir.is_empty() {
@@ -204,6 +211,64 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Where an import's archive unpacks: in place, or into a folder named after
+/// itself.
+///
+/// A zip dropped on its own *is* the import, and its tree is the whole of what
+/// was dropped — unpacking it into a folder named after itself would bury every
+/// path one level deeper than the drop meant, for no gain. It lands in place.
+///
+/// A zip with company is a different animal. A drop of `Pack/` holding
+/// `supported.zip` beside `unsupported.zip` staged both at `Pack`, so both
+/// unpacked *into* `Pack` and merged there — destroying the very distinction the
+/// two zips were carrying, which the carve then reads folder names to recover.
+/// With a sibling in the folder, entries go under the archive's own stem
+/// (`Pack/supported.zip` → `Pack/supported/…`) so each pack keeps its own tree.
+///
+/// "Alone" is judged when the unpack runs, not when it was queued, so every
+/// ingest path has to finish staging its batch before releasing these jobs — see
+/// the deferred `on_archive_ingested` calls in routes/files.rs and
+/// services/dropbox.rs.
+async fn unpack_dest(
+    db: &sqlx::PgPool,
+    import_id: Uuid,
+    archive_file_id: Uuid,
+    path: &str,
+    filename: &str,
+) -> Result<String> {
+    let has_siblings = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM files
+             WHERE import_id = $1 AND path = $2 AND id <> $3
+           ) as "exists!""#,
+        import_id,
+        path,
+        archive_file_id,
+    )
+    .fetch_one(db)
+    .await?;
+    Ok(dest_for(path, filename, has_siblings))
+}
+
+/// The path half of [`unpack_dest`], once the folder has been counted.
+fn dest_for(path: &str, filename: &str, has_siblings: bool) -> String {
+    if !has_siblings {
+        return path.to_string();
+    }
+    // `supported.zip` → `supported`. A name that is nothing but an extension
+    // leaves no stem to call the folder after.
+    let stem = filename
+        .rsplit_once('.')
+        .map_or(filename, |(stem, _)| stem)
+        .trim();
+    let stem = if stem.is_empty() { "extracted" } else { stem };
+    if path.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{path}/{stem}")
+    }
+}
+
 /// Adapter: ReaderStream yields io::Result<Bytes>; BlobStore::put wants anyhow.
 trait MapErrIntoAnyhow: Sized {
     type Ok;
@@ -222,5 +287,40 @@ where
     ) -> futures::stream::MapErr<Self, fn(std::io::Error) -> anyhow::Error> {
         use futures::TryStreamExt;
         self.map_err(anyhow::Error::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dest_for;
+
+    #[test]
+    fn an_archive_alone_in_its_folder_unpacks_in_place() {
+        // The whole of what was dropped: a folder named after it would bury
+        // every path one level deeper than the drop meant.
+        assert_eq!(dest_for("", "wave1.zip", false), "");
+        assert_eq!(dest_for("Pack", "wave1.zip", false), "Pack");
+    }
+
+    #[test]
+    fn an_archive_with_company_unpacks_under_its_own_stem() {
+        // supported.zip and unsupported.zip both used to empty into `Pack`,
+        // merging the one distinction they were carrying.
+        assert_eq!(dest_for("Pack", "supported.zip", true), "Pack/supported");
+        assert_eq!(
+            dest_for("Pack", "unsupported.zip", true),
+            "Pack/unsupported"
+        );
+        assert_eq!(dest_for("", "wave1.zip", true), "wave1");
+    }
+
+    #[test]
+    fn a_name_with_no_stem_still_names_a_folder() {
+        assert_eq!(dest_for("Pack", ".zip", true), "Pack/extracted");
+    }
+
+    #[test]
+    fn only_the_last_extension_goes() {
+        assert_eq!(dest_for("", "dragon.v2.zip", true), "dragon.v2");
     }
 }

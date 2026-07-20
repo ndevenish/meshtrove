@@ -340,7 +340,7 @@ export const FileTree = memo(function FileTree({
   onKindChange,
   onDelete,
   onRender,
-  onExtract,
+  archivesExtracted,
   onFolderRename,
 }: {
   files: FileRecord[]
@@ -351,8 +351,9 @@ export const FileTree = memo(function FileTree({
   onDelete?: (id: string) => void
   /** Force a preview render from this file; it joins the model's images. */
   onRender?: (id: string) => void
-  /** Unpack this archive in place. Only offered on `archive` rows. */
-  onExtract?: (id: string) => void
+  /** Mark `archive` rows as already unpacked — true inside an import, where a
+      staged zip's contents are alongside it. */
+  archivesExtracted?: boolean
   /** Rename (or, with an empty path, remove) a folder: rewrites the `path` of
       every file in the group. When set, folder headers become editable and the
       unfoldered root group gains an "Add folder" control. */
@@ -553,17 +554,20 @@ export const FileTree = memo(function FileTree({
                   </IconButton>
                 </Tooltip>
               )}
-              {/* A zip inside the drop: unpack it here rather than making the
-                  user download it and drop it again as its own import. */}
-              {onExtract &&
-                file.kind === 'archive' &&
-                file.filename.toLowerCase().endsWith('.zip') && (
-                  <Tooltip title="Extract this archive into a folder of its own">
-                    <IconButton size="small" onClick={() => onExtract(file.id)}>
-                      <UnarchiveIcon sx={{ fontSize: 18 }} />
-                    </IconButton>
-                  </Tooltip>
-                )}
+              {/* Its contents are already staged here — say so, or the zip reads
+                  as one more thing waiting to be dealt with. It is kept only as
+                  the record of what was dropped, and never carved. */}
+              {archivesExtracted && file.kind === 'archive' && (
+                <Tooltip title="Already unpacked into this import. The zip is kept as a record of what was dropped, and is never carved into a model.">
+                  <Chip
+                    icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
+                    label="extracted"
+                    size="small"
+                    variant="outlined"
+                    sx={{ height: 20, opacity: 0.7 }}
+                  />
+                </Tooltip>
+              )}
               {onDelete && (
                 <Tooltip title="Delete file">
                   <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>

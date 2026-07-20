@@ -233,6 +233,7 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
 
     let owner = Owner::Import(payload.import_id);
     let mut shas = Vec::with_capacity(entries.len());
+    let mut archives: Vec<(Uuid, files::FileKind, String, String)> = Vec::new();
     for file in &entries {
         // put_blocking: the source is a file on disk, i.e. a blocking reader, so
         // this hashes and writes in one pass instead of spilling to a temp file
@@ -264,9 +265,12 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
         )
         .await
         .map_err(anyhow::Error::new)?;
-        files::on_archive_ingested(state, owner, record.id, kind, &file.filename, &blob.sha256)
-            .await
-            .map_err(anyhow::Error::new)?;
+        // Held back until the whole entry is staged: whether a zip unpacks in
+        // place or into a folder of its own turns on what else shares its folder,
+        // and a pickup of `Pack/` is still walking towards those siblings here.
+        if matches!(kind, files::FileKind::Archive) {
+            archives.push((record.id, kind, file.filename.clone(), blob.sha256.clone()));
+        }
         shas.push(blob.sha256);
     }
 
@@ -274,6 +278,14 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
     tokio::task::spawn_blocking(move || store.sync_blobs(&shas))
         .await
         .context("dropbox fsync panicked")??;
+
+    // After the fsync, so the unpack job can't reach for a blob this batch has
+    // not finished writing.
+    for (file_id, kind, filename, sha256) in &archives {
+        files::on_archive_ingested(state, owner, *file_id, *kind, filename, sha256)
+            .await
+            .map_err(anyhow::Error::new)?;
+    }
 
     tracing::info!(
         import = %payload.import_id,

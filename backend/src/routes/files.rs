@@ -238,6 +238,7 @@ async fn consume_fields(
     let mut path = String::new();
     let mut kind_override: Option<String> = None;
     let mut records = Vec::new();
+    let mut archives: Vec<(Uuid, FileKind, String, String)> = Vec::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -305,19 +306,18 @@ async fn consume_fields(
                     kind,
                 )
                 .await?;
-                on_archive_ingested(
-                    state,
-                    owner,
-                    record.id,
-                    record.kind,
-                    &filename,
-                    &blob.sha256,
-                )
-                .await?;
+                // Deferred to after the batch: whether a zip unpacks in place or
+                // into a folder of its own turns on what else shares its folder,
+                // and the rest of the drop is still arriving on this very stream.
+                archives.push((record.id, record.kind, filename, blob.sha256));
                 records.push(record);
             }
             _ => {}
         }
+    }
+
+    for (file_id, kind, filename, sha256) in &archives {
+        on_archive_ingested(state, owner, *file_id, *kind, filename, sha256).await?;
     }
 
     Ok(records)
