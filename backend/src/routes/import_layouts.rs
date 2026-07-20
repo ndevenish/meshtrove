@@ -79,8 +79,12 @@ type SpecJson = sqlx::types::Json<LayoutSpec>;
 
 async fn list(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
 ) -> Result<Json<Vec<ImportLayout>>, ApiError> {
+    // Layouts are an editor tool — their regexes expose creator names and folder
+    // taxonomies — and only an editor can create/update/delete them, so listing
+    // gates the same way rather than leaking to any guest viewer that can browse.
+    user.require_editor()?;
     let rows = sqlx::query!(
         r#"SELECT id, name::text as "name!", creator_id,
                   jsonb_build_object('rules', rules, 'flatten', flatten)
