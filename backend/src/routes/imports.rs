@@ -404,7 +404,9 @@ pub struct ImportMeta {
     /// Model tags (what a model *is*) — added, never replacing what a carve found.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Becomes revision 1 of each model's description.
+    /// Becomes the first description revision of whatever the import targets:
+    /// the model under a model target, the *bundle* under a bundle target. It
+    /// is not fanned out to member models — see `apply_meta_bulk`.
     pub description_md: Option<String>,
 }
 
@@ -422,7 +424,8 @@ pub enum CommitInput {
     },
     /// A collection. Files land in the new bundle's "unsorted" bucket, to be
     /// carved into member models on the bundle page — or by `layout`. The
-    /// metadata lands on the bundle *and* on every member the carve creates.
+    /// metadata lands on the bundle *and* on every member the carve creates —
+    /// except the description, which is the box set's own and stays on it.
     NewBundle {
         name: Option<String>,
         kind: Option<String>,
@@ -624,7 +627,7 @@ async fn commit(
             )
             .fetch_one(&mut *tx)
             .await?;
-            apply_meta_bulk(&mut tx, &[model_id], meta, user.id, &tags.model).await?;
+            apply_meta_bulk(&mut tx, &[model_id], meta, user.id, &tags.model, true).await?;
             if let Some(plan) = &carve
                 && let Some(planned) = plan.models.first()
             {
@@ -691,10 +694,12 @@ async fn commit(
                 )
                 .await?;
                 // The box set was bought once: what was typed on the import page
-                // is true of every model the carve just pulled out of it.
-                apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model).await?;
+                // is true of every model the carve just pulled out of it — the
+                // description excepted, which describes the box, not each figure.
+                apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model, false).await?;
                 render_models.extend(created);
             }
+            apply_bundle_description(&mut tx, bundle_id, meta, user.id).await?;
             claim_files(&mut tx, id, None, Some(bundle_id), claimed.as_deref()).await?;
             CommitResult {
                 kind: "bundle".into(),
@@ -731,9 +736,10 @@ async fn commit(
                 // Only the models this drop *created*: a member that was already
                 // in the bundle has its own metadata, and a later 75mm pack has no
                 // business rewriting it.
-                apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model).await?;
+                apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model, false).await?;
                 render_models.extend(created);
             }
+            apply_bundle_description(&mut tx, *bundle_id, meta, user.id).await?;
             claim_files(&mut tx, id, None, Some(*bundle_id), claimed.as_deref()).await?;
             sqlx::query!(
                 "UPDATE bundles SET updated_at = now() WHERE id = $1",
@@ -1227,12 +1233,18 @@ async fn adopt_model_images(
 /// bundle gave it unless the import names a different one. Batched across all
 /// created models, since a box set is bought once and its facts are identical
 /// for each.
+///
+/// `description` says whether the typed description belongs on these models.
+/// Under a bundle target it does not: purchase facts and tags are true of every
+/// model in the box, but prose written about a box set is not a description of
+/// each figure in it — the caller puts it on the bundle instead.
 async fn apply_meta_bulk(
     tx: &mut sqlx::PgConnection,
     model_ids: &[Uuid],
     meta: &ImportMeta,
     user_id: Uuid,
     tag_ids: &HashMap<String, Uuid>,
+    description: bool,
 ) -> Result<(), ApiError> {
     if model_ids.is_empty() {
         return Ok(());
@@ -1278,12 +1290,46 @@ async fn apply_meta_bulk(
         .description_md
         .as_deref()
         .map(str::trim)
+        .filter(|_| description)
         .filter(|d| !d.is_empty())
     {
         sqlx::query!(
             "INSERT INTO model_description_revisions (model_id, body_md, created_by)
              SELECT unnest($1::uuid[]), $2, $3",
             model_ids,
+            body,
+            user_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Put the import page's typed description on the bundle itself, where a bundle
+/// target's description belongs.
+///
+/// Descriptions are immutable revisions (newest = current), so on a bundle that
+/// already has one this inserts rather than overwrites — the old text stays
+/// readable in the revision history. A blank field still means "nothing to say"
+/// and writes nothing, which is what keeps a later expansion-pack drop from
+/// blanking the box set's description.
+async fn apply_bundle_description(
+    tx: &mut sqlx::PgConnection,
+    bundle_id: Uuid,
+    meta: &ImportMeta,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    if let Some(body) = meta
+        .description_md
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        sqlx::query!(
+            "INSERT INTO bundle_description_revisions (bundle_id, body_md, created_by)
+             VALUES ($1, $2, $3)",
+            bundle_id,
             body,
             user_id,
         )

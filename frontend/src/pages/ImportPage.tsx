@@ -388,7 +388,14 @@ function ImportWorkbench() {
               />
               <TextField
                 size="small"
-                label="Description (markdown)"
+                // Name the destination: under a bundle target this describes the
+                // bundle and is *not* copied onto each member model, which the
+                // bare word "Description" left ambiguous.
+                label={
+                  dest === 'new_model'
+                    ? 'Model description (markdown)'
+                    : 'Bundle description (markdown)'
+                }
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 multiline
