@@ -103,6 +103,11 @@ struct PatchModel {
     /// same-named models apart.
     #[serde(default)]
     category: Option<String>,
+    /// This model's own page on the shop. A range sold as separate products has
+    /// no single URL, so where the scraper knows the per-model one it beats the
+    /// bundle-level `source.url` — see the apply below.
+    #[serde(default)]
+    source_url: Option<String>,
 }
 
 /// An optional uuid that tolerates `""`/whitespace as "not given" — annotated
@@ -947,6 +952,30 @@ async fn apply(
             }
         }
 
+        // The model's *own* page, when the scrape has one. Unlike the bundle's
+        // URL above this replaces: `source.url` is a fill-if-empty guess (the
+        // bundle's page stamped on a member for want of anything better), while
+        // this is the page that model was actually scraped from, so a re-scrape
+        // should be able to correct a URL an earlier one guessed.
+        if let Some(url) = pm
+            .source_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        {
+            let set = sqlx::query!(
+                r#"UPDATE models SET source_url = $2
+                   WHERE id = $1 AND source_url IS DISTINCT FROM $2"#,
+                model_id,
+                url,
+            )
+            .execute(&mut *tx)
+            .await?;
+            if set.rows_affected() > 0 {
+                touched = true;
+            }
+        }
+
         let renamed_to = if options.rename.contains(&idx.to_string()) {
             pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
         } else {
@@ -1207,6 +1236,7 @@ fn decode_entities(patch: &mut Patch) {
         dec(&mut m.name);
         dec(&mut m.category);
         dec(&mut m.description_md);
+        dec(&mut m.source_url);
         dec_all(&mut m.tags);
         dec(&mut m.match_hint.name);
         dec_all(&mut m.match_hint.aliases);
@@ -1323,6 +1353,7 @@ mod tests {
             image: None,
             images: Vec::new(),
             category: category.map(str::to_string),
+            source_url: None,
         }
     }
 
@@ -1512,6 +1543,7 @@ mod tests {
                 image: Some("model&#8211;.png".into()),
                 images: vec!["gallery&#8211;.png".into()],
                 category: Some("Enemies &amp; Foes".into()),
+                source_url: Some("https://x.test/p?a=1&amp;b=2".into()),
             }],
         };
         decode_entities(&mut patch);
