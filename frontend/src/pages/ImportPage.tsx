@@ -105,7 +105,7 @@ function ImportWorkbench() {
   // flag clears stops one fetch too early and leaves the tail of the archive
   // off the page until a reload. Keep going until the list matches the count the
   // import reports.
-  const { data: files } = useQuery({
+  const { data: files, isLoading: filesLoading } = useQuery({
     queryKey: ['import-files', id],
     queryFn: () => api.importFiles(id!),
     enabled: !!id,
@@ -483,7 +483,17 @@ function ImportWorkbench() {
           <Typography variant="h6" sx={{ mb: 1 }}>
             Contents
           </Typography>
-          {layout ? (
+          {filesLoading ? (
+            // Until the first fetch lands we hold an empty list, which the file
+            // tree would report as "No files yet" — a verdict on an import we
+            // haven't read yet. Say we're still reading instead.
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+              <CircularProgress size={16} />
+              <Typography variant="body2" color="text.secondary">
+                Loading files…
+              </Typography>
+            </Stack>
+          ) : layout ? (
             <AnnotatedFileList
               files={fileList}
               annotations={layout.plan.annotations}
