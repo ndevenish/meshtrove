@@ -7,8 +7,15 @@ name: Build and push Docker image
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+
+# One build per ref; a newer push to main supersedes an in-flight one. Tag
+# builds are never cancelled — each release must produce its own image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   # ghcr.io/ndevenish/meshtrove — github.repository is already lowercased for
@@ -118,13 +125,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # Release tags from the git tag (v1.2.3 -> 1.2.3 and 1.2); `latest`
-          # tracks the newest semver tag (default flavor latest=auto). A manual
-          # dispatch also moves `latest`, plus always a per-commit sha tag.
+          # Release tags from the git tag (v1.2.3 -> 1.2.3 and 1.2). `latest`
+          # follows the tip of main — every commit moves it, so it is a rolling
+          # build rather than the newest release. Semver tags (default flavor
+          # latest=auto) and a manual dispatch move it too. Pin to a version or
+          # a sha tag to hold still.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
