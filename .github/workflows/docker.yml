@@ -166,3 +166,26 @@ jobs:
 
       - name: Inspect image
         run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+
+      # Poke the deployment to pull the image just published. This runs only after
+      # the manifest above is live, so :latest is guaranteed complete before the
+      # host is told to update. The endpoint is a Watchtower /v1/update behind a
+      # Cloudflare tunnel; the Bearer token is Watchtower's, and the CF-Access-*
+      # headers satisfy a Cloudflare Access service-token policy in front of it.
+      # See docs/deploy.md → "Automatic redeploy on a new image".
+      #
+      # The whole step is skipped unless DEPLOY_WEBHOOK_URL is configured, so
+      # forks and anyone without an auto-updating deployment build as before.
+      - name: Trigger production redeploy
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.DEPLOY_WEBHOOK_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        if: env.DEPLOY_WEBHOOK_URL != ''
+        run: |
+          curl -fsS --retry 3 --retry-delay 5 --max-time 60 -X POST \
+            -H "Authorization: Bearer ${DEPLOY_WEBHOOK_TOKEN}" \
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+            "${DEPLOY_WEBHOOK_URL}"

@@ -214,6 +214,127 @@ request-body limit (e.g. nginx `client_max_body_size`).
 
 ---
 
+## Automatic redeploy on a new image
+
+`docker-compose.prod.yml` already sets `pull_policy: always`, so a manual
+`docker compose … up -d` always picks up the newest `:latest`. This section wires
+that up to happen automatically whenever CI publishes a new image — no cron, no
+polling, and nothing exposed to the public internet except one authenticated
+endpoint.
+
+The mechanism has three parts:
+
+1. **A [Watchtower][wt] sidecar** (the actively-maintained `nickfedor` fork) runs
+   next to the app with the Docker socket mounted. It has no schedule, so it does
+   nothing until it receives an authenticated `POST /v1/update`; then it pulls the
+   newest image for the labelled `app` container and recreates it with identical
+   config. It is already in `docker-compose.prod.yml` — delete the `watchtower`
+   service if you'd rather redeploy by hand.
+2. **The CI workflow** (`.github/workflows/docker.yml`) sends that POST from its
+   `merge` job, but only *after* the multi-arch `:latest` manifest is published —
+   so the host is never told to pull an image that isn't fully live yet.
+3. **A Cloudflare tunnel + Access policy** exposes the Watchtower endpoint to
+   GitHub's runners and authenticates the caller at the edge.
+
+[wt]: https://github.com/nicholas-fedor/watchtower
+
+Watchtower binds `:8080` but the compose file does **not** publish it to the
+host — reaching it is the tunnel's job. Two independent secrets gate every call:
+a Cloudflare Access **service token**, checked at the edge, and Watchtower's own
+**Bearer token** (`WATCHTOWER_TOKEN`), checked by the container. A request must
+carry both.
+
+### 1. Set the Watchtower token
+
+Generate a token and put it in `.env.prod`:
+
+```bash
+echo "WATCHTOWER_TOKEN=$(openssl rand -base64 48 | tr -d '\n')" >> .env.prod
+```
+
+Bring the stack up as usual (`docker compose --env-file .env.prod -f
+docker-compose.prod.yml up -d`). The `watchtower` service starts alongside the
+app; `docker compose logs watchtower` should show it listening with the update
+endpoint enabled.
+
+### 2. Route the tunnel to Watchtower
+
+Add a public hostname (e.g. `meshtrove-deploy.example.com`) to your Cloudflare
+tunnel that points at the Watchtower service. **How you name the service depends
+on where `cloudflared` runs:**
+
+- **`cloudflared` as a container on this compose network** — attach it to the
+  same network and target `http://watchtower:8080`. No host port is published;
+  the two containers talk over the Docker network. This is the tightest setup.
+- **`cloudflared` on the host** — it can't resolve `watchtower`, so publish the
+  port to loopback only by adding to the `watchtower` service:
+
+  ```yaml
+      ports:
+        - "127.0.0.1:8080:8080"
+  ```
+
+  and target `http://localhost:8080` from the tunnel. Loopback-only means the
+  port is still not reachable from the LAN or internet.
+
+The public URL to give GitHub is that hostname plus the endpoint path, e.g.
+`https://meshtrove-deploy.example.com/v1/update`.
+
+### 3. Protect it with a Cloudflare Access service token
+
+In the Cloudflare Zero Trust dashboard:
+
+1. **Access → Service Auth → Service Tokens**: create one (e.g.
+   `meshtrove-ci`). Copy the **Client ID** and **Client Secret** — the secret is
+   shown once.
+2. **Access → Applications**: add a self-hosted application for the hostname
+   (optionally scoped to the `/v1/update` path) with a single policy: *Action:
+   Service Auth*, include the service token above. This makes Cloudflare reject
+   any request that doesn't present valid `CF-Access-Client-Id` /
+   `CF-Access-Client-Secret` headers, before it ever reaches your host.
+
+### 4. Add the GitHub Actions secrets
+
+In the repository's **Settings → Secrets and variables → Actions**, add:
+
+| Secret | Value |
+| --- | --- |
+| `DEPLOY_WEBHOOK_URL` | `https://meshtrove-deploy.example.com/v1/update` |
+| `DEPLOY_WEBHOOK_TOKEN` | the same value as `WATCHTOWER_TOKEN` in `.env.prod` |
+| `CF_ACCESS_CLIENT_ID` | the service token's Client ID |
+| `CF_ACCESS_CLIENT_SECRET` | the service token's Client Secret |
+
+The "Trigger production redeploy" step is guarded on `DEPLOY_WEBHOOK_URL`, so
+until you add these secrets — and in forks — the build behaves exactly as before
+and simply skips the notify step.
+
+### Verifying and operating it
+
+- **Test the path by hand** (from a machine that can reach the tunnel):
+
+  ```bash
+  curl -fsS -X POST \
+    -H "Authorization: Bearer $WATCHTOWER_TOKEN" \
+    -H "CF-Access-Client-Id: <client-id>" \
+    -H "CF-Access-Client-Secret: <client-secret>" \
+    https://meshtrove-deploy.example.com/v1/update
+  ```
+
+  A `200` with a JSON result means the whole chain works. Drop the Bearer header
+  and you should get `401` from Watchtower; drop the CF-Access headers and
+  Cloudflare should reject it before the host.
+- **`docker compose logs -f watchtower`** on the host shows each triggered update
+  and what it recreated.
+- **Rotating secrets**: change `WATCHTOWER_TOKEN` in `.env.prod` and the
+  `DEPLOY_WEBHOOK_TOKEN` GitHub secret together (then `up -d`), or roll the
+  Cloudflare service token and update the two `CF_ACCESS_*` secrets.
+- **Postgres is never updated** by this — only the container carrying the
+  `com.centurylinklabs.watchtower.enable=true` label is in scope. A schema change
+  still arrives the normal way: the new app image applies its own migrations at
+  startup when Watchtower recreates it.
+
+---
+
 ## Preview rendering
 
 Model previews are produced by shelling out to an external renderer — `f3d` by

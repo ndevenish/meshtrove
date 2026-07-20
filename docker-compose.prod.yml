@@ -55,6 +55,39 @@ services:
       # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
       #   - /srv/meshtrove/store:/app/store
       - store:/app/store
+    labels:
+      # Marks this container as the one Watchtower may update (below). Postgres is
+      # deliberately left unlabelled so an auto-update never touches the database.
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  # Optional: webhook-driven redeploy. Watchtower pulls the newest image and
+  # recreates `app` with the same config when it receives an authenticated
+  # POST /v1/update — nothing else. Polling is off (no schedule configured), so
+  # it acts ONLY on that trigger, which the CI workflow sends after publishing a
+  # new :latest. See docs/deploy.md → "Automatic redeploy on a new image".
+  # Drop this service if you'd rather redeploy by hand.
+  watchtower:
+    image: nickfedor/watchtower:latest # maintained fork of containrrr/watchtower
+    depends_on:
+      - app
+    volumes:
+      # Watchtower drives the Docker daemon to pull + recreate the container.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Enable only the update endpoint; every /v1/* route requires the token.
+      WATCHTOWER_HTTP_API_ENDPOINTS: update
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env.prod}
+      # Only touch containers carrying the enable label above (i.e. just `app`).
+      WATCHTOWER_LABEL_ENABLE: "true"
+      # Delete the superseded image after a successful update.
+      WATCHTOWER_CLEANUP: "true"
+    # Port 8080 is NOT published to the host. Reach it from your Cloudflare tunnel
+    # by name (http://watchtower:8080) if cloudflared shares this compose network,
+    # or add `ports: ["127.0.0.1:8080:8080"]` if cloudflared runs on the host.
+    # See docs/deploy.md — do not expose it to the public internet directly.
+    expose:
+      - "8080"
     restart: unless-stopped
 
 volumes:
