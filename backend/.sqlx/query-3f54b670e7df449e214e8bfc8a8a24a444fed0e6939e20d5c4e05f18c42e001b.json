@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT path, filename, kind as \"kind: crate::routes::files::FileKind\"\n           FROM files WHERE id = $1 AND import_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "filename",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "filename"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind: crate::routes::files::FileKind",
+        "type_info": {
+          "Custom": {
+            "name": "file_kind",
+            "kind": {
+              "Enum": [
+                "model",
+                "document",
+                "archive",
+                "other",
+                "project",
+                "raw"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3f54b670e7df449e214e8bfc8a8a24a444fed0e6939e20d5c4e05f18c42e001b"
+}

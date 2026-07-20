@@ -618,6 +618,11 @@ export const api = {
     request<ImportSummary>(`/api/imports/${id}`, { ...json({ name }), method: 'PUT' }),
   deleteImport: (id: string) => request<void>(`/api/imports/${id}`, { method: 'DELETE' }),
   importFiles: (id: string) => request<FileRecord[]>(`/api/imports/${id}/files`),
+  /** Unpack a zip staged inside the import; its entries join the import under a
+      folder named after the zip. Runs as a job — the returned summary already
+      reads `unpacking`. */
+  extractImportFile: (id: string, fileId: string) =>
+    request<ImportSummary>(`/api/imports/${id}/files/${fileId}/extract`, { method: 'POST' }),
   commitImport: (id: string, target: CommitTarget) =>
     request<CommitResult>(`/api/imports/${id}/commit`, json(target)),
   planImport: (id: string, spec: LayoutSpec, target: PlanTarget, bundleId?: string) =>

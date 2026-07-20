@@ -215,6 +215,20 @@ function ImportWorkbench() {
     }
   }
 
+  // A zip that came inside the drop, unpacked into this same import so the one
+  // layout carves its contents along with the rest. The job flips `unpacking`,
+  // and the two queries above poll the entries in as they land — the same path
+  // the outer archive took to get here.
+  const extract = async (fileId: string) => {
+    try {
+      await api.extractImportFile(staged.id, fileId)
+      await queryClient.invalidateQueries({ queryKey: ['import', id] })
+      await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const discard = async () => {
     await api.deleteImport(staged.id)
     clearImportDraft(staged.id)
@@ -476,7 +490,7 @@ function ImportWorkbench() {
               rules={layout.spec.rules}
             />
           ) : (
-            <FileTree files={fileList} />
+            <FileTree files={fileList} onExtract={extract} />
           )}
         </Box>
       </Box>

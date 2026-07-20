@@ -35,6 +35,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
+import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
@@ -339,6 +340,7 @@ export const FileTree = memo(function FileTree({
   onKindChange,
   onDelete,
   onRender,
+  onExtract,
   onFolderRename,
 }: {
   files: FileRecord[]
@@ -349,6 +351,8 @@ export const FileTree = memo(function FileTree({
   onDelete?: (id: string) => void
   /** Force a preview render from this file; it joins the model's images. */
   onRender?: (id: string) => void
+  /** Unpack this archive in place. Only offered on `archive` rows. */
+  onExtract?: (id: string) => void
   /** Rename (or, with an empty path, remove) a folder: rewrites the `path` of
       every file in the group. When set, folder headers become editable and the
       unfoldered root group gains an "Add folder" control. */
@@ -549,6 +553,17 @@ export const FileTree = memo(function FileTree({
                   </IconButton>
                 </Tooltip>
               )}
+              {/* A zip inside the drop: unpack it here rather than making the
+                  user download it and drop it again as its own import. */}
+              {onExtract &&
+                file.kind === 'archive' &&
+                file.filename.toLowerCase().endsWith('.zip') && (
+                  <Tooltip title="Extract this archive into a folder of its own">
+                    <IconButton size="small" onClick={() => onExtract(file.id)}>
+                      <UnarchiveIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
               {onDelete && (
                 <Tooltip title="Delete file">
                   <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>

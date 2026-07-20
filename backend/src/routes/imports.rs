@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/imports/{id}", get(detail).put(update).delete(remove))
         .route("/api/imports/{id}/plan", post(plan))
         .route("/api/imports/{id}/commit", post(commit))
+        .route("/api/imports/{id}/files/{file_id}/extract", post(extract))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -213,6 +214,104 @@ async fn remove(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Unpack an archive that arrived *inside* an import — the `packs/wave1.zip` a
+/// drop held alongside everything else. Its entries join the same import, so a
+/// nested pack is carved by the same layout as the rest instead of forcing a
+/// download-and-re-drop round trip.
+///
+/// They land in a folder named after the zip (`packs/wave1.zip` →
+/// `packs/wave1/…`), not loose beside it. The carve reads folder names to decide
+/// variants and members, so emptying `supported.zip` and `unsupported.zip` into
+/// one folder would destroy the very distinction they were carrying.
+///
+/// The work is the same `import_archive` job the outer drop runs, which means
+/// the archive itself stays staged and becomes a `source_archives` row at commit
+/// like any other, and the import reads as `unpacking` until the entries land —
+/// so a commit can't race the extraction.
+async fn extract(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, file_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ImportSummary>, ApiError> {
+    user.require_can_edit(import_created_by(&state, id).await?)?;
+
+    let file = sqlx::query!(
+        r#"SELECT path, filename, kind as "kind: crate::routes::files::FileKind"
+           FROM files WHERE id = $1 AND import_id = $2"#,
+        file_id,
+        id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    if !matches!(file.kind, crate::routes::files::FileKind::Archive)
+        || !file.filename.to_lowercase().ends_with(".zip")
+    {
+        return Err(ApiError::BadRequest(
+            "only zip archives can be extracted".into(),
+        ));
+    }
+
+    // `packs/wave1.zip` → `packs/wave1`. A filename that is nothing but an
+    // extension leaves no stem to name the folder after.
+    let stem = file
+        .filename
+        .rsplit_once('.')
+        .map_or(file.filename.as_str(), |(stem, _)| stem)
+        .trim();
+    let stem = if stem.is_empty() { "extracted" } else { stem };
+    let dest = if file.path.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{}/{stem}", file.path)
+    };
+
+    // Extracting twice would stage every entry a second time, as a duplicate row
+    // per file that the carve would then match twice. Anything already sitting
+    // where this would unpack means it has been done (or the drop shipped both
+    // the zip and its unpacked copy, in which case there is nothing to add).
+    let occupied = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM files
+             WHERE import_id = $1 AND (path = $2 OR starts_with(path, $2 || '/'))
+           ) as "exists!""#,
+        id,
+        dest,
+    )
+    .fetch_one(&state.db)
+    .await?;
+    if occupied {
+        return Err(ApiError::Conflict(format!(
+            "{dest}/ already holds files — this archive looks extracted already"
+        )));
+    }
+    let running = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM jobs
+             WHERE kind = 'import_archive'
+               AND status IN ('queued', 'running')
+               AND payload->>'archive_file_id' = $1
+           ) as "exists!""#,
+        file_id.to_string(),
+    )
+    .fetch_one(&state.db)
+    .await?;
+    if running {
+        return Err(ApiError::Conflict("already extracting".into()));
+    }
+
+    crate::services::jobs::enqueue(
+        &state.db,
+        "import_archive",
+        serde_json::json!({ "archive_file_id": file_id, "dest_path": dest }),
+    )
+    .await?;
+
+    tracing::info!(import = %id, file = %file_id, dest, "extracting nested archive");
+    Ok(Json(fetch_import(&state, id).await?))
 }
 
 pub async fn import_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiError> {

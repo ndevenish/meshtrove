@@ -15,6 +15,12 @@ use crate::state::AppState;
 struct ImportPayload {
     /// The files.id of the uploaded archive (kind='archive')
     archive_file_id: Uuid,
+    /// Where the entries land, in place of the archive's own folder. Set when an
+    /// admin extracts a nested archive staged inside an import
+    /// (routes/imports.rs), which unpacks it into a folder of its own rather than
+    /// loose beside its siblings.
+    #[serde(default)]
+    dest_path: Option<String>,
 }
 
 pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
@@ -53,7 +59,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     };
 
     let archive_path = state.store.path_for(&archive.blob_sha256);
-    let base_path = archive.path.clone();
+    let base_path = payload.dest_path.unwrap_or_else(|| archive.path.clone());
 
     // Extract entries to temp files in a blocking task (the zip crate is
     // sync), then stream each into the content-addressed store.
