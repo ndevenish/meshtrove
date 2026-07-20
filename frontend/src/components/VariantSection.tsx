@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react'
+import { lazy, memo, Suspense, useMemo, useState } from 'react'
 import {
   Box,
   Typography,
@@ -36,6 +36,7 @@ import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import UnarchiveIcon from '@mui/icons-material/Unarchive'
+import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
@@ -48,6 +49,10 @@ import {
   type VariantDetail,
 } from '../api'
 import { changeTags, pasteTags } from '../tags'
+
+// three.js is heavy and only needed when a preview is actually opened, so split
+// it out of the main bundle.
+const StlPreviewDialog = lazy(() => import('./StlPreviewDialog'))
 
 /// Wait for one job to settle. The render is the *job's* doing, so the picture is
 /// there when the job says so — no inferring it from the shape of the queue.
@@ -362,6 +367,7 @@ export const FileTree = memo(function FileTree({
   const [editingDir, setEditingDir] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [savingDir, setSavingDir] = useState(false)
+  const [previewFile, setPreviewFile] = useState<FileRecord | null>(null)
 
   const startFolder = (dir: string) => {
     setEditingDir(dir)
@@ -539,6 +545,16 @@ export const FileTree = memo(function FileTree({
               <Typography variant="caption" color="text.secondary" sx={{ width: 64 }}>
                 {formatBytes(file.size)}
               </Typography>
+              {/* STL is the one format we can render live in the browser
+                  (three.js). Give it a viewer; other model formats fall back to
+                  the server-rendered picture. */}
+              {file.filename.toLowerCase().endsWith('.stl') && (
+                <Tooltip title="Preview 3D model">
+                  <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                    <ViewInArIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
               <Tooltip title="Download">
                 <IconButton size="small" component="a" href={downloadUrl(file.id)}>
                   <DownloadIcon sx={{ fontSize: 18 }} />
@@ -586,6 +602,16 @@ export const FileTree = memo(function FileTree({
           ))}
         </Box>
       ))}
+      {previewFile && (
+        <Suspense fallback={null}>
+          <StlPreviewDialog
+            open
+            fileId={previewFile.id}
+            filename={previewFile.filename}
+            onClose={() => setPreviewFile(null)}
+          />
+        </Suspense>
+      )}
     </Box>
   )
 })
