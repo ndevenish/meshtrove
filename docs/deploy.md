@@ -260,25 +260,57 @@ endpoint enabled.
 ### 2. Route the tunnel to Watchtower
 
 Add a public hostname (e.g. `meshtrove-deploy.example.com`) to your Cloudflare
-tunnel that points at the Watchtower service. **How you name the service depends
-on where `cloudflared` runs:**
+tunnel that points at the Watchtower service. What you target depends on how
+`cloudflared` runs — and getting this wrong is the most common failure, so read
+carefully:
 
-- **`cloudflared` as a container on this compose network** — attach it to the
-  same network and target `http://watchtower:8080`. No host port is published;
-  the two containers talk over the Docker network. This is the tightest setup.
-- **`cloudflared` on the host** — it can't resolve `watchtower`, so publish the
-  port to loopback only by adding to the `watchtower` service:
+**The usual case — `cloudflared` is its own container (a bridge network).** It
+does **not** share this stack's network by default, and inside a bridge container
+`localhost`/`127.0.0.1` means *that container*, not the host — so a host-published
+port is unreachable and you'll get `502`s. The fix is to put both containers on a
+shared Docker network and address Watchtower by **service name**. Two ways:
+
+- *Join cloudflared's existing network* (fewest edits). Find the network
+  cloudflared is on (`docker inspect -f '{{.HostConfig.NetworkMode}}' <cf-name>`
+  — e.g. `iot_default`) and attach Watchtower to it as an external network. In
+  `docker-compose.prod.yml`, add to the `watchtower` service and file:
 
   ```yaml
-      ports:
-        - "127.0.0.1:8080:8080"
+    watchtower:
+      networks: [default, cfnet]   # default = reach app/postgres; cfnet = reach cloudflared
+
+  networks:
+    cfnet:
+      external: true
+      name: iot_default            # the network cloudflared already sits on
   ```
 
-  and target `http://localhost:8080` from the tunnel. Loopback-only means the
-  port is still not reachable from the LAN or internet.
+- *Or make a dedicated shared network* (`docker network create edge`), and add
+  `edge` (external) to both the `watchtower` service **and** the cloudflared
+  service.
 
-The public URL to give GitHub is that hostname plus the endpoint path, e.g.
-`https://meshtrove-deploy.example.com/v1/update`.
+Either way the tunnel origin is `http://watchtower:8080` — no host port, nothing
+on the LAN.
+
+**Only if `cloudflared` runs host-networked** (`network_mode: host`) can it reach
+a host-published port. Then publish to loopback:
+
+```yaml
+    ports:
+      - "127.0.0.1:8080:8080"
+```
+
+and target `http://127.0.0.1:8080` — use the **IPv4 literal**, not `localhost`,
+which can resolve to `::1` and refuse the connection since the publish binds IPv4
+only.
+
+The public URL to give GitHub is that hostname plus the endpoint path — the path
+matters, as Watchtower's *only* route is `POST /v1/update` and anything else
+(including a bare `/`) returns `404`:
+
+```
+https://meshtrove-deploy.example.com/v1/update
+```
 
 ### 3. Protect it with a Cloudflare Access service token
 
@@ -314,6 +346,33 @@ The "Trigger production redeploy" step is guarded on `DEPLOY_WEBHOOK_URL`, so
 until you add these secrets — and in forks — the build behaves exactly as before
 and simply skips the notify step.
 
+### Registry credentials (private packages)
+
+GHCR packages are **private by default**, even when the repository is public. The
+`app` service pulls the image fine because the *host's* Docker daemon is logged in
+to `ghcr.io` — but Watchtower runs in its own container and does **not** inherit
+that login, so its pull fails with `authentication required` / `403 Forbidden` in
+the Watchtower log (the update request returns `200`, but `updated=0`). Fix it one
+of two ways:
+
+- **Keep the package private** — give Watchtower credentials. Mount the docker
+  config of whoever ran `docker login ghcr.io` into the container at
+  `/config.json` (there's a commented line in `docker-compose.prod.yml`):
+
+  ```yaml
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+        - /root/.docker/config.json:/config.json:ro
+  ```
+
+  Check that file first: it must contain an embedded token
+  (`auths` → `ghcr.io` → `auth`). If you see `credsStore`/`credHelpers` instead,
+  the token lives in an external keychain the container can't read — re-run
+  `docker login` on a config without a helper, or set `REPO_USER` /`REPO_PASS`
+  (a GHCR PAT with `read:packages`) on the service instead.
+- **Make the package public** — GitHub → *Packages → meshtrove → Package settings
+  → Change visibility → Public*. Then no credentials are needed anywhere.
+
 ### Verifying and operating it
 
 - **Test the path by hand** (from a machine that can reach the tunnel):
@@ -329,6 +388,16 @@ and simply skips the notify step.
   A `200` with a JSON result means the whole chain works. Drop the Bearer header
   and you should get `401` from Watchtower; drop the CF-Access headers and
   Cloudflare should reject it before the host.
+- **If it isn't working, the response tells you where the chain breaks:**
+
+  | Symptom | Cause |
+  | --- | --- |
+  | `502` (and cloudflared logs "unable to reach the origin") | Tunnel can't reach Watchtower — wrong network (see step 2), or Watchtower isn't listening on 8080. |
+  | `404` on `POST` | Wrong path (must be `/v1/update`), or the update API isn't enabled — check the log shows no `Next scheduled run` line. |
+  | `405` | You used `GET`; the endpoint is `POST` only. |
+  | `401` | Bearer token missing or mismatched (`WATCHTOWER_TOKEN` ≠ `DEPLOY_WEBHOOK_TOKEN`). |
+  | `403` before the host | Cloudflare Access rejected the service token. |
+  | `200` but `updated=0` with `403`/`authentication required` in the log | Registry auth — see "Registry credentials" above. |
 - **`docker compose logs -f watchtower`** on the host shows each triggered update
   and what it recreated.
 - **Rotating secrets**: change `WATCHTOWER_TOKEN` in `.env.prod` and the

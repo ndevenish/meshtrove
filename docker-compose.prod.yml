@@ -63,29 +63,42 @@ services:
 
   # Optional: webhook-driven redeploy. Watchtower pulls the newest image and
   # recreates `app` with the same config when it receives an authenticated
-  # POST /v1/update — nothing else. Polling is off (no schedule configured), so
-  # it acts ONLY on that trigger, which the CI workflow sends after publishing a
-  # new :latest. See docs/deploy.md → "Automatic redeploy on a new image".
-  # Drop this service if you'd rather redeploy by hand.
+  # POST /v1/update — nothing else. Enabling the update API disables Watchtower's
+  # periodic scan, so it acts ONLY on that trigger, which the CI workflow sends
+  # after publishing a new :latest. See docs/deploy.md → "Automatic redeploy on a
+  # new image". Drop this service if you'd rather redeploy by hand.
   watchtower:
-    image: nickfedor/watchtower:latest # maintained fork of containrrr/watchtower
+    # Pinned to the v1 major on purpose: the update API is enabled below via
+    # WATCHTOWER_HTTP_API_UPDATE, which the fork deprecates for removal in v2, so
+    # :latest would eventually silently break this. Bump deliberately at v2 and
+    # switch to the --http-api-endpoints option then.
+    image: nickfedor/watchtower:1 # maintained fork of containrrr/watchtower
     depends_on:
       - app
     volumes:
       # Watchtower drives the Docker daemon to pull + recreate the container.
       - /var/run/docker.sock:/var/run/docker.sock
+      # If the GHCR package is private, Watchtower needs registry credentials to
+      # pull it — the host daemon's own `docker login` is NOT visible in here.
+      # Uncomment and point at the docker config of whoever ran `docker login
+      # ghcr.io`; it must hold an embedded token (auths→ghcr.io→auth), not a
+      # credsStore/credHelper reference. Or make the package public — see
+      # docs/deploy.md → "Registry credentials".
+      #- /root/.docker/config.json:/config.json:ro
     environment:
-      # Enable only the update endpoint; every /v1/* route requires the token.
-      WATCHTOWER_HTTP_API_ENDPOINTS: update
+      # Enable the HTTP update endpoint (POST /v1/update, guarded by the token).
+      # This is the flag the released image (v1.x) understands; the newer
+      # --http-api-endpoints option is docs-only until a future release.
+      WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env.prod}
       # Only touch containers carrying the enable label above (i.e. just `app`).
       WATCHTOWER_LABEL_ENABLE: "true"
       # Delete the superseded image after a successful update.
       WATCHTOWER_CLEANUP: "true"
-    # Port 8080 is NOT published to the host. Reach it from your Cloudflare tunnel
-    # by name (http://watchtower:8080) if cloudflared shares this compose network,
-    # or add `ports: ["127.0.0.1:8080:8080"]` if cloudflared runs on the host.
-    # See docs/deploy.md — do not expose it to the public internet directly.
+    # Watchtower listens on 8080, deliberately NOT published to the host. Your
+    # Cloudflare tunnel reaches it by service name (http://watchtower:8080) by
+    # sharing a Docker network with cloudflared — see docs/deploy.md. Do not
+    # expose this port to the public internet directly.
     expose:
       - "8080"
     restart: unless-stopped
