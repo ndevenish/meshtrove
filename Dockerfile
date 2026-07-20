@@ -83,7 +83,14 @@ WORKDIR /app
 
 COPY --from=backend /app/backend/target/release/meshtrove /usr/local/bin/meshtrove
 COPY --from=frontend /app/frontend/dist /app/static
-RUN mkdir -p /app/store && chown -R meshtrove:meshtrove /app
+# chmod 755 is load-bearing, not tidying. /app is the meshtrove user's home, and
+# trixie's useradd defaults HOME_MODE to 0700 (bookworm left it to UMASK 022, so
+# 0755). At 0700 nothing but uid 10001 can even *traverse* /app — so running the
+# container as another uid, which docker-compose.prod.yml exists to support for
+# bind-mounted stores (MESHTROVE_UID/GID), fails with "Permission denied"
+# creating /app/store/imports. Set the mode explicitly so a future base bump
+# cannot quietly change it again.
+RUN mkdir -p /app/store && chown -R meshtrove:meshtrove /app && chmod 755 /app /app/store
 
 # Production defaults; every one is overridable at `docker run`/compose time.
 # Bind on all interfaces so the port is reachable from outside the container.

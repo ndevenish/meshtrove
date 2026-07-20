@@ -26,8 +26,9 @@ build; only the Docker image builds without it, off the committed `.sqlx` cache
 
 `backend/.sqlx` is the committed offline query cache. The Dockerfile builds with
 `SQLX_OFFLINE=true` against it, so **a query change that is not followed by
-`cargo sqlx prepare` breaks the release build** — and `docker.yml` only runs on
-`v*` tags, so that failure would otherwise surface after the tag is cut. The
+`cargo sqlx prepare` breaks the release build** — and `docker.yml` runs on
+**every push to `main`** as well as on `v*` tags, publishing `:latest`, so a
+break reaches anything deploying `:latest` with `pull_policy: always`. The
 pre-commit hook catches it instead; regenerate with:
 
 ```bash
