@@ -49,15 +49,36 @@ COPY backend/ ./
 RUN cargo build --release
 
 # ---------------------------------------------------------------------------
-# Stage 3 — minimal runtime. Just the binary + the built SPA + a store volume.
-# rustls (used by sqlx and reqwest) needs no OpenSSL; ca-certificates covers TLS
-# trust roots when talking to a TLS-terminated Postgres.
+# Stage 3 — runtime. The binary + the built SPA + a store volume + the preview
+# renderer. rustls (used by sqlx and reqwest) needs no OpenSSL; ca-certificates
+# covers TLS trust roots when talking to a TLS-terminated Postgres.
+#
+# trixie, not bookworm, for f3d: bookworm only has f3d 1.3.1 (2021), trixie has
+# 3.1.0. The upstream .deb releases are not an option — they are x86_64-only and
+# this image is built for arm64. The backend binary is built on bookworm and
+# runs here fine; glibc is backward compatible, so older-built runs on newer.
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        f3d \
+        xvfb \
+        xauth \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /app meshtrove
+
+# f3d needs a GL context, and a container has no display. Both headless
+# backends f3d offers are dead ends here: EGL fails ("Cannot use a EGL context
+# on this platform") and OSMesa is refused outright ("the underlying VTK version
+# is not recent enough"), so a virtual X server it is.
+#
+# This wrapper shadows /usr/bin/f3d on PATH so the renderer setting stays the
+# plain `f3d` that works on a developer's machine — the display plumbing is a
+# property of this image, not of the app's configuration. `-a` picks a free
+# display number, so concurrent render jobs don't collide.
+RUN printf '#!/bin/sh\nexec xvfb-run -a /usr/bin/f3d "$@"\n' > /usr/local/bin/f3d \
+    && chmod +x /usr/local/bin/f3d
 WORKDIR /app
 
 COPY --from=backend /app/backend/target/release/meshtrove /usr/local/bin/meshtrove

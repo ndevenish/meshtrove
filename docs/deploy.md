@@ -214,11 +214,27 @@ request-body limit (e.g. nginx `client_max_body_size`).
 
 ---
 
-## Preview rendering (optional)
+## Preview rendering
 
 Model previews are produced by shelling out to an external renderer — `f3d` by
-default (configurable in Admin settings). It is **not** installed in the image,
-so uploads work but auto-generated thumbnails won't render until you provide a
-renderer. To enable it, build a derived image that installs `f3d` (plus the Mesa
-GL libraries it needs to run headless) and point the renderer setting at it.
-Everything else in the app functions without it.
+default (configurable in Admin settings). **It ships in the image**, so previews
+render out of the box with no extra setup.
+
+That is most of the image's size, and it is not a small amount: f3d pulls in
+VTK, Mesa/LLVM and OpenCASCADE, which takes the image from **200 MB to 1.31 GB**
+(measured, arm64). If you would rather have the small image and no previews,
+drop `f3d xvfb xauth` from the runtime stage of the `Dockerfile` and rebuild —
+everything else functions without a renderer, and render jobs just fail.
+
+Two details worth knowing if you change any of this:
+
+- **The runtime base is `debian:trixie-slim`, for f3d.** Bookworm only packages
+  f3d 1.3.1 (2021). Upstream's own `.deb` releases are not an option either —
+  they are x86_64-only, and this image is built for arm64.
+- **f3d runs under `xvfb-run`.** It needs a GL context and a container has no
+  display; both of f3d's headless backends are dead ends on this base (EGL
+  reports "Cannot use a EGL context on this platform", OSMesa is refused because
+  Debian's VTK is not built with it). So `/usr/local/bin/f3d` is a small wrapper
+  that shadows the real binary on `PATH` and execs it under a virtual X server.
+  The renderer setting stays the plain `f3d` that works on a developer's
+  machine — the display plumbing belongs to the image, not to the app config.
