@@ -65,7 +65,8 @@ your own use.
       "name": "Gold",                     // rename target (applied only if the user opts in)
       "tags": ["catfolk", "bard", "heroes"], // model tags (what it IS) — lowercase them
       "description_md": "…",              // READ: markdown; becomes a model description revision
-      "image": "images/fn2110ac01.png",   // ONE sample render, zip path, or null
+      "image": "images/fn2110ac01.png",   // READ: ONE sample render, zip path, or null
+      "images": ["images/a.png", "images/b.png"], // READ: a whole gallery, primary FIRST
       "category": "Heroes",               // the shop category; disambiguates duplicates
       "source_ref": "FN2110AC01"          // the site's own id; not read (yet)
     }
@@ -82,8 +83,8 @@ All read text fields (`source.url`, `bundle.name/creator/description_md`,
 `models[].name/category/tags/description_md`, `match.name/aliases`) are
 **HTML-entity-decoded on ingest** — `&amp;` → `&`, `&#8211;` → `–` — so a scraper that lifts strings
 straight out of markup doesn't have to clean them. The two exceptions are
-`bundle.images` and `models[].image`: image references are left untouched so
-they keep matching zip entry names byte for byte. Prefer emitting clean text
+`bundle.images` and `models[].image`/`models[].images`: image references are
+left untouched so they keep matching zip entry names byte for byte. Prefer emitting clean text
 anyway; the decoding is a safety net, not a feature to lean on.
 
 ## Matching: how a patch model finds its library model
@@ -147,7 +148,7 @@ written until apply, and apply only touches what the options ask for.
 | `models[].name` | A **per-model, opt-in rename** (`options.rename`); never automatic. Slug regenerated with its token kept. The old name is recorded as an alias. A *declined* rename is also recorded as an alias, so the next scrape recognises the model and doesn't re-offer it. |
 | `models[].tags` | **Model** tags (what the model *is*) — never variant tags. Upserted into the shared tag vocabulary. Mode `merge` (default: add, never remove), `replace` (drop the model's tags first), or `skip`. |
 | `models[].description_md` | Inserted as a new **model** description revision (newest = current; history kept). Gated by `model_descriptions`. Skipped when it equals the model's current description, so re-applying a patch doesn't stack duplicate revisions. |
-| `models[].image` | One image per model, made **primary**. Mode `replace_generated` (default: delete the model's auto-rendered previews so the scrape's shot is what shows), `add` (keep renders alongside), or `skip`. Deduped by content hash. |
+| `models[].image`, `models[].images` | The model's images, **first made primary**, the rest added alongside — the same rule as `bundle.images`. The two fields concatenate (`image` first, then `images`) and are deduped by path, so a scraper may send either or both. Mode `replace_generated` (default: delete the model's auto-rendered previews so the scrape's shots are what show), `add` (keep renders alongside), or `skip`. Deduped by content hash, so re-applying adds nothing. |
 | `match.aliases` | Every alias is stored on the matched model (deduped case-insensitively, ones equal to the model's final name dropped) — the patch *teaches* the library its other names, so the next import or patch resolves exactly. |
 
 Everything runs in one transaction; image blobs enter the content-addressed

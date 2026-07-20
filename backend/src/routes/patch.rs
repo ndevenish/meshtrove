@@ -90,9 +90,15 @@ struct PatchModel {
     /// the matched model when the apply opts in.
     #[serde(default)]
     description_md: Option<String>,
-    /// Relative path into the zip, or null.
+    /// Relative path into the zip, or null. One image; `images` carries a whole
+    /// gallery. Kept because every patch written before `images` existed uses it.
     #[serde(default)]
     image: Option<String>,
+    /// A gallery for this model, primary first — the shop-page equivalent of
+    /// `bundle.images`. Additive within `/1`: a patch may send `image`, `images`,
+    /// or both, and a consumer that predates this field still reads `image`.
+    #[serde(default)]
+    images: Vec<String>,
     /// The bundle category it came from (Heroes, Busts, …) — shown to tell two
     /// same-named models apart.
     #[serde(default)]
@@ -127,6 +133,20 @@ impl PatchModel {
             .clone()
             .or_else(|| self.match_hint.name.clone())
             .unwrap_or_default()
+    }
+    /// Every image this model carries, in the order they should be applied —
+    /// the singular `image` first, then `images`, deduped by path. A patch that
+    /// sends the same file as both (a scraper keeping `image` populated for
+    /// older consumers) contributes it once, and it stays primary.
+    fn image_paths(&self) -> Vec<&str> {
+        let mut paths: Vec<&str> = Vec::new();
+        for p in self.image.iter().chain(self.images.iter()) {
+            let p = p.as_str();
+            if !p.is_empty() && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        paths
     }
     /// Every spelling that could match a library model.
     fn match_keys(&self) -> Vec<String> {
@@ -463,9 +483,9 @@ async fn preview(
     };
     let patch_tags = |pm: &PatchModel| pm.tags.iter().map(|t| t.to_lowercase()).collect::<Vec<_>>();
     let has_image = |pm: &PatchModel| {
-        pm.image
-            .as_deref()
-            .is_some_and(|p| archive.images.contains_key(p))
+        pm.image_paths()
+            .iter()
+            .any(|p| archive.images.contains_key(*p))
     };
     let has_description = |pm: &PatchModel| {
         pm.description_md
@@ -760,13 +780,17 @@ async fn apply(
 
     // Put every image blob before opening the transaction — a blob put is async
     // filesystem work, and a rollback must not have to un-write the store.
-    let mut model_images: HashMap<usize, StagedImage> = HashMap::new();
+    let mut model_images: HashMap<usize, Vec<StagedImage>> = HashMap::new();
     if options.model_images != ImageMode::Skip {
         for (idx, _) in &targets {
-            if let Some(path) = archive.patch.models[*idx].image.as_deref()
-                && let Some(staged) = stage_image(&state, &archive.images, path).await?
-            {
-                model_images.insert(*idx, staged);
+            let mut staged_all = Vec::new();
+            for path in archive.patch.models[*idx].image_paths() {
+                if let Some(staged) = stage_image(&state, &archive.images, path).await? {
+                    staged_all.push(staged);
+                }
+            }
+            if !staged_all.is_empty() {
+                model_images.insert(*idx, staged_all);
             }
         }
     }
@@ -1010,7 +1034,7 @@ async fn apply(
             }
         }
 
-        if let Some(img) = model_images.get(idx) {
+        if let Some(imgs) = model_images.get(idx) {
             if options.model_images == ImageMode::ReplaceGenerated {
                 // The auto previews live on the model's variants (and, rarely, the
                 // model). Drop them so the scraped image is what shows.
@@ -1028,8 +1052,14 @@ async fn apply(
             )
             .execute(&mut *tx)
             .await?;
-            if insert_image(&mut tx, ImageOwner::Model(*model_id), img, true, user.id).await? {
-                result.images_added += 1;
+            // First is primary, the rest ride along — the same rule as
+            // `bundle.images`. Deduped by content hash inside insert_image, so
+            // re-applying a patch adds nothing.
+            for (n, img) in imgs.iter().enumerate() {
+                if insert_image(&mut tx, ImageOwner::Model(*model_id), img, n == 0, user.id).await?
+                {
+                    result.images_added += 1;
+                }
             }
             touched = true;
         }
@@ -1291,6 +1321,7 @@ mod tests {
             tags: Vec::new(),
             description_md: None,
             image: None,
+            images: Vec::new(),
             category: category.map(str::to_string),
         }
     }
@@ -1437,6 +1468,27 @@ mod tests {
     }
 
     #[test]
+    fn image_paths_puts_the_singular_first_and_dedupes() {
+        // A scraper that keeps `image` populated for older consumers *and* sends
+        // the same file as images[0] must not contribute it twice — the first
+        // entry becomes primary, and a duplicate would just churn the flag.
+        let p: PatchModel =
+            serde_json::from_str(r#"{"image": "a.png", "images": ["a.png", "b.png", "c.png"]}"#)
+                .unwrap();
+        assert_eq!(p.image_paths(), vec!["a.png", "b.png", "c.png"]);
+    }
+
+    #[test]
+    fn image_paths_handles_each_field_alone() {
+        let only_singular: PatchModel = serde_json::from_str(r#"{"image": "a.png"}"#).unwrap();
+        assert_eq!(only_singular.image_paths(), vec!["a.png"]);
+        let only_plural: PatchModel = serde_json::from_str(r#"{"images": ["a.png"]}"#).unwrap();
+        assert_eq!(only_plural.image_paths(), vec!["a.png"]);
+        let neither: PatchModel = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(neither.image_paths().is_empty());
+    }
+
+    #[test]
     fn decode_entities_decodes_names_tags_and_description() {
         let mut patch = Patch {
             source: PatchSource {
@@ -1458,6 +1510,7 @@ mod tests {
                 tags: vec!["large &amp; scaly".into()],
                 description_md: Some("A croc &amp; his tomb".into()),
                 image: Some("model&#8211;.png".into()),
+                images: vec!["gallery&#8211;.png".into()],
                 category: Some("Enemies &amp; Foes".into()),
             }],
         };
@@ -1484,5 +1537,6 @@ mod tests {
         // Image references stay byte-for-byte so they still match zip entries.
         assert_eq!(patch.bundle.images, vec!["cover&#8211;.png"]);
         assert_eq!(patch.models[0].image.as_deref(), Some("model&#8211;.png"));
+        assert_eq!(patch.models[0].images, vec!["gallery&#8211;.png"]);
     }
 }
