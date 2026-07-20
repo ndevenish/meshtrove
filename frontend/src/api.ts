@@ -539,6 +539,9 @@ const tagSelectionQuery = (sel: TagFilter): string => {
 }
 
 export const api = {
+  /** The *server's* build stamp. Compare against the SPA's own `__APP_VERSION__`
+      to notice the server has been redeployed under a still-open page. */
+  version: () => request<{ version: string }>('/api/version'),
   me: () => request<User>('/api/me'),
   login: (username: string, password: string) =>
     request<User>('/auth/login', json({ username, password })),

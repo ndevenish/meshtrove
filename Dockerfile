@@ -12,6 +12,13 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
+# Same version stamp the backend stage bakes in, for the same reason: no .git in
+# the build context, so vite.config.ts reads this instead of calling git. The SPA
+# compares its own stamp against /api/version to notice it is running against a
+# redeployed server; left unset it would stamp "unknown" and never match.
+# Declared after the npm layers so a new commit doesn't invalidate them.
+ARG APP_VERSION=docker
+ENV APP_VERSION=${APP_VERSION}
 RUN npm run build
 
 # ---------------------------------------------------------------------------

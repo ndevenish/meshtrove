@@ -2,11 +2,25 @@ import { execSync } from 'node:child_process'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Version stamp shared with the backend (build.rs uses the same git describe),
-// so client and server versions can be compared to detect a redeploy.
-function gitVersion(): string {
+// `git describe` renders "52 commits past tag v1.1" as `v1.1-52-gebc55f2`. Fold
+// the count in as a version component instead — `v1.1.52-gebc55f2`. Mirrors
+// normalize() in backend/build.rs; the two stamps are compared for equality to
+// detect a redeploy, so they must agree character for character.
+function normalize(describe: string): string {
+  return describe.replace(/-(\d+)-(g[0-9a-f]+(?:-dirty)?)$/, '.$1-$2')
+}
+
+// Version stamp shared with the backend (build.rs derives it the same way), so
+// client and server versions can be compared to detect a redeploy.
+//
+// The image build has no .git in its context, so it injects APP_VERSION as a
+// build arg (see Dockerfile) exactly as the backend stage does — without that
+// the SPA in the image would stamp itself "unknown" and never match the server.
+function appVersion(): string {
+  const injected = process.env.APP_VERSION?.trim()
+  if (injected) return normalize(injected)
   try {
-    return execSync('git describe --tags --always --dirty').toString().trim()
+    return normalize(execSync('git describe --tags --always --dirty').toString().trim())
   } catch {
     return 'unknown'
   }
@@ -24,7 +38,7 @@ export default defineConfig({
     hmr: { host: 'localhost', port: 5173, protocol: 'ws' },
   },
   define: {
-    __APP_VERSION__: JSON.stringify(gitVersion()),
+    __APP_VERSION__: JSON.stringify(appVersion()),
   },
   optimizeDeps: {
     include: [

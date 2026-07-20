@@ -29,6 +29,7 @@ import { readDrop, startImport } from '../upload'
 import { GlobalDropContext } from '../globalDrop'
 import ImportErrorDialog from './ImportErrorDialog'
 import ChangePasswordDialog from './ChangePasswordDialog'
+import VersionBar from './VersionBar'
 
 /// The synthetic --anonymous / guest user carries the nil UUID and has no real
 /// password to change.
@@ -298,6 +299,7 @@ export default function AppShell() {
           <Outlet />
         </GlobalDropContext.Provider>
       </Box>
+      <VersionBar />
 
       {(dragging || importing) && (
         <Box

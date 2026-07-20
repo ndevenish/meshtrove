@@ -49,6 +49,18 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        # Full history and tags: `git describe` needs the tags to name a version,
+        # and the commit count back to the nearest one. The default shallow
+        # single-commit fetch can produce neither.
+        with:
+          fetch-depth: 0
+
+      # A bare `github.sha` told you nothing about which release a main build came
+      # after. Describe names the nearest tag and the distance from it
+      # (v1.0-52-gebc55f2), which the consumers normalize to v1.0.52-gebc55f2. On
+      # a tag build this is just the tag.
+      - name: Derive version
+        run: echo "APP_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -74,7 +86,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+            APP_VERSION=${{ env.APP_VERSION }}
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
           # Push by digest only; the merge job attaches the human tags.
