@@ -2,10 +2,13 @@ import { execSync } from 'node:child_process'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// `git describe` renders "52 commits past tag v1.1" as `v1.1-52-gebc55f2`. Fold
-// the count in as a version component instead — `v1.1.52-gebc55f2`. Mirrors
-// normalize() in backend/build.rs; the two stamps are compared for equality to
-// detect a redeploy, so they must agree character for character.
+// `git describe --long` renders "52 commits past tag v1.1" as `v1.1-52-gebc55f2`.
+// Fold the count in as a version component instead — `v1.1.52-gebc55f2`. Tags
+// stay two-component because that third slot is derived, and --long emits the
+// count even at zero, so a build on the tag reads v1.1.0-gebc55f2 rather than a
+// bare v1.1. Mirrors normalize() in backend/build.rs; the two stamps are
+// compared for equality to detect a redeploy, so they must agree character for
+// character.
 function normalize(describe: string): string {
   return describe.replace(/-(\d+)-(g[0-9a-f]+(?:-dirty)?)$/, '.$1-$2')
 }
@@ -20,7 +23,7 @@ function appVersion(): string {
   const injected = process.env.APP_VERSION?.trim()
   if (injected) return normalize(injected)
   try {
-    return normalize(execSync('git describe --tags --always --dirty').toString().trim())
+    return normalize(execSync('git describe --tags --always --long --dirty').toString().trim())
   } catch {
     return 'unknown'
   }

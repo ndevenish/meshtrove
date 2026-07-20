@@ -1,13 +1,19 @@
 use std::process::Command;
 
-/// `git describe` renders "52 commits past tag v1.1" as `v1.1-52-gebc55f2`.
-/// Fold the count in as a version component instead — `v1.1.52-gebc55f2` — so
-/// the leading part reads as one version rather than a tag with a suffix bolted
-/// on.
+/// `git describe --long` renders "52 commits past tag v1.1" as
+/// `v1.1-52-gebc55f2`. Fold the count in as a version component instead —
+/// `v1.1.52-gebc55f2` — so the leading part reads as one version rather than a
+/// tag with a suffix bolted on.
 ///
-/// Anything not of that shape passes through untouched: a build sitting exactly
-/// on a tag (`v1.1`), an untagged repo's bare sha (`ebc55f2`), or a version a
-/// build environment injected verbatim.
+/// Tags are two-component (`v1.1`) on purpose: the third slot is *derived*, so
+/// putting it in the tag would invite whoever tags a release to hand-pick a
+/// number the machine works out. `--long` is what makes that uniform — it emits
+/// the count even when it is zero, so a build sitting exactly on the tag
+/// self-reports `v1.1.0-gebc55f2` rather than a bare `v1.1`, and every stamp has
+/// the same shape.
+///
+/// Anything not of that shape passes through untouched: an untagged repo's bare
+/// sha (`ebc55f2`), or a version a build environment injected verbatim.
 ///
 /// Mirrored in frontend/vite.config.ts, which stamps the SPA the same way — the
 /// two are compared for equality to detect a redeploy, so they must agree.
@@ -36,7 +42,7 @@ fn main() {
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| {
             Command::new("git")
-                .args(["describe", "--tags", "--always", "--dirty"])
+                .args(["describe", "--tags", "--always", "--long", "--dirty"])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
