@@ -618,7 +618,7 @@ function VariantEditDialog({
   // Same tags = same variant, so saving onto another variant's tag set folds
   // this one into it. Say so before it happens rather than after.
   const sameSet = (a: string[], b: string[]) =>
-    a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+    a.length === b.length && [...a].sort().join('\u0000') === [...b].sort().join('\u0000')
   const collision = model.variants.find((v) => v.id !== variant?.id && sameSet(v.tags, tags))
 
   const submit = async () => {
