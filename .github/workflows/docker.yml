@@ -137,16 +137,23 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # Release tags from the git tag (v1.2.3 -> 1.2.3 and 1.2). `latest`
-          # follows the tip of main — every commit moves it, so it is a rolling
-          # build rather than the newest release. Semver tags (default flavor
-          # latest=auto) and a manual dispatch move it too. Pin to a version or
-          # a sha tag to hold still.
+          # `type=ref,event=tag` publishes the git tag verbatim and is what makes
+          # a release land under a name you can pin. The semver patterns below it
+          # only fire for a three-component tag — metadata-action rejects
+          # anything shorter ("v1.0 is not a valid semver") and silently drops
+          # them, which left the v1.0 release published as nothing but its sha.
+          #
+          # `latest` follows the tip of main — every commit moves it, so it is a
+          # rolling build rather than the newest release — and a release or a
+          # manual dispatch moves it too. Pin to a version or a sha tag to hold
+          # still.
           tags: |
+            type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
