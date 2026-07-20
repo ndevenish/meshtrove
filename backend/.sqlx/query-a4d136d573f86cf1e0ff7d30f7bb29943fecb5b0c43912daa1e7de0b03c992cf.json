@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO models (name, slug, creator_id, creator_ref, source_url, license,\n                               purchase_price, purchase_date, order_ref, created_by)\n           VALUES ($1, $2, $3, $4, $5, $6, $7::float8::numeric(10,2), $8, $9, $10)\n           RETURNING id",
+  "query": "INSERT INTO models (name, slug, creator_id, creator_ref, model_version, source_url, license,\n                               purchase_price, purchase_date, order_ref, created_by)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::float8::numeric(10,2), $9, $10, $11)\n           RETURNING id",
   "describe": {
     "columns": [
       {
@@ -23,6 +23,7 @@
         "Text",
         "Text",
         "Text",
+        "Text",
         "Float8",
         "Date",
         "Text",
@@ -33,5 +34,5 @@
       false
     ]
   },
-  "hash": "5177e253b89ae271e58c1f02542c819ce9804b32c23cc7ba121e5c0c7f135d3f"
+  "hash": "a4d136d573f86cf1e0ff7d30f7bb29943fecb5b0c43912daa1e7de0b03c992cf"
 }

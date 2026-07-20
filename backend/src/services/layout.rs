@@ -41,6 +41,10 @@ pub enum Role {
     /// model name — a model has one — but stored verbatim (an id, not a title,
     /// so no camel-case expansion).
     CreatorRef,
+    /// The creator's version for the model — "v2", a rework year. Singular per
+    /// layout for the same reason as the name, and verbatim for the same reason
+    /// as the creator id: it is a label the creator chose, not a title.
+    ModelVersion,
     ModelTag,
     VariantTag,
     Ignore,
@@ -156,6 +160,8 @@ pub struct FileAnnotation {
     pub model_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub creator_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
     pub model_tags: Vec<String>,
     pub variant_tags: Vec<String>,
     /// Raw variant-tag captures with no resolution — the mapping table's todo.
@@ -184,6 +190,10 @@ pub struct PlanModel {
     /// one. Stamped onto the model at commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub creator_ref: Option<String>,
+    /// The creator's version for this model, if a `version` group caught one.
+    /// Stamped onto the model at commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
     pub tags: Vec<String>,
     pub file_count: usize,
     pub variants: Vec<PlanVariant>,
@@ -364,6 +374,7 @@ pub fn analyze(
     let mut compiled: Vec<CompiledRule> = Vec::with_capacity(spec.rules.len());
     let mut name_groups = 0usize;
     let mut creator_ref_groups = 0usize;
+    let mut model_version_groups = 0usize;
     for rule in &spec.rules {
         // Searched, not anchored — a small rule finds its fragment wherever it
         // sits. The seeded patterns anchor themselves (`^…$`), so they still
@@ -391,6 +402,7 @@ pub fn analyze(
         }
         name_groups += roles.iter().filter(|r| **r == Role::ModelName).count();
         creator_ref_groups += roles.iter().filter(|r| **r == Role::CreatorRef).count();
+        model_version_groups += roles.iter().filter(|r| **r == Role::ModelVersion).count();
 
         compiled.push(CompiledRule {
             regex,
@@ -419,6 +431,12 @@ pub fn analyze(
             "at most one capture group, in one rule, can be the creator id".into(),
         ));
     }
+    // Likewise the version: one model, one version.
+    if model_version_groups > 1 {
+        return Err(ApiError::BadRequest(
+            "at most one capture group, in one rule, can be the version".into(),
+        ));
+    }
 
     let mut annotations = Vec::with_capacity(files.len());
     // Per-rule preview state: the groups each pattern captures (examples filled
@@ -444,6 +462,7 @@ pub fn analyze(
     struct ModelAcc {
         name: String,
         creator_ref: Option<String>,
+        model_version: Option<String>,
         tags: Vec<String>,
         variants: BTreeMap<VariantKey, PlanVariant>,
     }
@@ -460,6 +479,7 @@ pub fn analyze(
         let mut spans: Vec<(usize, usize, Role)> = Vec::new();
         let mut model_name: Option<String> = None;
         let mut creator_ref: Option<String> = None;
+        let mut model_version: Option<String> = None;
         let mut model_tags: Vec<String> = Vec::new();
         let mut variant_tags: Vec<String> = Vec::new();
         let mut unmapped: Vec<String> = Vec::new();
@@ -539,6 +559,8 @@ pub fn analyze(
                     Role::ModelName => model_name = Some(crate::util::expand_camel_case(raw)),
                     // An id, not a title: keep it exactly as captured.
                     Role::CreatorRef => creator_ref = Some(raw.clone()),
+                    // A label the creator chose — verbatim, like the creator id.
+                    Role::ModelVersion => model_version = Some(raw.clone()),
                     Role::ModelTag => {
                         if !model_tags.iter().any(|t| fold(t) == fold(raw)) {
                             model_tags.push(raw.clone());
@@ -610,6 +632,7 @@ pub fn analyze(
                 invalid_rules,
                 model_name: None,
                 creator_ref: None,
+                model_version: None,
                 model_tags: vec![],
                 variant_tags: vec![],
                 unmapped: vec![],
@@ -641,12 +664,16 @@ pub fn analyze(
                     CarveTarget::Bundle => model_name.clone().unwrap_or_default(),
                 },
                 creator_ref: None,
+                model_version: None,
                 tags: Vec::new(),
                 variants: BTreeMap::new(),
             });
             // First file to carry one wins; a model has a single creator id.
             if acc.creator_ref.is_none() {
                 acc.creator_ref = creator_ref.clone();
+            }
+            if acc.model_version.is_none() {
+                acc.model_version = model_version.clone();
             }
             for tag in &model_tags {
                 if !acc.tags.iter().any(|t| fold(t) == fold(tag)) {
@@ -673,6 +700,7 @@ pub fn analyze(
             invalid_rules,
             model_name,
             creator_ref,
+            model_version,
             model_tags,
             variant_tags,
             unmapped,
@@ -686,6 +714,7 @@ pub fn analyze(
             file_count: acc.variants.values().map(|v| v.file_count).sum(),
             name: acc.name,
             creator_ref: acc.creator_ref,
+            model_version: acc.model_version,
             tags: acc.tags,
             variants: acc.variants.into_values().collect(),
             merge_target: None,
@@ -952,6 +981,27 @@ mod tests {
             rule(r"/([^/]+)\.stl$", &[("1", Role::ModelName)]),
         ]);
         assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_err());
+    }
+
+    #[test]
+    fn the_version_is_captured_verbatim_and_only_once() {
+        // Singular, like the name and the creator id — a model has one version.
+        let two = spec_of(vec![
+            rule(r"^([^/]+)/", &[("1", Role::ModelVersion)]),
+            rule(r"/([^/]+)\.stl$", &[("1", Role::ModelVersion)]),
+        ]);
+        assert!(analyze(&two, CarveTarget::Bundle, &[], &vocab()).is_err());
+
+        // And kept exactly as captured: a version is a label, not a title, so it
+        // gets no camel-case expansion the way the model name does.
+        let spec = spec_of(vec![rule(
+            r"^([^/]+)/(V2Rework)/[^/]+\.stl$",
+            &[("1", Role::ModelName), ("2", Role::ModelVersion)],
+        )]);
+        let files = vec![file(1, "DwarfBerserker/V2Rework", "body.stl")];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        assert_eq!(plan.models[0].model_version.as_deref(), Some("V2Rework"));
+        assert_eq!(plan.models[0].name, "Dwarf Berserker");
     }
 
     #[test]

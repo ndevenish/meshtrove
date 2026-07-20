@@ -423,6 +423,11 @@ export default function ModelPage() {
               Creator ID: {model.creator_ref}
             </Typography>
           )}
+          {!editing && model.model_version && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Version: {model.model_version}
+            </Typography>
+          )}
           {model.bundles.length > 0 && (
             <Stack
               direction="row"

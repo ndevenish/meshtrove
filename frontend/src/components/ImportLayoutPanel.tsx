@@ -9,8 +9,6 @@ import {
   IconButton,
   InputLabel,
   MenuItem,
-  Radio,
-  RadioGroup,
   FormControlLabel,
   Select,
   Stack,
@@ -55,11 +53,19 @@ const modelKey = (m: PlanModel): string =>
 export const ROLE_STYLES: Record<GroupRole, { label: string; bg: string }> = {
   model_name: { label: 'Model name', bg: 'rgba(250, 104, 49, 0.30)' },
   creator_ref: { label: 'Creator ID', bg: 'rgba(2, 136, 209, 0.28)' },
+  model_version: { label: 'Version', bg: 'rgba(0, 137, 123, 0.28)' },
   model_tag: { label: 'Model tag', bg: 'rgba(142, 36, 170, 0.25)' },
   variant_tag: { label: 'Variant tag', bg: 'rgba(46, 125, 50, 0.28)' },
   ignore: { label: 'Ignore', bg: 'transparent' },
 }
-const ROLE_ORDER: GroupRole[] = ['model_name', 'creator_ref', 'model_tag', 'variant_tag', 'ignore']
+const ROLE_ORDER: GroupRole[] = [
+  'model_name',
+  'creator_ref',
+  'model_version',
+  'model_tag',
+  'variant_tag',
+  'ignore',
+]
 
 /// What a rule is called in a message when the user hasn't named it.
 const ruleLabel = (rule: LayoutRule, index: number): string =>
@@ -464,25 +470,25 @@ export default memo(function ImportLayoutPanel({
                     ? info.examples.join(', ') || '(no captures)'
                     : '(not captured by the current pattern)'}
                 </Typography>
-                <RadioGroup
-                  row
+                {/* A dropdown, not a radio row: the roles outgrew a line, and a
+                    Loot-style layout stacks dozens of these. */}
+                <Select
+                  size="small"
                   value={roleOf(group)}
+                  disabled={!info}
                   onChange={(e) =>
                     updateRule(index, {
                       roles: { ...rule.roles, [String(group)]: e.target.value as GroupRole },
                     })
                   }
+                  sx={{ minWidth: 150 }}
                 >
                   {ROLE_ORDER.map((role) => (
-                    <FormControlLabel
-                      key={role}
-                      value={role}
-                      disabled={!info}
-                      control={<Radio size="small" sx={{ py: 0.25 }} />}
-                      label={<Typography variant="body2">{ROLE_STYLES[role].label}</Typography>}
-                    />
+                    <MenuItem key={role} value={role}>
+                      {ROLE_STYLES[role].label}
+                    </MenuItem>
                   ))}
-                </RadioGroup>
+                </Select>
               </Stack>
             )
           })}
@@ -831,6 +837,13 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
                 size="small"
                 label={annotation.creator_ref}
                 sx={{ bgcolor: ROLE_STYLES.creator_ref.bg }}
+              />
+            )}
+            {annotation.model_version && (
+              <Chip
+                size="small"
+                label={annotation.model_version}
+                sx={{ bgcolor: ROLE_STYLES.model_version.bg }}
               />
             )}
             {annotation.model_tags.map((tag) => (

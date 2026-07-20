@@ -38,6 +38,7 @@ const ModelDetailsEditor = forwardRef<
   const [name, setName] = useState(model.name)
   const [creatorName, setCreatorName] = useState(model.creator_name ?? '')
   const [creatorRef, setCreatorRef] = useState(model.creator_ref ?? '')
+  const [version, setVersion] = useState(model.model_version ?? '')
   const [tags, setTags] = useState<string[]>(model.tags)
   const [sourceUrl, setSourceUrl] = useState(model.source_url ?? '')
   const [description, setDescription] = useState(model.description_md ?? '')
@@ -69,6 +70,7 @@ const ModelDetailsEditor = forwardRef<
         name: name.trim(),
         creator_id,
         creator_ref: creatorRef.trim() || null,
+        model_version: version.trim() || null,
         source_url: sourceUrl.trim() || null,
         tags,
       })
@@ -145,6 +147,12 @@ const ModelDetailsEditor = forwardRef<
         value={creatorRef}
         onChange={(e) => setCreatorRef(e.target.value)}
         placeholder="the creator's own id / SKU for this model"
+      />
+      <TextField
+        label="Version"
+        value={version}
+        onChange={(e) => setVersion(e.target.value)}
+        placeholder="the creator's version for this model — v2, 2024 rework"
       />
       <Autocomplete
         multiple

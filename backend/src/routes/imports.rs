@@ -608,18 +608,18 @@ async fn commit(
             let name = named(name);
             let slug = models::unique_slug(&state, &name, None, None).await?;
             // A one-model carve produces a single planned model; take the creator
-            // id its layout caught, if any.
-            let creator_ref = carve
-                .as_ref()
-                .and_then(|p| p.models.first())
-                .and_then(|m| m.creator_ref.clone());
+            // id and version its layout caught, if any.
+            let planned_model = carve.as_ref().and_then(|p| p.models.first());
+            let creator_ref = planned_model.and_then(|m| m.creator_ref.clone());
+            let model_version = planned_model.and_then(|m| m.model_version.clone());
             let model_id: Uuid = sqlx::query_scalar!(
-                "INSERT INTO models (name, slug, creator_id, creator_ref, created_by)
-                 VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                "INSERT INTO models (name, slug, creator_id, creator_ref, model_version, created_by)
+                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
                 name,
                 slug,
                 meta.creator_id,
                 creator_ref,
+                model_version,
                 user.id,
             )
             .fetch_one(&mut *tx)
@@ -1380,12 +1380,13 @@ async fn carve_into_bundle(
             None => {
                 let slug = unique_member_slug(&mut *tx, &planned.name, &mut reserved_slugs).await?;
                 let model_id: Uuid = sqlx::query_scalar!(
-                    "INSERT INTO models (name, slug, creator_id, creator_ref, created_by)
-                     VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                    "INSERT INTO models (name, slug, creator_id, creator_ref, model_version, created_by)
+                     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
                     planned.name,
                     slug,
                     bundle_creator,
                     planned.creator_ref,
+                    planned.model_version,
                     user_id,
                 )
                 .fetch_one(&mut *tx)
@@ -1494,6 +1495,7 @@ mod tests {
         layout::PlanModel {
             name: name.into(),
             creator_ref: None,
+            model_version: None,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             file_count: 0,
             variants: Vec::new(),

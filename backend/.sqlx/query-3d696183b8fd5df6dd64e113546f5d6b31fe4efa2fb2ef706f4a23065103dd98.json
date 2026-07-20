@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.id, m.name, m.slug, m.creator_id, c.name as \"creator_name?\",\n                  m.creator_ref,\n                  m.source_url, m.license, m.purchase_price::float8 as purchase_price,\n                  m.purchase_date, m.order_ref, m.created_by, m.created_at, m.updated_at,\n                  (SELECT r.body_md FROM model_description_revisions r\n                    WHERE r.model_id = m.id ORDER BY r.created_at DESC LIMIT 1) as description_md,\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as \"tags!\"\n           FROM models m LEFT JOIN creators c ON c.id = m.creator_id\n           WHERE m.id = $1",
+  "query": "SELECT m.id, m.name, m.slug, m.creator_id, c.name as \"creator_name?\",\n                  m.creator_ref, m.model_version,\n                  m.source_url, m.license, m.purchase_price::float8 as purchase_price,\n                  m.purchase_date, m.order_ref, m.created_by, m.created_at, m.updated_at,\n                  (SELECT r.body_md FROM model_description_revisions r\n                    WHERE r.model_id = m.id ORDER BY r.created_at DESC LIMIT 1) as description_md,\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as \"tags!\"\n           FROM models m LEFT JOIN creators c ON c.id = m.creator_id\n           WHERE m.id = $1",
   "describe": {
     "columns": [
       {
@@ -71,6 +71,17 @@
       },
       {
         "ordinal": 6,
+        "name": "model_version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_version"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
         "name": "source_url",
         "type_info": "Text",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "license",
         "type_info": "Text",
         "origin": {
@@ -92,13 +103,13 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "purchase_price",
         "type_info": "Float8",
         "origin": "Expression"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "purchase_date",
         "type_info": "Date",
         "origin": {
@@ -109,7 +120,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "order_ref",
         "type_info": "Text",
         "origin": {
@@ -120,7 +131,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "created_by",
         "type_info": "Uuid",
         "origin": {
@@ -131,7 +142,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -142,7 +153,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -153,13 +164,13 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "description_md",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "tags!",
         "type_info": "TextArray",
         "origin": "Expression"
@@ -179,6 +190,7 @@
       true,
       true,
       true,
+      true,
       null,
       true,
       true,
@@ -189,5 +201,5 @@
       null
     ]
   },
-  "hash": "3695a70fb9b72c2f9b31f4594daeeec941acb30493b5d29db35cab46db6f2602"
+  "hash": "3d696183b8fd5df6dd64e113546f5d6b31fe4efa2fb2ef706f4a23065103dd98"
 }
