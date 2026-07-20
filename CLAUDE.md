@@ -20,8 +20,19 @@ sqlx `query!` macros validate against a live DB at *compile* time, but the
 runtime `sqlx::migrate!()` in `main.rs` only applies the schema at startup — so a
 fresh empty DB won't compile. Running migrations via sqlx-cli (not raw `psql`)
 also records them in `_sqlx_migrations`, so the startup `migrate!()` skips them
-instead of erroring on re-apply. There is no `.sqlx` offline cache, so postgres
-must be up and migrated for any build.
+instead of erroring on re-apply. Postgres must be up and migrated for any local
+build; only the Docker image builds without it, off the committed `.sqlx` cache
+(see below).
+
+`backend/.sqlx` is the committed offline query cache. The Dockerfile builds with
+`SQLX_OFFLINE=true` against it, so **a query change that is not followed by
+`cargo sqlx prepare` breaks the release build** — and `docker.yml` only runs on
+`v*` tags, so that failure would otherwise surface after the tag is cut. The
+pre-commit hook catches it instead; regenerate with:
+
+```bash
+cd backend && cargo sqlx prepare -- --all-targets
+```
 
 Bind is **3001** on this machine (3000 is taken by an ssh tunnel). All config is
 flag + env dual (`meshtrove --help`); `.env` is auto-loaded. `--anonymous` makes
@@ -58,6 +69,9 @@ every request a synthetic admin; unset it to exercise real auth
   already has **merges** the two rather than erroring.
 - Descriptions are immutable revisions (newest = current); edits insert.
 - Big uploads stream end-to-end; don't buffer whole files in memory.
+- Formatting is enforced, not advisory: rustfmt for the backend, Prettier for the
+  frontend (single quotes, no semicolons, 100 cols — `npm run format`). Both run
+  from `.pre-commit-config.yaml`; install once with `pre-commit install`.
 
 ## Verify
 
