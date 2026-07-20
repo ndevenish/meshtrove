@@ -415,6 +415,14 @@ export const FileTree = memo(function FileTree({
     return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b))
   }, [files])
 
+  // Reserve the 3D-preview column on every row once any file can show it, so the
+  // download/render icons stay in aligned columns next to files (projects,
+  // documents) that can't be previewed. No STL anywhere → no wasted column.
+  const anyStl = useMemo(
+    () => files.some((f) => f.filename.toLowerCase().endsWith('.stl')),
+    [files],
+  )
+
   if (files.length === 0)
     return (
       <Typography variant="body2" color="text.secondary">
@@ -547,13 +555,18 @@ export const FileTree = memo(function FileTree({
               </Typography>
               {/* STL is the one format we can render live in the browser
                   (three.js). Give it a viewer; other model formats fall back to
-                  the server-rendered picture. */}
-              {file.filename.toLowerCase().endsWith('.stl') && (
-                <Tooltip title="Preview 3D model">
-                  <IconButton size="small" onClick={() => setPreviewFile(file)}>
-                    <ViewInArIcon sx={{ fontSize: 18 }} />
-                  </IconButton>
-                </Tooltip>
+                  the server-rendered picture. The slot is held open for non-STL
+                  rows too so the download/render icons line up down the list. */}
+              {anyStl && (
+                <Box sx={{ width: 30, flexShrink: 0 }}>
+                  {file.filename.toLowerCase().endsWith('.stl') && (
+                    <Tooltip title="Preview 3D model">
+                      <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                        <ViewInArIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </Box>
               )}
               <Tooltip title="Download">
                 <IconButton size="small" component="a" href={downloadUrl(file.id)}>
