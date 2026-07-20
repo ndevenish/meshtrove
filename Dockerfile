@@ -79,6 +79,15 @@ RUN apt-get update \
 # display number, so concurrent render jobs don't collide.
 RUN printf '#!/bin/sh\nexec xvfb-run -a /usr/bin/f3d "$@"\n' > /usr/local/bin/f3d \
     && chmod +x /usr/local/bin/f3d
+
+# f3d insists on a writable cache directory and has no flag to turn it off.
+# It derives one from XDG_CACHE_HOME, else $HOME/.cache — and when the container
+# runs as a uid with no passwd entry (which is exactly what MESHTROVE_UID does),
+# Docker sets HOME=/, so f3d tries to create /.cache/f3d and dies with
+# "Permission denied". Point it at a directory any uid can write: mode 1777 like
+# /tmp, so the sticky bit still stops one user removing another's files.
+RUN mkdir -p /var/cache/meshtrove && chmod 1777 /var/cache/meshtrove
+ENV XDG_CACHE_HOME=/var/cache/meshtrove
 WORKDIR /app
 
 COPY --from=backend /app/backend/target/release/meshtrove /usr/local/bin/meshtrove

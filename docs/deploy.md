@@ -238,3 +238,10 @@ Two details worth knowing if you change any of this:
   that shadows the real binary on `PATH` and execs it under a virtual X server.
   The renderer setting stays the plain `f3d` that works on a developer's
   machine — the display plumbing belongs to the image, not to the app config.
+- **`XDG_CACHE_HOME` is set to `/var/cache/meshtrove` (mode 1777).** f3d requires
+  a writable cache directory and has no flag to disable it. It derives one from
+  `XDG_CACHE_HOME`, else `$HOME/.cache` — and when the container runs as a uid
+  with no passwd entry, which is exactly what `MESHTROVE_UID` does, Docker sets
+  `HOME=/` and f3d dies trying to create `/.cache/f3d`. The dedicated directory
+  is world-writable so any uid works, sticky so they cannot delete each other's
+  files.
