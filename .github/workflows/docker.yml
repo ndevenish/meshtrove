@@ -178,7 +178,9 @@ jobs:
       # forks and anyone without an auto-updating deployment build as before.
       - name: Trigger production redeploy
         env:
-          DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+          # URL is a repository *variable* (not secret) — the hostname isn't
+          # sensitive, and the CF Access + Bearer checks are what gate the call.
+          DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL }}
           DEPLOY_WEBHOOK_TOKEN: ${{ secrets.DEPLOY_WEBHOOK_TOKEN }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}

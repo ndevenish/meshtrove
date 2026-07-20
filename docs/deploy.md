@@ -297,12 +297,18 @@ In the Cloudflare Zero Trust dashboard:
 
 In the repository's **Settings → Secrets and variables → Actions**, add:
 
-| Secret | Value |
-| --- | --- |
-| `DEPLOY_WEBHOOK_URL` | `https://meshtrove-deploy.example.com/v1/update` |
-| `DEPLOY_WEBHOOK_TOKEN` | the same value as `WATCHTOWER_TOKEN` in `.env.prod` |
-| `CF_ACCESS_CLIENT_ID` | the service token's Client ID |
-| `CF_ACCESS_CLIENT_SECRET` | the service token's Client Secret |
+| Name | Kind | Value |
+| --- | --- | --- |
+| `DEPLOY_WEBHOOK_URL` | **Variable** | `https://meshtrove-deploy.example.com/v1/update` |
+| `DEPLOY_WEBHOOK_TOKEN` | Secret | the same value as `WATCHTOWER_TOKEN` in `.env.prod` |
+| `CF_ACCESS_CLIENT_ID` | Secret | the service token's Client ID |
+| `CF_ACCESS_CLIENT_SECRET` | Secret | the service token's Client Secret |
+
+`DEPLOY_WEBHOOK_URL` is a **repository variable** (the "Variables" tab), read as
+`vars.DEPLOY_WEBHOOK_URL` — the hostname isn't sensitive, and the CF Access and
+Bearer checks are what gate the call. The other three are **secrets**. Setting
+the URL as a secret instead leaves `vars.DEPLOY_WEBHOOK_URL` empty, and the
+guarded step silently skips.
 
 The "Trigger production redeploy" step is guarded on `DEPLOY_WEBHOOK_URL`, so
 until you add these secrets — and in forks — the build behaves exactly as before
