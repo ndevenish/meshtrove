@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
             put(label_revision),
         )
         .route("/api/bundles/{id}/categories", put(set_categories))
+        .route("/api/bundles/{id}/models/tags", post(retag_members))
         .route("/api/bundles/{id}/models", axum::routing::post(add_model))
         .route(
             "/api/bundles/{id}/models/{model_id}",
@@ -681,6 +682,111 @@ async fn set_categories(
         .await?;
     tx.commit().await?;
     fetch_detail(&state, id, user.id).await.map(Json)
+}
+
+// ---------------------------------------------------------------------------
+// bulk member retag
+// ---------------------------------------------------------------------------
+
+/// Tags to add to, and remove from, every member model at once.
+///
+/// Additive/subtractive on purpose — there is no "replace" mode. Members reach a
+/// bundle carrying their own tags from import and scraped patches, and a bundle
+/// is a shipping crate, not a category: a wholesale overwrite would silently
+/// discard per-model tags the user cannot get back. Add and remove compose well
+/// enough to reach any state deliberately.
+#[derive(Deserialize, ToSchema)]
+pub struct MemberTagsInput {
+    #[serde(default)]
+    pub add: Vec<String>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// What the retag actually did — assignment counts, not tag counts, so
+/// "3 tags across 12 models" reads as 36 and re-running reads as 0.
+#[derive(Serialize, ToSchema)]
+pub struct MemberTagsResult {
+    /// Members whose tag set changed at all.
+    pub models_updated: i64,
+    pub tags_added: i64,
+    pub tags_removed: i64,
+}
+
+async fn retag_members(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<MemberTagsInput>,
+) -> Result<Json<MemberTagsResult>, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+
+    let mut tx = state.db.begin().await?;
+
+    // Resolve the adds first, inside this transaction — `upsert_tag` takes FK
+    // locks the later INSERT needs, and doing it on a pooled connection while
+    // this transaction is open would deadlock against ourselves.
+    let mut add_ids: Vec<Uuid> = Vec::new();
+    for name in &input.add {
+        if name.trim().is_empty() {
+            continue;
+        }
+        let tag = upsert_tag(&mut *tx, name).await?;
+        if !add_ids.contains(&tag.id) {
+            add_ids.push(tag.id);
+        }
+    }
+
+    // Removals resolve by name against existing tags only: removing a tag that
+    // was never created is a no-op, not a reason to mint it.
+    let remove_names: Vec<String> = input
+        .remove
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+
+    // A tag named in both lists would race itself — the add wins, so a UI that
+    // lets the user do both by accident still lands somewhere predictable.
+    let removed = sqlx::query_scalar!(
+        r#"WITH doomed AS (
+               SELECT t.id FROM tags t
+                WHERE t.name = ANY($2::citext[]) AND NOT (t.id = ANY($3::uuid[]))
+           )
+           DELETE FROM model_tags mt
+            USING bundle_models bm
+            WHERE mt.model_id = bm.model_id
+              AND bm.bundle_id = $1
+              AND mt.tag_id IN (SELECT id FROM doomed)
+           RETURNING mt.model_id"#,
+        id,
+        &remove_names as &[String],
+        &add_ids,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let added = sqlx::query_scalar!(
+        r#"INSERT INTO model_tags (model_id, tag_id)
+           SELECT bm.model_id, t.id
+             FROM bundle_models bm CROSS JOIN unnest($2::uuid[]) AS t (id)
+            WHERE bm.bundle_id = $1
+           ON CONFLICT DO NOTHING
+           RETURNING model_id"#,
+        id,
+        &add_ids,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let touched: HashSet<Uuid> = added.iter().chain(removed.iter()).copied().collect();
+    Ok(Json(MemberTagsResult {
+        models_updated: touched.len() as i64,
+        tags_added: added.len() as i64,
+        tags_removed: removed.len() as i64,
+    }))
 }
 
 // ---------------------------------------------------------------------------

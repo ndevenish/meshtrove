@@ -31,6 +31,7 @@ import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import DownloadIcon from '@mui/icons-material/Download'
+import SellIcon from '@mui/icons-material/Sell'
 import { api, imageUrl, sourceOrigin } from '../api'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
@@ -45,6 +46,7 @@ import BundleUnsortedSection from '../components/BundleUnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ImportErrorDialog from '../components/ImportErrorDialog'
 import BundlePatchDialog from '../components/BundlePatchDialog'
+import BundleRetagDialog from '../components/BundleRetagDialog'
 import BundleDeleteDialog from '../components/BundleDeleteDialog'
 
 export default function BundlePage() {
@@ -62,6 +64,7 @@ export default function BundlePage() {
   const [exportOpen, setExportOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [patchOpen, setPatchOpen] = useState(false)
+  const [retagOpen, setRetagOpen] = useState(false)
   // The zip dropped on the inline importer box, handed to the dialog to preview.
   const [patchFile, setPatchFile] = useState<File | null>(null)
   // A patch was applied and its post-apply reload is owed. We hold it until the
@@ -309,6 +312,14 @@ export default function BundlePage() {
                   Delete bundle
                 </Button>
                 <Button
+                  startIcon={<SellIcon />}
+                  disabled={saving || bundle.models.length === 0}
+                  onClick={() => setRetagOpen(true)}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Tag all models
+                </Button>
+                <Button
                   variant="contained"
                   disabled={saving}
                   onClick={() => {
@@ -466,6 +477,18 @@ export default function BundlePage() {
           setDeleteOpen(false)
           await queryClient.invalidateQueries()
           navigate('/')
+        }}
+      />
+
+      <BundleRetagDialog
+        open={retagOpen}
+        onClose={() => setRetagOpen(false)}
+        bundle={bundle}
+        onDone={(message) => {
+          void queryClient.invalidateQueries({ queryKey: ['bundle', id] })
+          // Member tags feed the tag cloud's counts and the browse filters.
+          void queryClient.invalidateQueries({ queryKey: ['tags'] })
+          setToast(message)
         }}
       />
 

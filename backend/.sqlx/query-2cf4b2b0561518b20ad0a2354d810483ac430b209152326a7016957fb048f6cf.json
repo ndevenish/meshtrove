@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO model_tags (model_id, tag_id)\n           SELECT bm.model_id, t.id\n             FROM bundle_models bm CROSS JOIN unnest($2::uuid[]) AS t (id)\n            WHERE bm.bundle_id = $1\n           ON CONFLICT DO NOTHING\n           RETURNING model_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "model_tags",
+            "name": "model_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2cf4b2b0561518b20ad0a2354d810483ac430b209152326a7016957fb048f6cf"
+}

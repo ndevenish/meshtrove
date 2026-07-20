@@ -165,6 +165,15 @@ export interface BundleDetail {
   created_by: string
 }
 
+/// What a bulk member retag did. Counts are tag *assignments*, not distinct
+/// tags — 3 tags across 12 models reads as 36, and re-running the same retag
+/// reads as 0 because the adds already exist.
+export interface MemberTagsResult {
+  models_updated: number
+  tags_added: number
+  tags_removed: number
+}
+
 export interface BundleResults {
   bundles: BundleSummary[]
   total: number
@@ -588,6 +597,10 @@ export const api = {
     request<void>(`/api/bundles/${bundleId}/models`, json({ model_id: modelId })),
   removeModelFromBundle: (bundleId: string, modelId: string) =>
     request<void>(`/api/bundles/${bundleId}/models/${modelId}`, { method: 'DELETE' }),
+  /** Add and/or remove tags across every member model of a bundle in one call.
+      Additive/subtractive only — there is deliberately no bulk replace. */
+  retagBundleMembers: (id: string, add: string[], remove: string[]) =>
+    request<MemberTagsResult>(`/api/bundles/${id}/models/tags`, json({ add, remove })),
   /** replace a bundle's ordered category list (reorder/add/remove in one call) */
   setBundleCategories: (id: string, categories: string[]) =>
     request<BundleDetail>(`/api/bundles/${id}/categories`, {
