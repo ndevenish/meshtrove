@@ -4,6 +4,7 @@ pub mod auth;
 pub mod browse;
 pub mod bundles;
 pub mod creators;
+pub mod custom_fields;
 pub mod dropbox;
 pub mod exports;
 pub mod files;

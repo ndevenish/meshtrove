@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
         .merge(routes::bundles::router())
         .merge(routes::jobs::router())
         .merge(routes::creators::router())
+        .merge(routes::custom_fields::router())
         .merge(routes::dropbox::router())
         .merge(routes::exports::router())
         .merge(routes::files::router())
