@@ -9,6 +9,7 @@ import {
   Typography,
   IconButton,
   Alert,
+  CircularProgress,
 } from '@mui/material'
 import { useTheme } from '@mui/material/styles'
 import CloseIcon from '@mui/icons-material/Close'
@@ -66,9 +67,13 @@ export default function StlPreviewDialog({
   // Recomputed each time a new file opens.
   const [live, setLive] = useState(size <= LIVE_PREVIEW_THRESHOLD)
   const [stillError, setStillError] = useState(false)
+  // The still is rendered on demand server-side (f3d shell-out), so there's a
+  // real wait before the image arrives — spin until it loads or errors.
+  const [stillLoading, setStillLoading] = useState(true)
   useEffect(() => {
     setLive(size <= LIVE_PREVIEW_THRESHOLD)
     setStillError(false)
+    setStillLoading(true)
   }, [fileId, size])
 
   useEffect(() => {
@@ -254,13 +259,25 @@ export default function StlPreviewDialog({
                 </Typography>
               ) : (
                 fileId && (
-                  <Box
-                    component="img"
-                    src={renderPreviewUrl(fileId)}
-                    alt={`Rendered preview of ${filename}`}
-                    onError={() => setStillError(true)}
-                    sx={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-                  />
+                  <>
+                    {stillLoading && <CircularProgress aria-label="Rendering preview" />}
+                    <Box
+                      component="img"
+                      src={renderPreviewUrl(fileId)}
+                      alt={`Rendered preview of ${filename}`}
+                      onLoad={() => setStillLoading(false)}
+                      onError={() => {
+                        setStillLoading(false)
+                        setStillError(true)
+                      }}
+                      sx={{
+                        maxWidth: '100%',
+                        maxHeight: '100%',
+                        objectFit: 'contain',
+                        display: stillLoading ? 'none' : 'block',
+                      }}
+                    />
+                  </>
                 )
               )}
             </Box>
