@@ -97,8 +97,11 @@ export function CustomFieldControl({
   entry: CustomFieldValue
   value: ScalarValue
   onChange: (value: ScalarValue) => void
-  onUploadFile: (file: File) => Promise<void>
-  onClearFile: () => Promise<void>
+  /** Omitted where there is nothing to upload *to* yet — the import page types
+      its metadata before the model it belongs to exists — and the file kind
+      then renders nothing at all. */
+  onUploadFile?: (file: File) => Promise<void>
+  onClearFile?: () => Promise<void>
 }) {
   const { field, file } = entry
   const [busy, setBusy] = useState(false)
@@ -147,6 +150,7 @@ export function CustomFieldControl({
         </Stack>
       )
     case 'file':
+      if (!onUploadFile) return null
       return (
         <Stack spacing={1}>
           {file && (
@@ -166,7 +170,7 @@ export function CustomFieldControl({
                   disabled={busy}
                   onClick={() => {
                     setBusy(true)
-                    void onClearFile().finally(() => setBusy(false))
+                    void onClearFile?.().finally(() => setBusy(false))
                   }}
                 >
                   <DeleteIcon sx={{ fontSize: 18 }} />

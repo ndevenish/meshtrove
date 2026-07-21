@@ -34,6 +34,7 @@ import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayout
 import ImportRestorePanel from '../components/ImportRestorePanel'
 import { useImportDraftState, clearImportDraft } from '../importDraft'
 import { changeTags, pasteTags } from '../tags'
+import { CustomFieldControl, type ScalarValue } from '../components/CustomFieldControl'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
 
@@ -87,6 +88,14 @@ function ImportWorkbench() {
   const [tags, setTags] = useImportDraftState<string[]>(id!, 'tags', [])
   const [sourceUrl, setSourceUrl] = useImportDraftState(id!, 'sourceUrl', '')
   const [description, setDescription] = useImportDraftState(id!, 'description', '')
+  // Custom fields, by field id. Each value goes wherever its own definition says
+  // — see the backend's apply_custom_fields — so one form serves a drop that
+  // creates a bundle and its members at once.
+  const [customValues, setCustomValues] = useImportDraftState<Record<string, ScalarValue>>(
+    id!,
+    'customFields',
+    {},
+  )
 
   const { data: staged, isLoading } = useQuery({
     queryKey: ['import', id],
@@ -117,6 +126,10 @@ function ImportWorkbench() {
   })
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
+  const { data: allCustomFields } = useQuery({
+    queryKey: ['custom-fields'],
+    queryFn: () => api.customFields(),
+  })
   const { data: bundles } = useQuery({
     queryKey: ['bundles-all'],
     queryFn: () => api.searchBundles(new URLSearchParams({ per_page: '100' })),
@@ -153,6 +166,16 @@ function ImportWorkbench() {
     if (suggestedName && !nameEdited) setName(suggestedName)
   }, [suggestedName, nameEdited, setName])
 
+  // Which fields this drop can carry. A model target takes the models-only ones;
+  // a bundle target takes both, because a models-only field still reaches every
+  // member the carve creates. A file field is left out either way — there is
+  // nothing to upload it against until the commit has produced an owner.
+  const applicableFields = (allCustomFields ?? []).filter(
+    (f) =>
+      f.kind !== 'file' &&
+      (dest === 'new_model' ? f.applies_to_models : f.applies_to_bundles || f.applies_to_models),
+  )
+
   if (isLoading || !staged) return null
 
   const commit = async () => {
@@ -175,6 +198,10 @@ function ImportWorkbench() {
         tags,
         source_url: sourceUrl.trim() || null,
         description_md: description.trim() || null,
+        custom_fields: applicableFields.map((f) => ({
+          field_id: f.id,
+          value: customValues[f.id] ?? null,
+        })),
       }
       const spec = layout?.spec
       const body: CommitTarget =
@@ -400,6 +427,14 @@ function ImportWorkbench() {
                 value={sourceUrl}
                 onChange={(e) => setSourceUrl(e.target.value)}
               />
+              {applicableFields.map((f) => (
+                <CustomFieldControl
+                  key={f.id}
+                  entry={{ field: f, value: null, file: null }}
+                  value={customValues[f.id] ?? null}
+                  onChange={(value) => setCustomValues({ ...customValues, [f.id]: value })}
+                />
+              ))}
               <TextField
                 size="small"
                 // Name the destination: under a bundle target this describes the

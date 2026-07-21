@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO custom_field_values (field_id, model_id, value, updated_by)\n             SELECT $1, m.id, $2, $3 FROM unnest($4::uuid[]) AS m(id)\n             ON CONFLICT (field_id, model_id) WHERE model_id IS NOT NULL\n             DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by,\n                           updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e6586d03167da08fe5532183e6f61cfeadc24bf16d0503b6dd27d808fb38199b"
+}

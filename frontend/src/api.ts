@@ -472,6 +472,9 @@ export interface ImportMeta {
   order_ref?: string | null
   tags?: string[]
   description_md?: string | null
+  /** admin-defined extra fields typed on the import page; each value goes
+      wherever its own definition says it belongs */
+  custom_fields?: CustomFieldValueInput[]
 }
 
 export type CommitTarget = ImportMeta &

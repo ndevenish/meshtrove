@@ -408,7 +408,7 @@ pub struct CustomFieldValueDetail {
 }
 
 /// One scalar write, as carried in a model/bundle edit. A null `value` clears.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct CustomFieldValueInput {
     pub field_id: Uuid,
     #[schema(value_type = Object)]
@@ -865,6 +865,114 @@ pub async fn persist_bundle_fields(
                 .await?;
             }
         }
+    }
+    Ok(())
+}
+
+/// One input resolved against the vocabulary, ready to write onto any number of
+/// owners without re-reading the definition each time.
+pub struct ResolvedValue {
+    pub field_id: Uuid,
+    /// None clears the field.
+    pub value: Option<serde_json::Value>,
+}
+
+/// Resolve scalar inputs against the vocabulary once, keeping only the fields
+/// `keep` accepts. An import types its metadata before any of the models exist,
+/// so the same handful of values is written across everything a carve produced;
+/// resolving up front turns that from a query per model per field into one.
+///
+/// Fields that `keep` rejects are dropped rather than refused: the import page
+/// offers one set of fields for a drop that may create both a bundle and its
+/// members, and each side takes the ones that are its own.
+pub async fn resolve_values(
+    db: &mut sqlx::PgConnection,
+    inputs: &[CustomFieldValueInput],
+    keep: impl Fn(&CustomField) -> bool,
+) -> Result<Vec<ResolvedValue>, ApiError> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut resolved = Vec::new();
+    for input in inputs {
+        let field = sqlx::query_as!(
+            CustomField,
+            r#"SELECT id, key as "key: String", name,
+                      kind as "kind: CustomFieldKind", options,
+                      applies_to_models, applies_to_bundles,
+                      bundle_persists_to_model, bundle_persist_overwrites,
+                      visibility as "visibility: CustomFieldVisibility", position
+               FROM custom_fields WHERE id = $1"#,
+            input.field_id,
+        )
+        .fetch_optional(&mut *db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+        if !keep(&field) {
+            continue;
+        }
+        let value = match &input.value {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => validate_value(&field, value)?,
+        };
+        resolved.push(ResolvedValue {
+            field_id: field.id,
+            value,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Write the same resolved values onto every model in `model_ids` — one
+/// statement per field, however many models a carve produced.
+pub async fn write_model_values_bulk(
+    db: &mut sqlx::PgConnection,
+    model_ids: &[Uuid],
+    values: &[ResolvedValue],
+    user: &User,
+) -> Result<(), ApiError> {
+    if model_ids.is_empty() {
+        return Ok(());
+    }
+    let editor = editor_id(user);
+    for v in values {
+        let Some(value) = &v.value else {
+            // Nothing to erase: these models were created moments ago.
+            continue;
+        };
+        sqlx::query!(
+            "INSERT INTO custom_field_values (field_id, model_id, value, updated_by)
+             SELECT $1, m.id, $2, $3 FROM unnest($4::uuid[]) AS m(id)
+             ON CONFLICT (field_id, model_id) WHERE model_id IS NOT NULL
+             DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by,
+                           updated_at = now()",
+            v.field_id,
+            value,
+            editor,
+            model_ids,
+        )
+        .execute(&mut *db)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Write resolved values onto one bundle.
+pub async fn write_bundle_values(
+    db: &mut sqlx::PgConnection,
+    bundle_id: Uuid,
+    values: &[ResolvedValue],
+    user: &User,
+) -> Result<(), ApiError> {
+    for v in values {
+        write_value(
+            &mut *db,
+            ValueOwner::Bundle(bundle_id),
+            v.field_id,
+            v.value.as_ref(),
+            editor_id(user),
+        )
+        .await?;
     }
     Ok(())
 }

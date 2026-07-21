@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::bundles::{self, parse_kind as parse_bundle_kind};
+use crate::routes::custom_fields::{self, CustomFieldValueInput};
 use crate::routes::models;
 use crate::services::gc;
 use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan, PlanVariant};
@@ -408,6 +409,54 @@ pub struct ImportMeta {
     /// the model under a model target, the *bundle* under a bundle target. It
     /// is not fanned out to member models — see `apply_meta_bulk`.
     pub description_md: Option<String>,
+    /// Admin-defined extra fields typed on the import page. Each value goes
+    /// wherever its own definition says it belongs — see `apply_custom_fields`.
+    #[serde(default)]
+    pub custom_fields: Vec<CustomFieldValueInput>,
+}
+
+/// Route the import page's custom field values by each field's own settings.
+///
+/// A model target is simple: everything that applies to models lands on it. A
+/// bundle target has two halves — a field that applies to bundles is the box
+/// set's own, written on the bundle and then reaching its members exactly as far
+/// as its "persists to model" / "overwrites" flags say; a models-only field has
+/// no bundle to live on, so it is written on every model the carve produced, the
+/// same way the typed tags are.
+async fn apply_custom_fields(
+    tx: &mut sqlx::PgConnection,
+    meta: &ImportMeta,
+    bundle_id: Option<Uuid>,
+    model_ids: &[Uuid],
+    user: &User,
+) -> Result<(), ApiError> {
+    if meta.custom_fields.is_empty() {
+        return Ok(());
+    }
+    match bundle_id {
+        Some(bundle_id) => {
+            let on_bundle =
+                custom_fields::resolve_values(tx, &meta.custom_fields, |f| f.applies_to_bundles)
+                    .await?;
+            custom_fields::write_bundle_values(tx, bundle_id, &on_bundle, user).await?;
+            custom_fields::persist_bundle_fields(tx, bundle_id, user).await?;
+            // Only the fields the bundle couldn't hold: a field that lives at
+            // both ends already reached the members through persistence (or was
+            // deliberately not configured to).
+            let on_members = custom_fields::resolve_values(tx, &meta.custom_fields, |f| {
+                f.applies_to_models && !f.applies_to_bundles
+            })
+            .await?;
+            custom_fields::write_model_values_bulk(tx, model_ids, &on_members, user).await?;
+        }
+        None => {
+            let on_models =
+                custom_fields::resolve_values(tx, &meta.custom_fields, |f| f.applies_to_models)
+                    .await?;
+            custom_fields::write_model_values_bulk(tx, model_ids, &on_models, user).await?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -605,6 +654,9 @@ async fn commit(
 
     // Models whose browse thumbnail should render once the commit lands.
     let mut render_models: Vec<Uuid> = Vec::new();
+    // Models a bundle carve created, for the metadata that belongs on members
+    // rather than on the bundle.
+    let mut members: Vec<Uuid> = Vec::new();
 
     let result = match &input {
         CommitInput::NewModel { name, meta, .. } => {
@@ -628,6 +680,7 @@ async fn commit(
             .fetch_one(&mut *tx)
             .await?;
             apply_meta_bulk(&mut tx, &[model_id], meta, user.id, &tags.model, true).await?;
+            apply_custom_fields(&mut tx, meta, None, &[model_id], &user).await?;
             if let Some(plan) = &carve
                 && let Some(planned) = plan.models.first()
             {
@@ -697,8 +750,10 @@ async fn commit(
                 // is true of every model the carve just pulled out of it — the
                 // description excepted, which describes the box, not each figure.
                 apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model, false).await?;
+                members.extend(created.iter().copied());
                 render_models.extend(created);
             }
+            apply_custom_fields(&mut tx, meta, Some(bundle_id), &members, &user).await?;
             apply_bundle_description(&mut tx, bundle_id, meta, user.id).await?;
             claim_files(&mut tx, id, None, Some(bundle_id), claimed.as_deref()).await?;
             CommitResult {
@@ -737,8 +792,10 @@ async fn commit(
                 // in the bundle has its own metadata, and a later 75mm pack has no
                 // business rewriting it.
                 apply_meta_bulk(&mut tx, &created, meta, user.id, &tags.model, false).await?;
+                members.extend(created.iter().copied());
                 render_models.extend(created);
             }
+            apply_custom_fields(&mut tx, meta, Some(*bundle_id), &members, &user).await?;
             apply_bundle_description(&mut tx, *bundle_id, meta, user.id).await?;
             claim_files(&mut tx, id, None, Some(*bundle_id), claimed.as_deref()).await?;
             sqlx::query!(
