@@ -485,11 +485,6 @@ export const FileTree = memo(function FileTree({
     }
   }
 
-  // Folder actions hang off a folder's header row, and a header row only exists
-  // for a path some file sits directly at. Where they're offered, give the
-  // folders in between one too — otherwise `Pack` can be neither split nor
-  // discarded the moment every file in it lives in `Pack/supported`.
-  const foldersActionable = !!onFolderDiscard || !!onFolderSplit
   // Split the folder out: its files change import, they aren't deleted, so this
   // is the one folder action that loses nothing.
   const splitFolder = async (dir: string) => {
@@ -509,19 +504,23 @@ export const FileTree = memo(function FileTree({
       const dir = file.path || '/'
       byDir.set(dir, [...(byDir.get(dir) ?? []), file])
     }
-    if (foldersActionable) {
-      for (const dir of [...byDir.keys()]) {
-        const parts = dir.split('/')
-        for (let i = 1; i < parts.length; i++) {
-          const ancestor = parts.slice(0, i).join('/')
-          // The root group's key is '/', whose first "ancestor" is the empty
-          // string — not a folder, and it used to be listed as one.
-          if (ancestor && !byDir.has(ancestor)) byDir.set(ancestor, [])
-        }
+    // A header row exists for every path a file sits directly at; the folders
+    // in between get one too, empty. Two reasons they can't be left out: a
+    // folder action (split, discard) hangs off a header, so `Pack` would be
+    // neither the moment every file in it lives in `Pack/supported`; and
+    // without the row there is nothing for `Pack/supported` to be drawn under,
+    // which is how it used to end up indented beneath an unrelated sibling.
+    for (const dir of [...byDir.keys()]) {
+      const parts = dir.split('/')
+      for (let i = 1; i < parts.length; i++) {
+        const ancestor = parts.slice(0, i).join('/')
+        // The root group's key is '/', whose first "ancestor" is the empty
+        // string — not a folder, and it used to be listed as one.
+        if (ancestor && !byDir.has(ancestor)) byDir.set(ancestor, [])
       }
     }
     return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b))
-  }, [files, foldersActionable])
+  }, [files])
 
   /// Where a folder sits in the tree *as drawn*: how many of its ancestors have
   /// rows of their own, and what is left of its path once the deepest of them is
