@@ -32,6 +32,7 @@ import EditIcon from '@mui/icons-material/Edit'
 import CheckIcon from '@mui/icons-material/Check'
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
+import FolderDeleteIcon from '@mui/icons-material/FolderDelete'
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
@@ -347,6 +348,7 @@ export const FileTree = memo(function FileTree({
   onRender,
   archivesExtracted,
   onFolderRename,
+  onFolderDiscard,
 }: {
   files: FileRecord[]
   selectable?: boolean
@@ -363,10 +365,20 @@ export const FileTree = memo(function FileTree({
       every file in the group. When set, folder headers become editable and the
       unfoldered root group gains an "Add folder" control. */
   onFolderRename?: (fileIds: string[], newPath: string) => void | Promise<void>
+  /** Discard a folder outright — delete every file in the group. Distinct from
+      `onFolderRename`'s empty-path "remove", which only flattens the folder away
+      and keeps the files. Used on the import page to drop chaff before committing.
+      When set, real folder headers gain a "Discard folder" control. */
+  onFolderDiscard?: (fileIds: string[]) => void | Promise<void>
 }) {
   const [editingDir, setEditingDir] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [savingDir, setSavingDir] = useState(false)
+  const [discardingDir, setDiscardingDir] = useState<string | null>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState<{
+    dir: string
+    entries: FileRecord[]
+  } | null>(null)
   const [previewFile, setPreviewFile] = useState<FileRecord | null>(null)
 
   const startFolder = (dir: string) => {
@@ -403,6 +415,18 @@ export const FileTree = memo(function FileTree({
       )
     } finally {
       setSavingDir(false)
+    }
+  }
+  // Discard the folder: delete its files, not just its path. Unlike removeFolder,
+  // nothing survives — the files never make it into the library.
+  const discardFolder = async (dir: string, entries: FileRecord[]) => {
+    if (!onFolderDiscard) return
+    setDiscardingDir(dir)
+    try {
+      await onFolderDiscard(entries.map((f) => f.id))
+      setConfirmDiscard(null)
+    } finally {
+      setDiscardingDir(null)
     }
   }
 
@@ -509,6 +533,20 @@ export const FileTree = memo(function FileTree({
                         </IconButton>
                       </Tooltip>
                     </>
+                  )}
+                  {onFolderDiscard && (
+                    <Tooltip title="Discard folder — delete these files without importing them">
+                      <span>
+                        <IconButton
+                          size="small"
+                          color="error"
+                          disabled={discardingDir === dir}
+                          onClick={() => setConfirmDiscard({ dir, entries })}
+                        >
+                          <FolderDeleteIcon sx={{ fontSize: 17 }} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                   )}
                 </>
               )}
@@ -625,6 +663,35 @@ export const FileTree = memo(function FileTree({
           />
         </Suspense>
       )}
+      <Dialog
+        open={!!confirmDiscard}
+        onClose={() => discardingDir === null && setConfirmDiscard(null)}
+      >
+        <DialogTitle>Discard folder?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Delete the {confirmDiscard?.entries.length}{' '}
+            {confirmDiscard?.entries.length === 1 ? 'file' : 'files'} in{' '}
+            <strong>{confirmDiscard?.dir}</strong> without importing{' '}
+            {confirmDiscard?.entries.length === 1 ? 'it' : 'them'}. This can't be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={discardingDir !== null} onClick={() => setConfirmDiscard(null)}>
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={discardingDir !== null}
+            onClick={() =>
+              confirmDiscard && void discardFolder(confirmDiscard.dir, confirmDiscard.entries)
+            }
+          >
+            Discard
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 })

@@ -222,6 +222,20 @@ function ImportWorkbench() {
     navigate('/imports')
   }
 
+  // Drop a folder's staged files without importing them. There's no folder row
+  // to delete — a folder is just its files' shared `path` — so delete each file
+  // and refresh the list (and the summary's file_count) around them.
+  const discardFolder = async (fileIds: string[]) => {
+    try {
+      await Promise.all(fileIds.map((fid) => api.deleteFile(fid)))
+      await queryClient.invalidateQueries({ queryKey: ['import', id] })
+      await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
+      await queryClient.invalidateQueries({ queryKey: ['imports'] })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   // A dropped MeshTrove export is restored, not carved: skip the whole
   // model/bundle/layout question and show what the archive holds.
   if (staged.is_export) {
@@ -486,7 +500,7 @@ function ImportWorkbench() {
               rules={layout.spec.rules}
             />
           ) : (
-            <FileTree files={fileList} archivesExtracted />
+            <FileTree files={fileList} archivesExtracted onFolderDiscard={discardFolder} />
           )}
         </Box>
       </Box>
