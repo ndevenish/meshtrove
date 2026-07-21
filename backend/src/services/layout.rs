@@ -47,7 +47,27 @@ pub enum Role {
     ModelVersion,
     ModelTag,
     VariantTag,
+    /// The file's own folder: whatever this group captures *replaces* the path
+    /// the file came in with, verbatim (a path is not a title, so no camel-case
+    /// expansion and no value map). Singular per layout — a file has one path —
+    /// and the general form of `flatten`, which is the same rewrite to nothing:
+    /// a drop wrapped in one useless top folder keeps `PlayTiles/` and loses
+    /// `Stagetop Games Table/`, instead of choosing between the whole tree and
+    /// no tree at all.
+    Folder,
     Ignore,
+}
+
+/// A captured folder, made safe to store: '/'-separated, no empty, '.' or '..'
+/// segments, no leading or trailing slash. Logical paths are only a column, but
+/// they are written into export archives, so a traversal string must not survive
+/// the carve.
+fn clean_folder(raw: &str) -> String {
+    raw.split(['/', '\\'])
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn default_true() -> bool {
@@ -166,6 +186,10 @@ pub struct FileAnnotation {
     pub variant_tags: Vec<String>,
     /// Raw variant-tag captures with no resolution — the mapping table's todo.
     pub unmapped: Vec<String>,
+    /// The folder a `folder` group captured: the path this file will be stored
+    /// under, replacing the one it arrived with. Absent = keep what it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 /// One planned variant of a planned model. Empty `tags` = matched files that
@@ -271,6 +295,28 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The path rewrites a `folder` group asked for, grouped by destination so
+    /// the commit issues one UPDATE per distinct folder rather than one per
+    /// file — an archive has thousands of files and a handful of folders.
+    /// `keep` limits it to the files this commit claims (the same set `flatten`
+    /// moves); None means every file.
+    pub fn folder_moves(&self, keep: Option<&[Uuid]>) -> Vec<(String, Vec<Uuid>)> {
+        let mut by_folder: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+        for annotation in &self.annotations {
+            let Some(folder) = &annotation.folder else {
+                continue;
+            };
+            if keep.is_some_and(|ids| !ids.contains(&annotation.id)) {
+                continue;
+            }
+            by_folder
+                .entry(folder.clone())
+                .or_default()
+                .push(annotation.id);
+        }
+        by_folder.into_iter().collect()
+    }
+
     /// Raw values the commit must refuse on: mapping them is the user's call,
     /// not something to guess at.
     pub fn unmapped_values(&self) -> Vec<&str> {
@@ -375,6 +421,7 @@ pub fn analyze(
     let mut name_groups = 0usize;
     let mut creator_ref_groups = 0usize;
     let mut model_version_groups = 0usize;
+    let mut folder_groups = 0usize;
     for rule in &spec.rules {
         // Searched, not anchored — a small rule finds its fragment wherever it
         // sits. The seeded patterns anchor themselves (`^…$`), so they still
@@ -403,6 +450,7 @@ pub fn analyze(
         name_groups += roles.iter().filter(|r| **r == Role::ModelName).count();
         creator_ref_groups += roles.iter().filter(|r| **r == Role::CreatorRef).count();
         model_version_groups += roles.iter().filter(|r| **r == Role::ModelVersion).count();
+        folder_groups += roles.iter().filter(|r| **r == Role::Folder).count();
 
         compiled.push(CompiledRule {
             regex,
@@ -435,6 +483,13 @@ pub fn analyze(
     if model_version_groups > 1 {
         return Err(ApiError::BadRequest(
             "at most one capture group, in one rule, can be the version".into(),
+        ));
+    }
+    // And the folder: a file is stored at one path, so two groups claiming it
+    // would leave the carve picking one by rule order.
+    if folder_groups > 1 {
+        return Err(ApiError::BadRequest(
+            "at most one capture group, in one rule, can be the folder".into(),
         ));
     }
 
@@ -480,6 +535,7 @@ pub fn analyze(
         let mut model_name: Option<String> = None;
         let mut creator_ref: Option<String> = None;
         let mut model_version: Option<String> = None;
+        let mut folder: Option<String> = None;
         let mut model_tags: Vec<String> = Vec::new();
         let mut variant_tags: Vec<String> = Vec::new();
         let mut unmapped: Vec<String> = Vec::new();
@@ -562,6 +618,9 @@ pub fn analyze(
                     Role::CreatorRef => creator_ref = Some(raw.clone()),
                     // A label the creator chose — verbatim, like the creator id.
                     Role::ModelVersion => model_version = Some(raw.clone()),
+                    // A path, not a title: taken exactly as captured (minus the
+                    // segments that would make it unsafe to store).
+                    Role::Folder => folder = Some(clean_folder(raw)),
                     // A tag is a name a human reads in the browse sidebar, so it gets
                     // the same treatment a variant tag's captured value does: the
                     // folder `Fantasy_Creatures` tags the model "Fantasy Creatures",
@@ -645,6 +704,7 @@ pub fn analyze(
                 model_tags: vec![],
                 variant_tags: vec![],
                 unmapped: vec![],
+                folder: None,
             });
             continue;
         }
@@ -713,6 +773,7 @@ pub fn analyze(
             model_tags,
             variant_tags,
             unmapped,
+            folder,
         });
     }
 
@@ -1161,6 +1222,47 @@ mod tests {
         // the caller can see this is really a bundle.
         assert_eq!(plan.models[0].name, "");
         assert_eq!(plan.model_names, vec!["Gold", "Sanjay"]);
+    }
+
+    #[test]
+    fn a_folder_group_rewrites_the_path_it_captured() {
+        // The Stagetop shape: one useless top folder wrapping the categories
+        // that actually mean something.
+        let spec = spec_of(vec![rule(r"^[^/]+/(.+)/[^/]+$", &[("1", Role::Folder)])]);
+        let files = vec![
+            file(1, "Stagetop Games Table/PlayTiles", "tile_a.stl"),
+            file(2, "Stagetop Games Table/Legs/Short", "leg.stl"),
+            file(3, "", "loose.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Model, &files, &vocab()).unwrap();
+        assert_eq!(plan.annotations[0].folder.as_deref(), Some("PlayTiles"));
+        // A capture may span '/': the categories keep their own sub-structure.
+        assert_eq!(plan.annotations[1].folder.as_deref(), Some("Legs/Short"));
+        // Nothing matched, so nothing to rewrite — the file keeps its path.
+        assert_eq!(plan.annotations[2].folder, None);
+
+        // One statement per distinct destination, not per file.
+        let moves = plan.folder_moves(None);
+        assert_eq!(moves.len(), 2);
+        assert_eq!(moves[0].0, "Legs/Short");
+        assert_eq!(moves[1], ("PlayTiles".into(), vec![Uuid::from_u128(1)]));
+    }
+
+    #[test]
+    fn a_captured_folder_cannot_climb_out_of_the_store() {
+        let spec = spec_of(vec![rule(r"^(.+)/[^/]+$", &[("1", Role::Folder)])]);
+        let files = vec![file(1, "../../etc//x/.", "passwd.stl")];
+        let plan = analyze(&spec, CarveTarget::Model, &files, &vocab()).unwrap();
+        assert_eq!(plan.annotations[0].folder.as_deref(), Some("etc/x"));
+    }
+
+    #[test]
+    fn two_rules_cannot_both_claim_the_folder() {
+        let spec = spec_of(vec![
+            rule(r"^([^/]+)/", &[("1", Role::Folder)]),
+            rule(r"/([^/]+)/", &[("1", Role::Folder)]),
+        ]);
+        assert!(analyze(&spec, CarveTarget::Model, &[], &vocab()).is_err());
     }
 
     #[test]

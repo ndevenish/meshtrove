@@ -326,7 +326,14 @@ export interface DropboxListing {
 /// What a capture group means. No "variant" role: a variant IS its tag set,
 /// so the union of a file's variant-tag captures is its variant.
 export type GroupRole =
-  'model_name' | 'creator_ref' | 'model_version' | 'model_tag' | 'variant_tag' | 'ignore'
+  | 'model_name'
+  | 'creator_ref'
+  | 'model_version'
+  | 'model_tag'
+  | 'variant_tag'
+  /** the capture replaces the file's own folder — the general case of `flatten` */
+  | 'folder'
+  | 'ignore'
 
 /// One regex of a layout. The pattern is a backend (fancy-regex) pattern — an
 /// opaque string here; the frontend never runs it. Group numbers and the value
@@ -385,6 +392,9 @@ export interface FileAnnotation {
   variant_tags: string[]
   /** raw variant-tag captures with no resolution — fill the value map in */
   unmapped: string[]
+  /** the path this file will be stored under, replacing the one it came in
+      with; absent = it keeps what it has */
+  folder?: string
 }
 
 export interface PlanVariant {

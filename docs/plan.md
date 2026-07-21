@@ -489,14 +489,27 @@ Example — Loot layout B:
 
 ### Roles
 
-Each capture group is radio-assigned one of: **model name** (at most one
-group), **model tag**, **variant tag**, **ignore** (any number of groups each).
+Each capture group is assigned one of: **model name**, **creator id**,
+**version**, **folder** (at most one group each, across the whole layout),
+**model tag**, **variant tag**, **ignore** (any number of groups each).
 There is no "variant" role — a variant *is* its tag set, so the union of a
 file's variant-tag captures (after mapping, below) simply *is* its variant,
 materialized per distinct tag set per model via the existing `tag_key`
 get-or-create/merge semantics. Re-running a layout is therefore idempotent.
 A layout with **no** model-name group carves variants within a single model
 (covers layout A's `.3mf` print-config files).
+
+**Folder** is the odd one out: it names no entity, it rewrites the file's own
+`path` with whatever it captured — verbatim, no humanising and no value map,
+since a path is not a title. It is the general case of `flatten`, which rewrites
+the path to nothing, and it exists for the drop whose folders *do* mean
+something but which arrives wrapped in one useless top directory: `Stagetop
+Games Table/PlayTiles/tile.stl` should keep `PlayTiles/` and lose the wrapper,
+which "keep everything" and "keep nothing" both get wrong. A capture may span
+`/`, so a category keeps its own sub-structure; segments that would make the
+path unsafe to store (`..`, empty, `.`) are dropped. The two controls never
+compete: assigning a folder group disables the flatten checkbox, and the carve
+applies the rewrite after flatten so a rule always wins.
 
 Layouts apply to **both destinations**. Under a *one model* destination a
 model-name group isn't a conflict: bundle templates either won't match at all,
@@ -573,6 +586,9 @@ staged file:
   number, which is no longer unique once a layout has several rules.
 - **`invalid_rules`** — indices of rules that contradicted themselves on this
   file, driving the row's warning marker.
+- **`folder`** — the path this file will be stored under, when a folder group
+  captured one; the row shows it as a trailing chip, since the highlight on the
+  path says what was *captured* and this says what the path *becomes*.
 - **resolution** — `{model_name?, model_tags[], variant_tags[]}` *after*
   vocabulary mapping, rendered as trailing chips on each file row
   (`→ Gold · heroes · 32mm supported lychee`). A capture whose value has no

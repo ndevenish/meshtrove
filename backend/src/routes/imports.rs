@@ -931,6 +931,24 @@ async fn commit(
         .await?;
     }
 
+    // A `folder` capture rewrites the path outright — the general case of the
+    // flatten above, which rewrites it to nothing. Applied second so it wins for
+    // the files that resolved one: the drop's useless top folder goes, the
+    // meaningful one under it stays. One statement per distinct folder, not per
+    // file. Same claimed-files rule as flatten, for the same reason: what stays
+    // staged must keep the tree the next pass will match on.
+    if let Some(plan) = &carve {
+        for (folder, ids) in plan.folder_moves(claimed.as_deref()) {
+            sqlx::query!(
+                "UPDATE files SET path = $2 WHERE id = ANY($1::uuid[])",
+                &ids[..],
+                folder,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
     // Drop the original archive: every byte in it is now also on disk as the
     // files it unpacked into, so keeping it charges the store ~1.3-1.5x forever
     // for a copy nobody browses. What survives is the provenance — name, hash,

@@ -57,6 +57,7 @@ export const ROLE_STYLES: Record<GroupRole, { label: string; bg: string }> = {
   model_version: { label: 'Version', bg: 'rgba(0, 137, 123, 0.28)' },
   model_tag: { label: 'Model tag', bg: 'rgba(142, 36, 170, 0.25)' },
   variant_tag: { label: 'Variant tag', bg: 'rgba(46, 125, 50, 0.28)' },
+  folder: { label: 'Folder', bg: 'rgba(84, 110, 122, 0.30)' },
   ignore: { label: 'Ignore', bg: 'transparent' },
 }
 const ROLE_ORDER: GroupRole[] = [
@@ -65,12 +66,13 @@ const ROLE_ORDER: GroupRole[] = [
   'model_version',
   'model_tag',
   'variant_tag',
+  'folder',
   'ignore',
 ]
 /// Roles a layout can only hand out once, across every rule (a model has one
-/// name, one creator, one version) — the server rejects a spec that hands one
-/// out twice.
-const SINGULAR_ROLES: GroupRole[] = ['model_name', 'creator_ref', 'model_version']
+/// name, one creator, one version, and is stored at one path) — the server
+/// rejects a spec that hands one out twice.
+const SINGULAR_ROLES: GroupRole[] = ['model_name', 'creator_ref', 'model_version', 'folder']
 
 /// What a rule is called in a message when the user hasn't named it.
 const ruleLabel = (rule: LayoutRule, index: number): string =>
@@ -227,6 +229,17 @@ export default memo(function ImportLayoutPanel({
   // everything"), so an empty new block never floods the preview.
   const live = rules.filter((rule) => rule.pattern.trim())
 
+  // The rule that claims the folder, by label, if any. It rewrites the path, so
+  // "Discard folders" — which rewrites it to nothing — stands down while it is
+  // there, and never reaches the commit as a competing answer.
+  const folderRule = useMemo(() => {
+    const index = rules.findIndex(
+      (rule) => rule.enabled && rule.pattern.trim() && Object.values(rule.roles).includes('folder'),
+    )
+    return index < 0 ? null : ruleLabel(rules[index], index)
+  }, [rules])
+  const effectiveFlatten = flatten && !folderRule
+
   // Debounced server-side dry run; also the sole source of the parent's spec.
   const onPlanRef = useRef(onPlan)
   onPlanRef.current = onPlan
@@ -242,7 +255,7 @@ export default memo(function ImportLayoutPanel({
     if (unpacking) return
     // Every rule is sent, blanks included, so `plan.rules` stays index-aligned
     // with the editor blocks on screen.
-    const spec: LayoutSpec = { rules, flatten, keep_unmatched: keepUnmatched }
+    const spec: LayoutSpec = { rules, flatten: effectiveFlatten, keep_unmatched: keepUnmatched }
     const timer = setTimeout(async () => {
       try {
         const result = await api.planImport(importId, spec, target, bundleId)
@@ -257,7 +270,17 @@ export default memo(function ImportLayoutPanel({
     }, 400)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [importId, rules, target, fileCount, unpacking, flatten, keepUnmatched, bundleId, live.length])
+  }, [
+    importId,
+    rules,
+    target,
+    fileCount,
+    unpacking,
+    effectiveFlatten,
+    keepUnmatched,
+    bundleId,
+    live.length,
+  ])
 
   // The member each planned model resolves to: an explicit dropdown choice, else
   // the plan's auto-match. Reported up so the commit sends the same array.
@@ -309,7 +332,11 @@ export default memo(function ImportLayoutPanel({
       // Blank rules are scratch, not template: they'd restore as empty blocks in
       // every future import. The enabled toggles *are* saved — they become the
       // template's defaults.
-      await api.createImportLayout({ name: saveName.trim(), rules: live, flatten })
+      await api.createImportLayout({
+        name: saveName.trim(),
+        rules: live,
+        flatten: effectiveFlatten,
+      })
       setSaveName('')
       setSaveError('')
       await queryClient.invalidateQueries({ queryKey: ['import-layouts'] })
@@ -611,7 +638,12 @@ export default memo(function ImportLayoutPanel({
             control={
               <Checkbox
                 size="small"
-                checked={flatten}
+                checked={effectiveFlatten}
+                // A folder group already says what the path becomes, and this
+                // says it becomes nothing: two controls, one column. The rule is
+                // the more specific answer, so it takes the wheel and this steps
+                // aside rather than the two of them fighting at commit.
+                disabled={!!folderRule}
                 onChange={(e) => setFlatten(e.target.checked)}
               />
             }
@@ -619,8 +651,9 @@ export default memo(function ImportLayoutPanel({
               <Box>
                 <Typography variant="body2">Discard folders</Typography>
                 <Typography variant="caption" color="text.secondary">
-                  The carve has already read them — keep the files flat inside the model instead of
-                  nested under the folders they came in.
+                  {folderRule
+                    ? `${folderRule} sets the folder, so this is off — clear its Folder group to discard folders instead.`
+                    : 'The carve has already read them — keep the files flat inside the model instead of nested under the folders they came in.'}
                 </Typography>
               </Box>
             }
@@ -996,6 +1029,17 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
         )}
         {annotation?.matched && (
           <>
+            {annotation.folder !== undefined && (
+              // Where the file will actually live, not where it came from: the
+              // highlight on the left marks what was captured, this says what
+              // the path becomes. An empty capture reads as the model's root.
+              <Chip
+                size="small"
+                icon={<FolderOpenIcon sx={{ fontSize: 14 }} />}
+                label={annotation.folder || '(no folder)'}
+                sx={{ bgcolor: ROLE_STYLES.folder.bg }}
+              />
+            )}
             {annotation.model_name && (
               <Chip
                 size="small"
