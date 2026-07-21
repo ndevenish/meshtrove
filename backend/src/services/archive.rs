@@ -91,8 +91,8 @@ pub struct Volume<'a> {
     /// What the set is called: `Dragon` for `Dragon.part2.rar`.
     pub set: &'a str,
     /// 1-based position. Volume 1 is the only one anything is ever pointed at;
-    /// libarchive walks to the rest by name from there, which is why they have
-    /// to sit in one directory (see [`crate::services::importer`]).
+    /// the rest are read straight after it, as one stream, by the unpack that
+    /// volume 1 was queued for (see [`crate::services::importer`]).
     pub index: u32,
     pub style: VolumeStyle,
 }
@@ -148,6 +148,9 @@ fn named(set: &str) -> Option<&str> {
 
 /// Is this the volume an unpack is pointed at? True for anything that is not a
 /// volume at all, so every other format flows through the callers unchanged.
+///
+/// A set is read from volume 1 onwards in one pass, so volume 1 is where the
+/// one job for the whole set goes.
 pub fn is_first_volume(filename: &str) -> bool {
     volume_of(filename).is_none_or(|volume| volume.index == 1)
 }

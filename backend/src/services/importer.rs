@@ -74,11 +74,8 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
 
     let format = archive::format_of(&archive.filename)
         .ok_or_else(|| anyhow!("{} is not an archive format we unpack", archive.filename))?;
-    // Two dirs, not one: `out` is walked afterwards for what came out, so the
-    // volume links a multi-volume set needs can't live in it.
-    let work = std::env::temp_dir().join(format!("meshtrove-import-{}", Uuid::new_v4()));
-    let tmp_dir = work.join("out");
-    let entries = match stage_volumes(
+    let tmp_dir = std::env::temp_dir().join(format!("meshtrove-import-{}", Uuid::new_v4()));
+    let entries = match volume_blobs(
         state,
         Volume {
             file_id: payload.archive_file_id,
@@ -87,26 +84,29 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
             path: &archive.path,
             owner: (model_id, variant_id, bundle_id, import_id),
         },
-        &work,
     )
     .await
     {
-        Ok(source) => {
-            let source = source.unwrap_or(archive_path);
-            extract(format, &source, &tmp_dir).await
+        Ok(volumes) => {
+            let sources = if volumes.is_empty() {
+                vec![archive_path]
+            } else {
+                volumes
+            };
+            extract(format, &sources, &tmp_dir).await
         }
         Err(error) => Err(error),
     };
     let entries = match entries {
         Ok(entries) => entries,
         Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&work).await;
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
             return Err(error);
         }
     };
 
     if entries.is_empty() {
-        let _ = tokio::fs::remove_dir_all(&work).await;
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         return Err(anyhow!("archive contained no usable files"));
     }
 
@@ -166,7 +166,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         }
     }
 
-    let _ = tokio::fs::remove_dir_all(&work).await;
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
 
     // Queue a preview render for the owner's first STL if it has no image yet.
     // The renderer stamps the image onto whichever owner the source file
@@ -261,7 +261,7 @@ pub async fn requeue_missed_archives(state: &AppState) -> Result<()> {
             .await?;
         }
         // The set unpacks from volume 1, which gets the one job; the volumes
-        // behind it are opened as part of it (see `stage_volumes`).
+        // behind it are opened as part of it (see `volume_blobs`).
         if !archive::is_first_volume(&file.filename) {
             continue;
         }
@@ -289,7 +289,7 @@ pub async fn requeue_missed_archives(state: &AppState) -> Result<()> {
 /// `libarchive-tools`; the Dockerfile installs it beside f3d.
 const BSDTAR: &str = "bsdtar";
 
-/// The archive an unpack was queued for, as [`stage_volumes`] needs to see it:
+/// The archive an unpack was queued for, as [`volume_blobs`] needs to see it:
 /// enough to find the rest of its set, which is the files sharing its owner and
 /// its folder.
 struct Volume<'a> {
@@ -302,29 +302,25 @@ struct Volume<'a> {
     owner: (Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<Uuid>),
 }
 
-/// Put every volume of a multi-volume rar in one directory under its real name,
-/// and return the path to volume 1 — what bsdtar should be pointed at instead of
-/// the blob. `None` when `archive` is not part of a set, which is every other
-/// archive there is.
+/// Every volume of a multi-volume rar, in volume order, as blob paths — what
+/// bsdtar is fed instead of the one blob the job names. Empty when `archive` is
+/// not part of a set, which is every other archive there is.
 ///
 /// This is the whole reason a `.partN.rar` needs handling at all. libarchive
-/// reads a set by opening volume 1 and then *guessing the next volume's
-/// filename* from it, in the same directory. Our copy of each volume is a blob
-/// at `store/ab/cd/<sha256>` — no name to guess from, no two volumes in one
-/// directory — so pointing bsdtar at the blob gets volume 1's worth of files and
-/// a "truncated archive" error. A directory of symlinks costs nothing (the bytes
-/// stay in the store, read straight through the link) and gives libarchive
-/// exactly the layout it expects.
+/// unpacks a set as **one continuous byte stream**: at the end of a volume it
+/// scans forward *in the stream it was handed* for the next volume's signature
+/// (`scan_for_signature` in `archive_read_support_format_rar5.c`). It never
+/// opens the next volume itself — switching files is the caller's job, and
+/// `bsdtar -f <volume 1>` has no way to do it. Point it at volume 1 alone and it
+/// unpacks that volume's worth of files and then either stops quietly or fails
+/// on a truncated block, which is what the jobs page was showing.
 ///
-/// Symlinks, not hardlinks: the scratch dir and the store are routinely on
-/// different filesystems, and a hardlink can't cross one.
-async fn stage_volumes(
-    state: &AppState,
-    archive: Volume<'_>,
-    work: &std::path::Path,
-) -> Result<Option<std::path::PathBuf>> {
+/// So the volumes are concatenated into bsdtar's stdin instead (see
+/// [`extract_libarchive`]): the stream a set is meant to be read as, without
+/// copying a byte of it out of the store.
+async fn volume_blobs(state: &AppState, archive: Volume<'_>) -> Result<Vec<std::path::PathBuf>> {
     let Some(mine) = archive::volume_of(archive.filename) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let (model_id, variant_id, bundle_id, import_id) = archive.owner;
     // Everything else staged in the same bucket, in the same folder. Which of
@@ -357,7 +353,7 @@ async fn stage_volumes(
     if set.is_empty() {
         // A lone `.rar` reads as volume 1 of a set of one — which is just an
         // archive, and unpacks straight from its blob like every other one.
-        return Ok(None);
+        return Ok(Vec::new());
     }
     set.push((
         mine.index,
@@ -386,59 +382,33 @@ async fn stage_volumes(
         }
     }
 
-    let dir = work.join("volumes");
-    tokio::fs::create_dir_all(&dir).await?;
-    for (_, name, sha256) in &set {
-        // The link name comes from a filename column, which is a name and not a
-        // path — but a link that escaped `dir` would be one bsdtar happily reads
-        // and writes through, so this is checked rather than assumed.
-        if name.contains('/') || name.contains('\\') || name.starts_with('.') {
-            return Err(anyhow!("{name:?} is not a usable volume name"));
-        }
-        // Absolute: the link lives in the scratch dir, so a store path relative
-        // to the working directory would not resolve from there.
-        let blob = std::fs::canonicalize(state.store.path_for(sha256))
-            .with_context(|| format!("locating the blob for volume {name}"))?;
-        link_volume(&blob, &dir.join(name))
-            .with_context(|| format!("staging volume {name} for the unpack"))?;
-    }
     tracing::info!(
         set = archive::stem_of(archive.filename),
         volumes = set.len(),
         "unpacking a multi-volume archive"
     );
-    Ok(Some(dir.join(archive.filename)))
+    Ok(set
+        .iter()
+        .map(|(_, _, sha256)| state.store.path_for(sha256))
+        .collect())
 }
 
-/// One volume in place under the name libarchive will look for.
-#[cfg(unix)]
-fn link_volume(blob: &std::path::Path, link: &std::path::Path) -> Result<()> {
-    std::os::unix::fs::symlink(blob, link)?;
-    Ok(())
-}
-
-/// No symlinks to rely on: copy the blob instead. Costs the bytes, and only on
-/// a platform we don't deploy to.
-#[cfg(not(unix))]
-fn link_volume(blob: &std::path::Path, link: &std::path::Path) -> Result<()> {
-    std::fs::copy(blob, link)?;
-    Ok(())
-}
-
-/// Unpack `archive_path` into a fresh `tmp_dir`, returning each file as
+/// Unpack `sources` into a fresh `tmp_dir`, returning each file as
 /// `(logical path within the archive, path on disk)`. The caller owns `tmp_dir`
 /// and removes it once the files have been read into the store.
+///
+/// `sources` is one blob for every archive there is, and the volumes of a rar
+/// set in volume order for the one case that isn't (see [`volume_blobs`]).
 async fn extract(
     format: archive::Format,
-    archive_path: &std::path::Path,
+    sources: &[std::path::PathBuf],
     tmp_dir: &std::path::Path,
 ) -> Result<Vec<(String, std::path::PathBuf)>> {
     tokio::fs::create_dir_all(tmp_dir).await?;
     match format {
-        archive::Format::Zip => {
-            extract_zip(archive_path.to_path_buf(), tmp_dir.to_path_buf()).await
-        }
-        archive::Format::Libarchive => extract_libarchive(archive_path, tmp_dir).await,
+        // A zip is never a volume of anything, so there is only ever one.
+        archive::Format::Zip => extract_zip(sources[0].to_path_buf(), tmp_dir.to_path_buf()).await,
+        archive::Format::Libarchive => extract_libarchive(sources, tmp_dir).await,
     }
 }
 
@@ -482,29 +452,42 @@ async fn extract_zip(
 /// Everything else goes through bsdtar, which unpacks the real tree into
 /// `tmp_dir`; the logical paths are then read back off the filesystem.
 ///
+/// One blob is handed over as a path. A multi-volume set is *poured* in through
+/// stdin instead, one volume after another: libarchive reads a set as a single
+/// stream and expects whoever opened it to move on to the next volume at the
+/// boundary (see [`volume_blobs`]), which is exactly what concatenating them
+/// does. Same bytes, no copy — the volumes are read straight out of the store.
+///
 /// Path safety is bsdtar's: without `-P` it strips leading slashes and refuses
 /// entries that climb out with `..`, so nothing lands outside `tmp_dir`.
 /// `--no-same-permissions` applies the umask instead of the archive's modes —
 /// an entry recorded as mode 000, or a directory with no `+x`, would otherwise
 /// unpack into something we can't read back or delete.
 async fn extract_libarchive(
-    archive_path: &std::path::Path,
+    sources: &[std::path::PathBuf],
     tmp_dir: &std::path::Path,
 ) -> Result<Vec<(String, std::path::PathBuf)>> {
-    let output = tokio::process::Command::new(BSDTAR)
+    let mut command = tokio::process::Command::new(BSDTAR);
+    command
         .arg("-x")
         .arg("--no-same-owner")
         .arg("--no-same-permissions")
-        .arg("-f")
-        .arg(archive_path)
-        .arg("-C")
-        .arg(tmp_dir)
-        // An encrypted archive asks for a passphrase; with no stdin it fails
-        // and the job records the error, instead of hanging a worker forever.
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("launching {BSDTAR} — is libarchive-tools installed?"))?;
+        .arg("-f");
+    let output = if sources.len() == 1 {
+        command
+            .arg(&sources[0])
+            .arg("-C")
+            .arg(tmp_dir)
+            // An encrypted archive asks for a passphrase; with no stdin it
+            // fails and the job records the error, instead of hanging a worker
+            // forever.
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .with_context(|| format!("launching {BSDTAR} — is libarchive-tools installed?"))?
+    } else {
+        pour_volumes(command.arg("-").arg("-C").arg(tmp_dir), sources).await?
+    };
     if !output.status.success() {
         return Err(anyhow!(
             "{BSDTAR} exited with {}: {}",
@@ -525,6 +508,55 @@ async fn extract_libarchive(
     })
     .await
     .context("walk task panicked")?
+}
+
+/// Run `command` with `volumes` written to its stdin back to back, and collect
+/// what it said.
+///
+/// The writing and the waiting have to happen together: bsdtar consumes stdin as
+/// it unpacks, and a set runs to gigabytes, so waiting on the child first would
+/// fill the pipe and deadlock with both sides waiting on the other. A child that
+/// gives up early — a corrupt volume, a passphrase it has no way to ask for —
+/// closes the pipe, and that broken pipe is swallowed so the job reports
+/// bsdtar's own complaint rather than ours about writing to it.
+async fn pour_volumes(
+    command: &mut tokio::process::Command,
+    volumes: &[std::path::PathBuf],
+) -> Result<std::process::Output> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("launching {BSDTAR} — is libarchive-tools installed?"))?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let volumes: Vec<std::path::PathBuf> = volumes.to_vec();
+    let feed = tokio::spawn(async move {
+        for volume in &volumes {
+            let mut blob = tokio::fs::File::open(volume)
+                .await
+                .with_context(|| format!("opening volume blob {}", volume.display()))?;
+            if let Err(error) = tokio::io::copy(&mut blob, &mut stdin).await {
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(anyhow::Error::new(error)
+                    .context(format!("feeding {} to {BSDTAR}", volume.display())));
+            }
+        }
+        // EOF, or bsdtar waits on a volume that isn't coming.
+        stdin.shutdown().await.ok();
+        Ok(())
+    });
+
+    let output = child
+        .wait_with_output()
+        .await
+        .with_context(|| format!("waiting for {BSDTAR}"))?;
+    feed.await.context("the volume feed panicked")??;
+    Ok(output)
 }
 
 /// Take the permission bits we need to read an entry back.
@@ -713,7 +745,9 @@ mod tests {
         assert!(built.success(), "building {name}");
 
         let out = root.join("out");
-        let entries = extract(Format::Libarchive, &archive, &out).await.unwrap();
+        let entries = extract(Format::Libarchive, std::slice::from_ref(&archive), &out)
+            .await
+            .unwrap();
         let mut paths: Vec<String> = entries
             .into_iter()
             .map(|(logical, on_disk)| {
@@ -739,28 +773,24 @@ mod tests {
         }
     }
 
-    /// A multi-volume set is unpacked through a directory of symlinks named
-    /// after its volumes, because a blob has no name for libarchive to walk the
-    /// set by (see [`super::stage_volumes`]). Building a real multi-volume rar
-    /// needs the non-free `rar` to write one, so what is checked here is the
-    /// half we own: bsdtar reads the archive perfectly well when the path it is
-    /// given is a link into the store under a made-up name.
-    #[cfg(unix)]
+    /// A multi-volume set is unpacked by pouring its volumes into bsdtar's
+    /// stdin one after another, because libarchive reads a set as one stream and
+    /// leaves switching volumes to whoever opened it (see
+    /// [`super::volume_blobs`]). Writing a real multi-volume rar needs the
+    /// non-free `rar`, so the half we own is checked with an archive cut in two
+    /// by hand: separate files, one stream, and the contents come back whole
+    /// only if every byte was poured in, in order.
     #[tokio::test]
-    async fn an_archive_unpacks_through_a_link_named_after_it() {
+    async fn volumes_unpack_as_one_stream() {
         let root = std::env::temp_dir().join(format!("meshtrove-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("store")).unwrap();
-        std::fs::create_dir_all(root.join("volumes")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("src.stl"), "solid body").unwrap();
 
-        // Stand in for a blob: content-addressed, so no extension and no name.
-        let blob = root.join("store/9f86d081884c7d659a2feaa0c55ad015");
+        let whole = root.join("whole.tar");
         let built = tokio::process::Command::new(BSDTAR)
-            .arg("-a")
             .arg("-c")
-            .arg("--format=7zip")
             .arg("-f")
-            .arg(&blob)
+            .arg(&whole)
             .arg("-C")
             .arg(&root)
             .arg("src.stl")
@@ -775,13 +805,27 @@ mod tests {
             }
         }
 
-        let link = root.join("volumes/Dragon.part1.rar");
-        std::os::unix::fs::symlink(&blob, &link).unwrap();
-        let entries = extract(Format::Libarchive, &link, &root.join("out"))
+        // Two "volumes": neither is an archive on its own, and only the pair
+        // read back to back is one.
+        let bytes = std::fs::read(&whole).unwrap();
+        let (head, tail) = bytes.split_at(bytes.len() / 2);
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::write(&first, head).unwrap();
+        std::fs::write(&second, tail).unwrap();
+
+        let entries = extract(Format::Libarchive, &[first, second], &root.join("out"))
             .await
             .unwrap();
-        let paths: Vec<String> = entries.into_iter().map(|(logical, _)| logical).collect();
+        let paths: Vec<String> = entries
+            .iter()
+            .map(|(logical, _)| logical.to_string())
+            .collect();
         assert_eq!(paths, vec!["src.stl"]);
+        assert_eq!(
+            std::fs::read_to_string(&entries[0].1).unwrap(),
+            "solid body"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

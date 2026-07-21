@@ -111,7 +111,7 @@ pub fn scan(entry: &Path) -> Result<Vec<DropFile>> {
 /// this each becomes its own import and volume 1's unpack fails on an archive
 /// that is two thirds missing. Gathered up, they stage into one import at one
 /// path, which is what the unpack needs (see
-/// [`crate::services::importer::stage_volumes`]).
+/// [`crate::services::importer::volume_blobs`]).
 pub fn volumes_beside(entry: &Path, name: &str) -> Result<Vec<PathBuf>> {
     use crate::services::archive;
     let is_first = archive::volume_of(name).is_some_and(|v| v.index == 1);
