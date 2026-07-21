@@ -9,10 +9,11 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::services::blobstore::BlobStore;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -29,6 +31,27 @@ pub fn router() -> Router<AppState> {
             "/api/custom-fields/{id}",
             axum::routing::put(update).delete(remove),
         )
+        // Values: scalars ride along with the owner's edit, but a file-kind one
+        // is bytes, so it gets its own multipart endpoint per owner.
+        .route(
+            "/api/models/{id}/custom-fields/{field_id}/file",
+            post(upload_model_file),
+        )
+        .route(
+            "/api/bundles/{id}/custom-fields/{field_id}/file",
+            post(upload_bundle_file),
+        )
+        .route(
+            "/api/models/{id}/custom-fields/{field_id}",
+            axum::routing::delete(clear_model_value),
+        )
+        .route(
+            "/api/bundles/{id}/custom-fields/{field_id}",
+            axum::routing::delete(clear_bundle_value),
+        )
+        // The store streams to disk; a reference document has no business being
+        // capped at axum's default 2MB either.
+        .layer(DefaultBodyLimit::disable())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
@@ -333,6 +356,478 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---------------------------------------------------------------------------
+// values
+// ---------------------------------------------------------------------------
+
+/// Which side of the model/bundle divide a value hangs off. A value has exactly
+/// one owner, the same way a file does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueOwner {
+    Model(Uuid),
+    Bundle(Uuid),
+}
+
+impl ValueOwner {
+    /// The pair of nullable owner columns, in `(model_id, bundle_id)` order.
+    fn ids(self) -> (Option<Uuid>, Option<Uuid>) {
+        match self {
+            ValueOwner::Model(id) => (Some(id), None),
+            ValueOwner::Bundle(id) => (None, Some(id)),
+        }
+    }
+
+    async fn created_by(self, state: &AppState) -> Result<Uuid, ApiError> {
+        match self {
+            ValueOwner::Model(id) => crate::routes::models::model_created_by(state, id).await,
+            ValueOwner::Bundle(id) => crate::routes::bundles::bundle_created_by(state, id).await,
+        }
+    }
+}
+
+/// The file behind a file-kind value. Downloaded through the ordinary
+/// `/api/files/{id}/download`, which gates it on the field's visibility.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CustomFieldFile {
+    pub file_id: Uuid,
+    pub filename: String,
+    pub mime: Option<String>,
+    pub size: i64,
+}
+
+/// One field as it appears on a model or bundle: the definition, plus whatever
+/// this owner has stored under it. Every *applicable and visible* field is
+/// listed, set or not, so an editor sees the blanks it could fill in.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CustomFieldValueDetail {
+    pub field: CustomField,
+    /// Unset is null. Always null for a file-kind field — see `file`.
+    #[schema(value_type = Object)]
+    pub value: Option<serde_json::Value>,
+    pub file: Option<CustomFieldFile>,
+}
+
+/// One scalar write, as carried in a model/bundle edit. A null `value` clears.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CustomFieldValueInput {
+    pub field_id: Uuid,
+    #[schema(value_type = Object)]
+    pub value: Option<serde_json::Value>,
+}
+
+/// Every field applicable to this owner that `user` is allowed to see, in
+/// display order, with its value. Embedded in the model and bundle detail
+/// responses.
+pub async fn fetch_values(
+    state: &AppState,
+    owner: ValueOwner,
+    user: &User,
+) -> Result<Vec<CustomFieldValueDetail>, ApiError> {
+    let (model_id, bundle_id) = owner.ids();
+    // `IS NOT DISTINCT FROM` on both owner columns picks exactly this owner's
+    // value with one query for either side: the null column matches the null
+    // stored in the row that isn't the owner.
+    let rows = sqlx::query!(
+        r#"SELECT cf.id, cf.key as "key: String", cf.name,
+                  cf.kind as "kind: CustomFieldKind", cf.options,
+                  cf.applies_to_models, cf.applies_to_bundles,
+                  cf.bundle_persists_to_model, cf.bundle_persist_overwrites,
+                  cf.visibility as "visibility: CustomFieldVisibility", cf.position,
+                  v.value,
+                  f.id as "file_id?", f.filename as "filename?", f.mime as "mime?",
+                  b.size as "size?"
+           FROM custom_fields cf
+           LEFT JOIN custom_field_values v ON v.field_id = cf.id
+                AND v.model_id IS NOT DISTINCT FROM $1
+                AND v.bundle_id IS NOT DISTINCT FROM $2
+           LEFT JOIN files f ON f.custom_field_value_id = v.id
+           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256
+           WHERE CASE WHEN $1::uuid IS NULL THEN cf.applies_to_bundles ELSE cf.applies_to_models END
+           ORDER BY cf.position, cf.name"#,
+        model_id,
+        bundle_id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|r| user.can_see(r.visibility))
+        .map(|r| CustomFieldValueDetail {
+            file: match (r.file_id, r.filename, r.size) {
+                (Some(file_id), Some(filename), Some(size)) => Some(CustomFieldFile {
+                    file_id,
+                    filename,
+                    mime: r.mime,
+                    size,
+                }),
+                _ => None,
+            },
+            value: r.value,
+            field: CustomField {
+                id: r.id,
+                key: r.key,
+                name: r.name,
+                kind: r.kind,
+                options: r.options,
+                applies_to_models: r.applies_to_models,
+                applies_to_bundles: r.applies_to_bundles,
+                bundle_persists_to_model: r.bundle_persists_to_model,
+                bundle_persist_overwrites: r.bundle_persist_overwrites,
+                visibility: r.visibility,
+                position: r.position,
+            },
+        })
+        .collect())
+}
+
+/// Coerce a submitted value into what the kind stores, or `None` for "clear
+/// it". A blank text box and an unticked rating are erasures, not values: the
+/// UI has no separate "unset" gesture, so the empty form state has to mean it.
+fn validate_value(
+    field: &CustomField,
+    value: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    let name = &field.name;
+    match field.kind {
+        CustomFieldKind::Text => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| ApiError::BadRequest(format!("{name} takes text")))?
+                .trim();
+            Ok((!text.is_empty()).then(|| json!(text)))
+        }
+        CustomFieldKind::Checkbox => {
+            let ticked = value
+                .as_bool()
+                .ok_or_else(|| ApiError::BadRequest(format!("{name} takes true or false")))?;
+            Ok(Some(json!(ticked)))
+        }
+        CustomFieldKind::Choice => {
+            let choice = value
+                .as_str()
+                .ok_or_else(|| ApiError::BadRequest(format!("{name} takes one of its choices")))?
+                .trim();
+            if choice.is_empty() {
+                return Ok(None);
+            }
+            let allowed = field
+                .options
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .map(|c| c.iter().any(|v| v.as_str() == Some(choice)))
+                .unwrap_or(false);
+            if !allowed {
+                return Err(ApiError::BadRequest(format!(
+                    "{choice:?} is not one of {name}'s choices"
+                )));
+            }
+            Ok(Some(json!(choice)))
+        }
+        CustomFieldKind::Rating => {
+            let stars = value
+                .as_i64()
+                .ok_or_else(|| ApiError::BadRequest(format!("{name} takes a number of stars")))?;
+            if stars <= 0 {
+                return Ok(None);
+            }
+            let max = field
+                .options
+                .get("max")
+                .and_then(|m| m.as_i64())
+                .unwrap_or(DEFAULT_RATING_MAX);
+            if stars > max {
+                return Err(ApiError::BadRequest(format!("{name} goes up to {max}")));
+            }
+            Ok(Some(json!(stars)))
+        }
+        // A file arrives as bytes on its own endpoint; there is nothing for a
+        // JSON edit to say about it.
+        CustomFieldKind::File => Err(ApiError::BadRequest(format!(
+            "{name} is a file field — upload to it instead"
+        ))),
+    }
+}
+
+/// Load one definition, insisting it exists and applies to this kind of owner.
+async fn field_for(
+    db: &mut sqlx::PgConnection,
+    owner: ValueOwner,
+    field_id: Uuid,
+) -> Result<CustomField, ApiError> {
+    let field = sqlx::query_as!(
+        CustomField,
+        r#"SELECT id, key as "key: String", name,
+                  kind as "kind: CustomFieldKind", options,
+                  applies_to_models, applies_to_bundles,
+                  bundle_persists_to_model, bundle_persist_overwrites,
+                  visibility as "visibility: CustomFieldVisibility", position
+           FROM custom_fields WHERE id = $1"#,
+        field_id,
+    )
+    .fetch_optional(&mut *db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let applies = match owner {
+        ValueOwner::Model(_) => field.applies_to_models,
+        ValueOwner::Bundle(_) => field.applies_to_bundles,
+    };
+    if !applies {
+        return Err(ApiError::BadRequest(format!(
+            "{} doesn't apply to {}",
+            field.name,
+            match owner {
+                ValueOwner::Model(_) => "models",
+                ValueOwner::Bundle(_) => "bundles",
+            }
+        )));
+    }
+    Ok(field)
+}
+
+/// Store one already-validated value (or clear it when `value` is None).
+/// Returns the value row's id when it still exists.
+async fn write_value(
+    db: &mut sqlx::PgConnection,
+    owner: ValueOwner,
+    field_id: Uuid,
+    value: Option<&serde_json::Value>,
+    editor: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    let (model_id, bundle_id) = owner.ids();
+    let Some(value) = value else {
+        // Clearing takes the row with it, and the row takes any file-kind blob's
+        // `files` row with it in turn (ON DELETE CASCADE).
+        sqlx::query!(
+            "DELETE FROM custom_field_values
+             WHERE field_id = $1
+               AND model_id IS NOT DISTINCT FROM $2
+               AND bundle_id IS NOT DISTINCT FROM $3",
+            field_id,
+            model_id,
+            bundle_id,
+        )
+        .execute(&mut *db)
+        .await?;
+        return Ok(None);
+    };
+    let id = match owner {
+        ValueOwner::Model(model_id) => {
+            sqlx::query_scalar!(
+                "INSERT INTO custom_field_values (field_id, model_id, value, updated_by)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (field_id, model_id) WHERE model_id IS NOT NULL
+                 DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by,
+                               updated_at = now()
+                 RETURNING id",
+                field_id,
+                model_id,
+                value,
+                editor,
+            )
+            .fetch_one(&mut *db)
+            .await?
+        }
+        ValueOwner::Bundle(bundle_id) => {
+            sqlx::query_scalar!(
+                "INSERT INTO custom_field_values (field_id, bundle_id, value, updated_by)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (field_id, bundle_id) WHERE bundle_id IS NOT NULL
+                 DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by,
+                               updated_at = now()
+                 RETURNING id",
+                field_id,
+                bundle_id,
+                value,
+                editor,
+            )
+            .fetch_one(&mut *db)
+            .await?
+        }
+    };
+    Ok(Some(id))
+}
+
+/// The `updated_by` to record: the synthetic `--anonymous` admin has the nil id
+/// and no `users` row to point at.
+fn editor_id(user: &User) -> Option<Uuid> {
+    (!user.id.is_nil()).then_some(user.id)
+}
+
+/// Write the scalar values carried by a model/bundle edit, inside that edit's
+/// transaction. File-kind fields are rejected here — they have their own
+/// endpoint, because their payload is bytes, not JSON.
+pub async fn apply_values(
+    tx: &mut sqlx::PgConnection,
+    owner: ValueOwner,
+    inputs: &[CustomFieldValueInput],
+    user: &User,
+) -> Result<(), ApiError> {
+    for input in inputs {
+        let field = field_for(tx, owner, input.field_id).await?;
+        let value = match &input.value {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => validate_value(&field, value)?,
+        };
+        write_value(tx, owner, field.id, value.as_ref(), editor_id(user)).await?;
+    }
+    Ok(())
+}
+
+async fn upload_model_file(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, field_id)): Path<(Uuid, Uuid)>,
+    multipart: Multipart,
+) -> Result<Json<CustomFieldValueDetail>, ApiError> {
+    upload_file(state, user, ValueOwner::Model(id), field_id, multipart).await
+}
+
+async fn upload_bundle_file(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, field_id)): Path<(Uuid, Uuid)>,
+    multipart: Multipart,
+) -> Result<Json<CustomFieldValueDetail>, ApiError> {
+    upload_file(state, user, ValueOwner::Bundle(id), field_id, multipart).await
+}
+
+/// Replace a file-kind value's file. One `file` part; anything else is ignored.
+/// Deliberately *not* routed through the ordinary upload path: a zip attached as
+/// a reference document is a reference document, and must not be unpacked into
+/// the model the way a dropped archive would be.
+async fn upload_file(
+    state: AppState,
+    user: User,
+    owner: ValueOwner,
+    field_id: Uuid,
+    mut multipart: Multipart,
+) -> Result<Json<CustomFieldValueDetail>, ApiError> {
+    user.require_can_edit(owner.created_by(&state).await?)?;
+    let mut conn = state.db.acquire().await?;
+    let field = field_for(&mut conn, owner, field_id).await?;
+    if !matches!(field.kind, CustomFieldKind::File) {
+        return Err(ApiError::BadRequest(format!(
+            "{} is not a file field",
+            field.name
+        )));
+    }
+
+    // As in routes/files.rs: read the body out before answering, or the browser
+    // sees a reset connection instead of the error it should have shown.
+    let (filename, mime, sha256, size) = match consume_one_file(&state, &mut multipart).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            while let Ok(Some(_)) = multipart.next_field().await {}
+            return Err(e);
+        }
+    };
+
+    // Swap the file over only once the new bytes are safely stored, so a failed
+    // upload leaves the previous file in place. A file-kind value carries no
+    // JSON of its own; the row exists purely to own the `files` row.
+    let value_id = write_value(
+        &mut conn,
+        owner,
+        field.id,
+        Some(&json!(null)),
+        editor_id(&user),
+    )
+    .await?
+    .expect("a written value has a row");
+    sqlx::query!(
+        "DELETE FROM files WHERE custom_field_value_id = $1",
+        value_id
+    )
+    .execute(&mut *conn)
+    .await?;
+    crate::routes::files::insert_file(
+        &state,
+        crate::routes::files::Owner::CustomFieldValue(value_id),
+        &sha256,
+        size,
+        "",
+        &filename,
+        mime,
+        crate::routes::files::guess_kind(&filename),
+    )
+    .await?;
+
+    one_value(&state, owner, field.id, &user).await.map(Json)
+}
+
+/// Pull the first `file` part out of the body and into the blob store.
+async fn consume_one_file(
+    state: &AppState,
+    multipart: &mut Multipart,
+) -> Result<(String, Option<String>, String, i64), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("bad multipart body: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field
+            .file_name()
+            .ok_or_else(|| ApiError::BadRequest("file field needs a filename".into()))?
+            .to_string();
+        let mime = mime_guess::from_path(&filename)
+            .first()
+            .map(|m| m.to_string());
+        let stream = field.map_err(|e| anyhow::Error::new(e).context("upload stream failed"));
+        let blob = state.store.put(stream).await?;
+        return Ok((filename, mime, blob.sha256, blob.size));
+    }
+    Err(ApiError::BadRequest("no file field in upload".into()))
+}
+
+async fn clear_model_value(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, field_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    clear_value(state, user, ValueOwner::Model(id), field_id).await
+}
+
+async fn clear_bundle_value(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, field_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    clear_value(state, user, ValueOwner::Bundle(id), field_id).await
+}
+
+/// Unset one field on one owner. Any file-kind blob's `files` row goes with the
+/// value row; the bytes themselves are freed by the next GC sweep.
+async fn clear_value(
+    state: AppState,
+    user: User,
+    owner: ValueOwner,
+    field_id: Uuid,
+) -> Result<StatusCode, ApiError> {
+    user.require_can_edit(owner.created_by(&state).await?)?;
+    let mut conn = state.db.acquire().await?;
+    write_value(&mut conn, owner, field_id, None, editor_id(&user)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The one field's entry, as the detail endpoints would render it.
+async fn one_value(
+    state: &AppState,
+    owner: ValueOwner,
+    field_id: Uuid,
+    user: &User,
+) -> Result<CustomFieldValueDetail, ApiError> {
+    fetch_values(state, owner, user)
+        .await?
+        .into_iter()
+        .find(|v| v.field.id == field_id)
+        .ok_or(ApiError::NotFound)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +908,74 @@ mod tests {
                 json!({})
             );
         }
+    }
+
+    fn field(kind: CustomFieldKind, options: serde_json::Value) -> CustomField {
+        CustomField {
+            id: Uuid::nil(),
+            key: "f".into(),
+            name: "Field".into(),
+            kind,
+            options,
+            applies_to_models: true,
+            applies_to_bundles: false,
+            bundle_persists_to_model: false,
+            bundle_persist_overwrites: false,
+            visibility: CustomFieldVisibility::Anonymous,
+            position: 0,
+        }
+    }
+
+    /// The edit form has no separate "unset" gesture, so an emptied control has
+    /// to mean erase — but an unticked checkbox is a real answer, not a blank.
+    #[test]
+    fn emptied_controls_clear_the_value() {
+        let text = field(CustomFieldKind::Text, json!({}));
+        assert_eq!(validate_value(&text, &json!("  ")).unwrap(), None);
+        assert_eq!(
+            validate_value(&text, &json!(" hi ")).unwrap(),
+            Some(json!("hi"))
+        );
+
+        let rating = field(CustomFieldKind::Rating, json!({"max": 5}));
+        assert_eq!(validate_value(&rating, &json!(0)).unwrap(), None);
+        assert_eq!(validate_value(&rating, &json!(3)).unwrap(), Some(json!(3)));
+
+        let checkbox = field(CustomFieldKind::Checkbox, json!({}));
+        assert_eq!(
+            validate_value(&checkbox, &json!(false)).unwrap(),
+            Some(json!(false))
+        );
+    }
+
+    #[test]
+    fn values_are_checked_against_the_kind() {
+        let choice = field(
+            CustomFieldKind::Choice,
+            json!({"choices": ["PLA", "Resin"]}),
+        );
+        assert_eq!(
+            validate_value(&choice, &json!("Resin")).unwrap(),
+            Some(json!("Resin"))
+        );
+        assert_eq!(validate_value(&choice, &json!("")).unwrap(), None);
+        assert!(validate_value(&choice, &json!("Steel")).is_err());
+
+        let rating = field(CustomFieldKind::Rating, json!({"max": 3}));
+        assert!(validate_value(&rating, &json!(4)).is_err());
+        assert!(validate_value(&rating, &json!("three")).is_err());
+
+        assert!(
+            validate_value(&field(CustomFieldKind::Checkbox, json!({})), &json!("yes")).is_err()
+        );
+    }
+
+    /// A file arrives as bytes on its own endpoint; a JSON edit has nothing to
+    /// say about it, and quietly ignoring the attempt would hide a real mistake.
+    #[test]
+    fn a_file_field_cannot_be_written_as_json() {
+        let file = field(CustomFieldKind::File, json!({}));
+        assert!(validate_value(&file, &json!("something.pdf")).is_err());
     }
 
     #[test]

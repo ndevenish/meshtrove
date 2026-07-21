@@ -16,6 +16,9 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::{
+    CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
+};
 use crate::routes::tags::upsert_tag;
 use crate::routes::variants::{VariantDetail, fetch_variants};
 use crate::state::AppState;
@@ -262,6 +265,9 @@ pub struct ModelInput {
     pub tags: Vec<String>,
     /// Initial markdown description (creates revision 1)
     pub description_md: Option<String>,
+    /// Admin-defined extra fields to write alongside the built-in ones. Absent
+    /// means "leave them alone"; an entry with a null value clears that field.
+    pub custom_fields: Option<Vec<CustomFieldValueInput>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -280,6 +286,9 @@ pub struct ModelDetail {
     pub order_ref: Option<String>,
     pub tags: Vec<String>,
     pub description_md: Option<String>,
+    /// Every custom field that applies to models and that the caller may see,
+    /// set or not, in display order.
+    pub custom_fields: Vec<CustomFieldValueDetail>,
     pub variants: Vec<VariantDetail>,
     pub images: Vec<ImageSummary>,
     /// Bundles this model is a member of (so the UI can link, and avoid
@@ -412,12 +421,15 @@ async fn create(
         .execute(&mut *tx)
         .await?;
     }
+    if let Some(values) = &input.custom_fields {
+        apply_values(&mut tx, ValueOwner::Model(model_id), values, &user).await?;
+    }
     tx.commit().await?;
 
-    fetch_detail(&state, model_id).await.map(Json)
+    fetch_detail(&state, model_id, &user).await.map(Json)
 }
 
-async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiError> {
+async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<ModelDetail, ApiError> {
     let row = sqlx::query!(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?",
                   m.creator_ref, m.model_version,
@@ -471,6 +483,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
     .await?;
 
     let variants = fetch_variants(state, id).await?;
+    let custom_fields = fetch_values(state, ValueOwner::Model(id), user).await?;
 
     let bundles = sqlx::query_as!(
         BundleRef,
@@ -497,6 +510,7 @@ async fn fetch_detail(state: &AppState, id: Uuid) -> Result<ModelDetail, ApiErro
         order_ref: row.order_ref,
         tags: row.tags,
         description_md: row.description_md,
+        custom_fields,
         variants,
         bundles,
         images: images
@@ -531,11 +545,11 @@ pub async fn resolve_id(state: &AppState, key: &str) -> Result<Uuid, ApiError> {
 
 async fn detail(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Path(key): Path<String>,
 ) -> Result<Json<ModelDetail>, ApiError> {
     let id = resolve_id(&state, &key).await?;
-    fetch_detail(&state, id).await.map(Json)
+    fetch_detail(&state, id, &user).await.map(Json)
 }
 
 pub async fn model_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiError> {
@@ -594,9 +608,12 @@ async fn update(
     .execute(&mut *tx)
     .await?;
     set_model_tags(&mut tx, id, &input.tags).await?;
+    if let Some(values) = &input.custom_fields {
+        apply_values(&mut tx, ValueOwner::Model(id), values, &user).await?;
+    }
     tx.commit().await?;
 
-    fetch_detail(&state, id).await.map(Json)
+    fetch_detail(&state, id, &user).await.map(Json)
 }
 
 async fn remove(

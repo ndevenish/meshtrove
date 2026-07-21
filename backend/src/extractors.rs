@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::routes::custom_fields::CustomFieldVisibility;
 use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "meshtrove_session";
@@ -76,6 +77,20 @@ impl User {
             Ok(())
         } else {
             Err(AuthError::Forbidden)
+        }
+    }
+
+    /// Whether a custom field carrying this visibility is shown to this caller
+    /// at all — its value *and* the fact that the field exists. The
+    /// `--anonymous` dev user is a synthetic admin, so it sees everything.
+    pub fn can_see(&self, visibility: CustomFieldVisibility) -> bool {
+        match visibility {
+            CustomFieldVisibility::Anonymous => true,
+            CustomFieldVisibility::Viewer => !self.is_guest(),
+            CustomFieldVisibility::Editor => {
+                matches!(self.role, UserRole::Admin | UserRole::Editor)
+            }
+            CustomFieldVisibility::Admin => self.role == UserRole::Admin,
         }
     }
 

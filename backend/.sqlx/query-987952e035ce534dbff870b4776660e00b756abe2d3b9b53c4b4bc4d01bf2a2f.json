@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM files WHERE custom_field_value_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "987952e035ce534dbff870b4776660e00b756abe2d3b9b53c4b4bc4d01bf2a2f"
+}

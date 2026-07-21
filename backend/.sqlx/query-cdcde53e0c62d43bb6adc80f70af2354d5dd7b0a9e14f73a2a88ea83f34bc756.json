@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)\n           VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8)\n           RETURNING id, path, filename, mime, kind as \"kind: FileKind\", created_at",
+  "query": "INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id,\n                              custom_field_value_id, path, filename, mime, kind)\n           VALUES ($1, $2, $3, $4, $9, $10, $5, $6, $7, $8)\n           RETURNING id, path, filename, mime, kind as \"kind: FileKind\", created_at",
   "describe": {
     "columns": [
       {
@@ -108,6 +108,7 @@
             }
           }
         },
+        "Uuid",
         "Uuid"
       ]
     },
@@ -120,5 +121,5 @@
       false
     ]
   },
-  "hash": "32917e8376bfd0752ead6a11ccf3ce0e5b717e8a1bb462d8b1da66f50827543a"
+  "hash": "cdcde53e0c62d43bb6adc80f70af2354d5dd7b0a9e14f73a2a88ea83f34bc756"
 }

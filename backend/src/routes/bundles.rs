@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::{
+    CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
+};
 use crate::routes::models::{
     DescriptionInput, ImageSummary, LabelInput, ModelSummary, Revision, SearchQuery,
 };
@@ -180,6 +183,9 @@ pub struct BundleInput {
     pub tags: Vec<String>,
     /// Initial markdown description (creates revision 1)
     pub description_md: Option<String>,
+    /// Admin-defined extra fields to write alongside the built-in ones. Absent
+    /// means "leave them alone"; an entry with a null value clears that field.
+    pub custom_fields: Option<Vec<CustomFieldValueInput>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -193,6 +199,9 @@ pub struct BundleDetail {
     pub source_url: Option<String>,
     pub tags: Vec<String>,
     pub description_md: Option<String>,
+    /// Every custom field that applies to bundles and that the caller may see,
+    /// set or not, in display order.
+    pub custom_fields: Vec<CustomFieldValueDetail>,
     pub models: Vec<ModelSummary>,
     pub images: Vec<ImageSummary>,
     /// The bundle's primary categories (import sections), in tab order. A
@@ -314,9 +323,12 @@ async fn create(
         .execute(&mut *tx)
         .await?;
     }
+    if let Some(values) = &input.custom_fields {
+        apply_values(&mut tx, ValueOwner::Bundle(bundle_id), values, &user).await?;
+    }
     tx.commit().await?;
 
-    fetch_detail(&state, bundle_id, user.id).await.map(Json)
+    fetch_detail(&state, bundle_id, &user).await.map(Json)
 }
 
 /// The member models of a bundle, shaped as ModelSummary for reuse by the UI.
@@ -361,7 +373,7 @@ async fn fetch_members(
         .collect())
 }
 
-async fn fetch_detail(state: &AppState, id: Uuid, viewer: Uuid) -> Result<BundleDetail, ApiError> {
+async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleDetail, ApiError> {
     let row = sqlx::query!(
         r#"SELECT b.id, b.name, b.slug, b.kind::text as "kind!", b.creator_id,
                   c.name as "creator_name?", b.source_url, b.created_by, b.created_at, b.updated_at,
@@ -385,7 +397,8 @@ async fn fetch_detail(state: &AppState, id: Uuid, viewer: Uuid) -> Result<Bundle
     .fetch_all(&state.db)
     .await?;
 
-    let models = fetch_members(state, id, viewer).await?;
+    let models = fetch_members(state, id, user.id).await?;
+    let custom_fields = fetch_values(state, ValueOwner::Bundle(id), user).await?;
 
     let categories: Vec<String> = sqlx::query_scalar!(
         r#"SELECT t.name::text as "name!" FROM bundle_categories bc
@@ -406,6 +419,7 @@ async fn fetch_detail(state: &AppState, id: Uuid, viewer: Uuid) -> Result<Bundle
         source_url: row.source_url,
         tags: row.tags,
         description_md: row.description_md,
+        custom_fields,
         models,
         images: images
             .into_iter()
@@ -445,7 +459,7 @@ async fn detail(
     Path(key): Path<String>,
 ) -> Result<Json<BundleDetail>, ApiError> {
     let id = resolve_id(&state, &key).await?;
-    fetch_detail(&state, id, user.id).await.map(Json)
+    fetch_detail(&state, id, &user).await.map(Json)
 }
 
 async fn update(
@@ -482,9 +496,12 @@ async fn update(
     .execute(&mut *tx)
     .await?;
     set_bundle_tags(&mut tx, id, &input.tags).await?;
+    if let Some(values) = &input.custom_fields {
+        apply_values(&mut tx, ValueOwner::Bundle(id), values, &user).await?;
+    }
     tx.commit().await?;
 
-    fetch_detail(&state, id, user.id).await.map(Json)
+    fetch_detail(&state, id, &user).await.map(Json)
 }
 
 /// What to do with the bundle's member models when the bundle is deleted.
@@ -681,7 +698,7 @@ async fn set_categories(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    fetch_detail(&state, id, user.id).await.map(Json)
+    fetch_detail(&state, id, &user).await.map(Json)
 }
 
 // ---------------------------------------------------------------------------

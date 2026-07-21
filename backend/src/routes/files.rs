@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::CustomFieldVisibility;
 use crate::services::blobstore::BlobStore;
 use crate::state::AppState;
 
@@ -51,6 +52,11 @@ pub(crate) enum Owner {
     /// The staging area a dropped archive lands in, before it is committed to a
     /// model or a bundle (see `routes/imports.rs`).
     Import(Uuid),
+    /// The payload of a file-kind custom field value (see
+    /// `routes/custom_fields.rs`). Owned by the *value*, so the file is a real
+    /// blob — downloadable, deduped, GC'd like any other — without ever showing
+    /// up in its model's or bundle's file list.
+    CustomFieldValue(Uuid),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, ToSchema, sqlx::Type)]
@@ -160,6 +166,19 @@ async fn check_upload_permission(
             sqlx::query_scalar!("SELECT created_by FROM imports WHERE id = $1", id)
                 .fetch_optional(&state.db)
                 .await?
+        }
+        // Editing a custom field's file is editing the thing it hangs off.
+        Owner::CustomFieldValue(id) => {
+            sqlx::query_scalar!(
+                r#"SELECT coalesce(m.created_by, b.created_by) as "created_by!"
+                   FROM custom_field_values v
+                   LEFT JOIN models m ON m.id = v.model_id
+                   LEFT JOIN bundles b ON b.id = v.bundle_id
+                   WHERE v.id = $1"#,
+                id
+            )
+            .fetch_optional(&state.db)
+            .await?
         }
     };
     let created_by = created_by.ok_or(ApiError::NotFound)?;
@@ -397,15 +416,17 @@ pub(crate) async fn insert_file(
     .execute(&mut *tx)
     .await?;
 
-    let (model_id, variant_id, bundle_id, import_id) = match owner {
-        Owner::Model(id) => (Some(id), None, None, None),
-        Owner::Variant(id) => (None, Some(id), None, None),
-        Owner::Bundle(id) => (None, None, Some(id), None),
-        Owner::Import(id) => (None, None, None, Some(id)),
+    let (model_id, variant_id, bundle_id, import_id, value_id) = match owner {
+        Owner::Model(id) => (Some(id), None, None, None, None),
+        Owner::Variant(id) => (None, Some(id), None, None, None),
+        Owner::Bundle(id) => (None, None, Some(id), None, None),
+        Owner::Import(id) => (None, None, None, Some(id), None),
+        Owner::CustomFieldValue(id) => (None, None, None, None, Some(id)),
     };
     let record = sqlx::query!(
-        r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)
-           VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8)
+        r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id,
+                              custom_field_value_id, path, filename, mime, kind)
+           VALUES ($1, $2, $3, $4, $9, $10, $5, $6, $7, $8)
            RETURNING id, path, filename, mime, kind as "kind: FileKind", created_at"#,
         sha256,
         model_id,
@@ -416,6 +437,7 @@ pub(crate) async fn insert_file(
         mime,
         kind as FileKind,
         import_id,
+        value_id,
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -940,7 +962,12 @@ async fn download_file(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let row = sqlx::query!(
-        r#"SELECT f.blob_sha256, f.filename, f.mime, f.import_id FROM files f WHERE f.id = $1"#,
+        r#"SELECT f.blob_sha256, f.filename, f.mime, f.import_id,
+                  cf.visibility as "visibility?: CustomFieldVisibility"
+           FROM files f
+           LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id
+           LEFT JOIN custom_fields cf ON cf.id = v.field_id
+           WHERE f.id = $1"#,
         id
     )
     .fetch_optional(&state.db)
@@ -952,6 +979,13 @@ async fn download_file(
     // editor+ so a signed-out visitor can't pull staged bytes by file id.
     if row.import_id.is_some() {
         user.require_editor()?;
+    }
+    // A file-kind custom field value is only as visible as its field: an
+    // admin-only field's PDF must not be pullable by file id either.
+    if let Some(visibility) = row.visibility
+        && !user.can_see(visibility)
+    {
+        return Err(ApiError::NotFound);
     }
 
     stream_blob(
