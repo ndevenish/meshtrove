@@ -532,6 +532,22 @@ export interface RendererConfig {
   args: string[]
 }
 
+export interface StorageReport {
+  path: string
+  total_bytes: number
+  used_bytes: number
+  available_bytes: number
+  blob_count: number
+  blob_bytes: number
+}
+
+export interface CompressionReport {
+  blobs: number
+  apparent_bytes: number
+  allocated_bytes: number
+  ratio: number | null
+}
+
 export interface GcReport {
   dry_run: boolean
   db_orphans: number
@@ -783,6 +799,9 @@ export const api = {
   rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
     request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
   gcBlobs: (dryRun: boolean) => request<GcReport>('/api/admin/gc', json({ dry_run: dryRun })),
+  storage: () => request<StorageReport>('/api/admin/storage'),
+  /// Stats every blob in the store — on demand, not on page load.
+  storageCompression: () => request<CompressionReport>('/api/admin/storage/compression'),
 
   /// What the current selection + filters would keep (per-model variant counts,
   /// a variant summary, and file counts by kind). Cheap; called as the dialog

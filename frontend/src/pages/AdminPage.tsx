@@ -14,6 +14,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, formatBytes, type GcReport } from '../api'
 import { useAuth } from '../main'
 import CustomFieldsPanel from '../components/CustomFieldsPanel'
+import StoragePanel from '../components/StoragePanel'
 import UsersPanel from '../components/UsersPanel'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
@@ -181,6 +182,10 @@ export default function AdminPage() {
           </Button>
         </Stack>
       </Paper>
+
+      {/* Directly above Reclaim storage: the number that tells you whether you
+          need it. */}
+      <StoragePanel />
 
       <Paper variant="outlined" sx={{ p: 3, mt: 3 }}>
         <Typography variant="h6" sx={{ mb: 0.5 }}>

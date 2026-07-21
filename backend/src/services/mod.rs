@@ -7,4 +7,5 @@ pub mod importer;
 pub mod jobs;
 pub mod layout;
 pub mod renderer;
+pub mod storage;
 pub mod transfer;

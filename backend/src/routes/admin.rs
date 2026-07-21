@@ -14,6 +14,7 @@ use crate::extractors::User;
 use crate::services::gc::{self, DEFAULT_DISK_GRACE, GcReport};
 use crate::services::jobs;
 use crate::services::renderer::{RENDERER_SETTING, RendererConfig, current_config};
+use crate::services::storage::{self as storage_service, CompressionReport, StorageReport};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -24,6 +25,33 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/admin/rerender", post(rerender))
         .route("/api/admin/gc", post(gc_blobs))
+        .route("/api/admin/storage", get(storage))
+        .route("/api/admin/storage/compression", get(storage_compression))
+}
+
+/// Disk usage for the filesystem holding the store. Cheap enough to load with
+/// the page.
+async fn storage(
+    State(state): State<AppState>,
+    user: User,
+) -> Result<Json<StorageReport>, ApiError> {
+    user.require_admin()?;
+    Ok(Json(storage_service::report(&state).await?))
+}
+
+/// How much space the blobs actually occupy, which on a compressing filesystem
+/// is less than they weigh. Separate from `storage` because it stats every blob
+/// in the store — the caller asks for it deliberately.
+async fn storage_compression(
+    State(state): State<AppState>,
+    user: User,
+) -> Result<Json<CompressionReport>, ApiError> {
+    user.require_admin()?;
+    let root = state.config.store_dir.clone();
+    let report = tokio::task::spawn_blocking(move || storage_service::measure_compression(&root))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(report))
 }
 
 async fn get_renderer(
