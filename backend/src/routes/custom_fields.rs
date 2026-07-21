@@ -491,7 +491,7 @@ pub async fn fetch_values(
 /// Coerce a submitted value into what the kind stores, or `None` for "clear
 /// it". A blank text box and an unticked rating are erasures, not values: the
 /// UI has no separate "unset" gesture, so the empty form state has to mean it.
-fn validate_value(
+pub(crate) fn validate_value(
     field: &CustomField,
     value: &serde_json::Value,
 ) -> Result<Option<serde_json::Value>, ApiError> {
@@ -595,7 +595,7 @@ async fn field_for(
 
 /// Store one already-validated value (or clear it when `value` is None).
 /// Returns the value row's id when it still exists.
-async fn write_value(
+pub(crate) async fn write_value(
     db: &mut sqlx::PgConnection,
     owner: ValueOwner,
     field_id: Uuid,
@@ -658,7 +658,7 @@ async fn write_value(
 
 /// The `updated_by` to record: the synthetic `--anonymous` admin has the nil id
 /// and no `users` row to point at.
-fn editor_id(user: &User) -> Option<Uuid> {
+pub(crate) fn editor_id(user: &User) -> Option<Uuid> {
     (!user.id.is_nil()).then_some(user.id)
 }
 
@@ -687,6 +687,15 @@ pub async fn apply_values(
 pub async fn fields_by_key(
     db: &mut sqlx::PgConnection,
 ) -> Result<std::collections::HashMap<String, CustomField>, ApiError> {
+    Ok(all_fields(db)
+        .await?
+        .into_iter()
+        .map(|f| (f.key.to_lowercase(), f))
+        .collect())
+}
+
+/// Every definition, in display order.
+pub async fn all_fields(db: &mut sqlx::PgConnection) -> Result<Vec<CustomField>, ApiError> {
     let fields = sqlx::query_as!(
         CustomField,
         r#"SELECT id, key as "key: String", name,
@@ -694,14 +703,11 @@ pub async fn fields_by_key(
                   applies_to_models, applies_to_bundles,
                   bundle_persists_to_model, bundle_persist_overwrites,
                   visibility as "visibility: CustomFieldVisibility", position
-           FROM custom_fields"#,
+           FROM custom_fields ORDER BY position, name"#,
     )
     .fetch_all(&mut *db)
     .await?;
-    Ok(fields
-        .into_iter()
-        .map(|f| (f.key.to_lowercase(), f))
-        .collect())
+    Ok(fields)
 }
 
 /// What one scraped `key: value` pair turns out to be.

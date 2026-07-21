@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO files\n                     (id, blob_sha256, model_id, variant_id, bundle_id, path, filename,\n                      mime, kind, created_at, custom_field_value_id)\n                   SELECT * FROM unnest($1::uuid[], $2::text[], $3::uuid[], $4::uuid[],\n                                        $5::uuid[], $6::text[], $7::text[], $8::text[],\n                                        $9::text[]::file_kind[], $10::timestamptz[],\n                                        $11::uuid[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "UuidArray",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TimestamptzArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad8ce54d088750f537e88a14b0a5b98f59afb4126fe7319f900fa13b469e923c"
+}

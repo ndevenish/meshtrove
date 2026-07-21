@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::CustomField as CustomFieldDefinition;
 use crate::routes::tags::upsert_tag;
 use crate::services::blobstore::FsBlobStore;
 use crate::state::AppState;
@@ -1358,6 +1359,11 @@ pub fn blob_entries(manifest: &Manifest) -> Vec<(&str, &str)> {
                 out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
             }
         }
+        for cf in &m.custom_fields {
+            if let Some(f) = &cf.file {
+                out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
+            }
+        }
     }
     for b in &manifest.bundles {
         for f in &b.files {
@@ -1365,6 +1371,11 @@ pub fn blob_entries(manifest: &Manifest) -> Vec<(&str, &str)> {
         }
         for img in &b.images {
             out.push((img.archive_path.as_str(), img.blob_sha256.as_str()));
+        }
+        for cf in &b.custom_fields {
+            if let Some(f) = &cf.file {
+                out.push((f.archive_path.as_str(), f.blob_sha256.as_str()));
+            }
         }
     }
     out
@@ -1554,6 +1565,35 @@ fn zip_err(e: zip::result::ZipError) -> ApiError {
 #[derive(Default)]
 pub struct RestoreOptions {
     pub fresh: HashSet<Uuid>,
+    /// What to do with each custom field the archive carries, keyed by its
+    /// manifest-local id. A field not named here takes [`suggest_mapping`].
+    pub custom_fields: HashMap<Uuid, CustomFieldMapping>,
+}
+
+/// Where an archive's custom field lands in the receiving instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CustomFieldMapping {
+    /// Drop the field and every value under it.
+    Skip,
+    /// Write its values onto a field this instance already has.
+    Existing { field_id: Uuid },
+    /// Add the archive's definition to this instance's vocabulary.
+    Create,
+}
+
+/// What to do with an exported field when the caller hasn't said: adopt the
+/// local field with the same key if there is one, else create it. Shared by the
+/// preview (which shows the suggestion) and the restore (which applies it), so
+/// the two can't drift.
+pub fn suggest_mapping(
+    def: &CustomFieldDef,
+    local_by_key: &HashMap<String, Uuid>,
+) -> CustomFieldMapping {
+    match local_by_key.get(&def.key.to_lowercase()) {
+        Some(&field_id) => CustomFieldMapping::Existing { field_id },
+        None => CustomFieldMapping::Create,
+    }
 }
 
 #[derive(Serialize, Default)]
@@ -1565,6 +1605,10 @@ pub struct RestoreSummary {
     pub files: usize,
     pub images: usize,
     pub blobs: usize,
+    /// Custom field definitions added to this instance's vocabulary.
+    pub custom_fields_created: usize,
+    /// Values written under them (and under the fields they were mapped onto).
+    pub custom_field_values: usize,
 }
 
 /// The high-cardinality rows of a restore, accumulated in memory and written one
@@ -1601,6 +1645,7 @@ struct FileRow {
     model_id: Option<Uuid>,
     variant_id: Option<Uuid>,
     bundle_id: Option<Uuid>,
+    custom_field_value_id: Option<Uuid>,
     path: String,
     filename: String,
     mime: Option<String>,
@@ -1630,7 +1675,7 @@ impl Batches {
     /// Queue a file and hand back the id it will have, so images referencing it
     /// can be queued in the same pass.
     fn push_file(&mut self, target: FileTarget, f: &File) -> Uuid {
-        let (model_id, variant_id, bundle_id) = target.columns();
+        let (model_id, variant_id, bundle_id, custom_field_value_id) = target.columns();
         let id = Uuid::new_v4();
         self.files.push(FileRow {
             id,
@@ -1638,6 +1683,7 @@ impl Batches {
             model_id,
             variant_id,
             bundle_id,
+            custom_field_value_id,
             path: f.path.clone(),
             filename: f.filename.clone(),
             mime: f.mime.clone(),
@@ -1728,10 +1774,11 @@ impl Batches {
             sqlx::query!(
                 r#"INSERT INTO files
                      (id, blob_sha256, model_id, variant_id, bundle_id, path, filename,
-                      mime, kind, created_at)
+                      mime, kind, created_at, custom_field_value_id)
                    SELECT * FROM unnest($1::uuid[], $2::text[], $3::uuid[], $4::uuid[],
                                         $5::uuid[], $6::text[], $7::text[], $8::text[],
-                                        $9::text[]::file_kind[], $10::timestamptz[])"#,
+                                        $9::text[]::file_kind[], $10::timestamptz[],
+                                        $11::uuid[])"#,
                 &self.files.iter().map(|f| f.id).collect::<Vec<_>>(),
                 &self
                     .files
@@ -1762,6 +1809,11 @@ impl Batches {
                     .map(|f| f.kind.clone())
                     .collect::<Vec<_>>(),
                 &self.files.iter().map(|f| f.created_at).collect::<Vec<_>>(),
+                &self
+                    .files
+                    .iter()
+                    .map(|f| f.custom_field_value_id)
+                    .collect::<Vec<_>>() as &[Option<Uuid>],
             )
             .execute(&mut *tx)
             .await?;
@@ -1825,6 +1877,171 @@ impl Batches {
     }
 }
 
+/// Resolve every custom field the archive carries to a field in this instance,
+/// creating the ones the caller asked to create. Returns the manifest-local id →
+/// local definition map the value writes work from; a field mapped to `Skip` is
+/// simply absent, and its values go with it.
+async fn map_custom_fields(
+    tx: &mut sqlx::PgConnection,
+    manifest: &Manifest,
+    options: &RestoreOptions,
+    summary: &mut RestoreSummary,
+) -> Result<HashMap<Uuid, CustomFieldDefinition>, ApiError> {
+    if manifest.custom_fields.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let local = crate::routes::custom_fields::all_fields(&mut *tx).await?;
+    let local_by_key: HashMap<String, Uuid> =
+        local.iter().map(|f| (f.key.to_lowercase(), f.id)).collect();
+    let mut local_by_id: HashMap<Uuid, CustomFieldDefinition> =
+        local.into_iter().map(|f| (f.id, f)).collect();
+
+    let mut map = HashMap::new();
+    for def in &manifest.custom_fields {
+        let mapping = options
+            .custom_fields
+            .get(&def.id)
+            .copied()
+            .unwrap_or_else(|| suggest_mapping(def, &local_by_key));
+        match mapping {
+            CustomFieldMapping::Skip => {}
+            CustomFieldMapping::Existing { field_id } => {
+                // A field the caller named that has since been deleted is a
+                // skip, not a failure: the rest of the archive still restores.
+                if let Some(field) = local_by_id.get(&field_id) {
+                    map.insert(def.id, clone_definition(field));
+                }
+            }
+            CustomFieldMapping::Create => {
+                let created = create_custom_field(&mut *tx, def, &local_by_key).await?;
+                summary.custom_fields_created += 1;
+                map.insert(def.id, clone_definition(&created));
+                local_by_id.insert(created.id, created);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Add one exported definition to this instance's vocabulary. The key is what
+/// scraped metadata is matched against and is unique, so a collision (the caller
+/// asked to create a field whose key is already taken) gets a numeric suffix
+/// rather than failing the restore.
+async fn create_custom_field(
+    tx: &mut sqlx::PgConnection,
+    def: &CustomFieldDef,
+    taken: &HashMap<String, Uuid>,
+) -> Result<CustomFieldDefinition, ApiError> {
+    let mut key = def.key.clone();
+    let mut n = 2;
+    while taken.contains_key(&key.to_lowercase()) {
+        key = format!("{}-{n}", def.key);
+        n += 1;
+    }
+    Ok(sqlx::query_as!(
+        CustomFieldDefinition,
+        r#"INSERT INTO custom_fields
+             (key, name, kind, options, applies_to_models, applies_to_bundles,
+              bundle_persists_to_model, bundle_persist_overwrites, visibility, position)
+           VALUES ($1, $2, $3::text::custom_field_kind, $4, $5, $6, $7, $8,
+                   $9::text::custom_field_visibility, $10)
+           RETURNING id, key as "key: String", name,
+                     kind as "kind: _", options,
+                     applies_to_models, applies_to_bundles,
+                     bundle_persists_to_model, bundle_persist_overwrites,
+                     visibility as "visibility: _", position"#,
+        key,
+        def.name,
+        def.kind,
+        def.options,
+        def.applies_to_models,
+        def.applies_to_bundles,
+        def.bundle_persists_to_model,
+        def.bundle_persist_overwrites,
+        def.visibility,
+        def.position,
+    )
+    .fetch_one(&mut *tx)
+    .await?)
+}
+
+/// `CustomField` is a response type and deliberately not `Clone`; the restore
+/// needs one definition in two maps, so copy it by hand.
+fn clone_definition(f: &CustomFieldDefinition) -> CustomFieldDefinition {
+    CustomFieldDefinition {
+        id: f.id,
+        key: f.key.clone(),
+        name: f.name.clone(),
+        kind: f.kind,
+        options: f.options.clone(),
+        applies_to_models: f.applies_to_models,
+        applies_to_bundles: f.applies_to_bundles,
+        bundle_persists_to_model: f.bundle_persists_to_model,
+        bundle_persist_overwrites: f.bundle_persist_overwrites,
+        visibility: f.visibility,
+        position: f.position,
+    }
+}
+
+/// Write one entity's custom field values through the mapping.
+///
+/// A value whose field was skipped, whose mapped field doesn't apply to this
+/// side of the model/bundle divide, or whose contents the mapped field's kind
+/// can't take is dropped: mapping onto an existing field is the user pointing
+/// two vocabularies at each other, and a mismatch there is a reason to leave the
+/// value out, not to fail the whole restore.
+///
+/// Bundle→model persistence deliberately does *not* run here: the archive
+/// already carries whatever each member had, and re-persisting would overwrite
+/// restored member values with the bundle's.
+async fn restore_custom_fields(
+    tx: &mut sqlx::PgConnection,
+    user: &User,
+    owner: crate::routes::custom_fields::ValueOwner,
+    values: &[CustomFieldValue],
+    fields: &HashMap<Uuid, CustomFieldDefinition>,
+    summary: &mut RestoreSummary,
+    batches: &mut Batches,
+) -> Result<(), ApiError> {
+    use crate::routes::custom_fields::{CustomFieldKind, editor_id, validate_value, write_value};
+    for v in values {
+        let Some(field) = fields.get(&v.field_id) else {
+            continue;
+        };
+        let applies = match owner {
+            crate::routes::custom_fields::ValueOwner::Model(_) => field.applies_to_models,
+            crate::routes::custom_fields::ValueOwner::Bundle(_) => field.applies_to_bundles,
+        };
+        if !applies {
+            continue;
+        }
+        if matches!(field.kind, CustomFieldKind::File) {
+            // A file-kind value is its file; without one there is nothing to say.
+            let Some(f) = &v.file else { continue };
+            let value_id = write_value(
+                &mut *tx,
+                owner,
+                field.id,
+                Some(&serde_json::Value::Null),
+                editor_id(user),
+            )
+            .await?
+            .expect("a written value has a row");
+            batches.push_file(FileTarget::CustomFieldValue(value_id), f);
+            summary.files += 1;
+            summary.custom_field_values += 1;
+            continue;
+        }
+        let Some(raw) = &v.value else { continue };
+        let Ok(Some(value)) = validate_value(field, raw) else {
+            continue;
+        };
+        write_value(&mut *tx, owner, field.id, Some(&value), editor_id(user)).await?;
+        summary.custom_field_values += 1;
+    }
+    Ok(())
+}
+
 /// Apply a manifest. The blob *bytes* must already be in the store (the route
 /// stages them before calling this); here we only record the `blobs` rows and
 /// build the entities. Everything runs in one transaction, so a failure leaves
@@ -1880,6 +2097,10 @@ pub async fn restore(
         vtag_map.insert(vt.name.to_lowercase(), id);
     }
 
+    // Custom fields: resolve the archive's vocabulary onto this instance's
+    // before any entity is written, so every value has somewhere to land.
+    let custom_field_map = map_custom_fields(&mut tx, manifest, options, &mut summary).await?;
+
     // Existing slugs, to decide skip vs create.
     let model_slugs: Vec<String> = manifest.models.iter().map(|m| m.slug.clone()).collect();
     let existing_models: HashMap<String, Uuid> = sqlx::query!(
@@ -1909,6 +2130,7 @@ pub async fn restore(
             &creator_map,
             &tag_map,
             &vtag_map,
+            &custom_field_map,
             &mut summary,
             &mut batches,
         )
@@ -1948,6 +2170,7 @@ pub async fn restore(
             &creator_map,
             &tag_map,
             &model_map,
+            &custom_field_map,
             &mut summary,
             &mut batches,
         )
@@ -1995,6 +2218,7 @@ async fn create_model(
     creator_map: &HashMap<Uuid, Uuid>,
     tag_map: &HashMap<String, Uuid>,
     vtag_map: &HashMap<String, Uuid>,
+    custom_field_map: &HashMap<Uuid, CustomFieldDefinition>,
     summary: &mut RestoreSummary,
     batches: &mut Batches,
 ) -> Result<Uuid, ApiError> {
@@ -2114,6 +2338,17 @@ async fn create_model(
         summary.images += 1;
     }
 
+    restore_custom_fields(
+        &mut *tx,
+        user,
+        crate::routes::custom_fields::ValueOwner::Model(model_id),
+        &m.custom_fields,
+        custom_field_map,
+        summary,
+        batches,
+    )
+    .await?;
+
     if let Some(sa) = &m.source_archive {
         sqlx::query!(
             "INSERT INTO source_archives (model_id, filename, sha256, size, imported_at)
@@ -2140,6 +2375,7 @@ async fn create_bundle(
     creator_map: &HashMap<Uuid, Uuid>,
     tag_map: &HashMap<String, Uuid>,
     model_map: &HashMap<Uuid, Uuid>,
+    custom_field_map: &HashMap<Uuid, CustomFieldDefinition>,
     summary: &mut RestoreSummary,
     batches: &mut Batches,
 ) -> Result<Uuid, ApiError> {
@@ -2234,6 +2470,17 @@ async fn create_bundle(
         summary.images += 1;
     }
 
+    restore_custom_fields(
+        &mut *tx,
+        user,
+        crate::routes::custom_fields::ValueOwner::Bundle(bundle_id),
+        &b.custom_fields,
+        custom_field_map,
+        summary,
+        batches,
+    )
+    .await?;
+
     if let Some(sa) = &b.source_archive {
         sqlx::query!(
             "INSERT INTO source_archives (bundle_id, filename, sha256, size, imported_at)
@@ -2257,14 +2504,18 @@ enum FileTarget {
     Model(Uuid),
     Variant(Uuid),
     Bundle(Uuid),
+    /// A file-kind custom field value, which owns its file directly so it never
+    /// appears in the model's or bundle's file list.
+    CustomFieldValue(Uuid),
 }
 
 impl FileTarget {
-    fn columns(&self) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
+    fn columns(&self) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<Uuid>) {
         match self {
-            FileTarget::Model(id) => (Some(*id), None, None),
-            FileTarget::Variant(id) => (None, Some(*id), None),
-            FileTarget::Bundle(id) => (None, None, Some(*id)),
+            FileTarget::Model(id) => (Some(*id), None, None, None),
+            FileTarget::Variant(id) => (None, Some(*id), None, None),
+            FileTarget::Bundle(id) => (None, None, Some(*id), None),
+            FileTarget::CustomFieldValue(id) => (None, None, None, Some(*id)),
         }
     }
 }

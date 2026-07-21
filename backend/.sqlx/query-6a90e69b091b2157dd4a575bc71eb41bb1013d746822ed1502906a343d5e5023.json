@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, key as \"key: String\", name,\n                  kind as \"kind: CustomFieldKind\", options,\n                  applies_to_models, applies_to_bundles,\n                  bundle_persists_to_model, bundle_persist_overwrites,\n                  visibility as \"visibility: CustomFieldVisibility\", position\n           FROM custom_fields",
+  "query": "SELECT id, key as \"key: String\", name,\n                  kind as \"kind: CustomFieldKind\", options,\n                  applies_to_models, applies_to_bundles,\n                  bundle_persists_to_model, bundle_persist_overwrites,\n                  visibility as \"visibility: CustomFieldVisibility\", position\n           FROM custom_fields ORDER BY position, name",
   "describe": {
     "columns": [
       {
@@ -172,5 +172,5 @@
       false
     ]
   },
-  "hash": "9d900436bf28bde51e8a03fb70d0026e4669aba00483a7786a56a6965ec6427b"
+  "hash": "6a90e69b091b2157dd4a575bc71eb41bb1013d746822ed1502906a343d5e5023"
 }

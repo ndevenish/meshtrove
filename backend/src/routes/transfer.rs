@@ -25,7 +25,9 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::imports::import_created_by;
-use crate::services::transfer::{self, RestoreOptions, RestoreSummary};
+use crate::services::transfer::{
+    self, CustomFieldMapping, RestoreOptions, RestoreSummary, suggest_mapping,
+};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -40,8 +42,41 @@ struct RestorePreview {
     exported_at: DateTime<Utc>,
     models: Vec<EntityRow>,
     bundles: Vec<EntityRow>,
+    /// Every custom field the archive carries, with what this instance would do
+    /// with it by default. The UI turns each row into a combo box.
+    custom_fields: Vec<CustomFieldRow>,
+    /// This instance's own vocabulary, to populate that combo box.
+    local_custom_fields: Vec<LocalCustomField>,
     blob_count: usize,
     total_size: i64,
+}
+
+/// One exported custom field definition, as the restore screen shows it.
+#[derive(Serialize, ToSchema)]
+struct CustomFieldRow {
+    /// The manifest-local id — the key of the `custom_fields` mapping on commit.
+    id: Uuid,
+    key: String,
+    name: String,
+    kind: String,
+    applies_to_models: bool,
+    applies_to_bundles: bool,
+    visibility: String,
+    /// How many values across the archive would be written under it.
+    value_count: usize,
+    /// The local field this instance would adopt by default (same key), or null
+    /// when it would create the field instead.
+    suggested_field_id: Option<Uuid>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct LocalCustomField {
+    id: Uuid,
+    key: String,
+    name: String,
+    kind: String,
+    applies_to_models: bool,
+    applies_to_bundles: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -110,8 +145,59 @@ async fn restore_preview(
         })
         .collect();
 
+    // The archive's vocabulary, each row carrying the default this instance
+    // would take and how much rides on it.
+    let local = crate::routes::custom_fields::all_fields(&mut *state.db.acquire().await?).await?;
+    let local_by_key: std::collections::HashMap<String, Uuid> =
+        local.iter().map(|f| (f.key.to_lowercase(), f.id)).collect();
+    let mut value_counts: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
+    for values in manifest
+        .models
+        .iter()
+        .map(|m| &m.custom_fields)
+        .chain(manifest.bundles.iter().map(|b| &b.custom_fields))
+    {
+        for v in values {
+            *value_counts.entry(v.field_id).or_default() += 1;
+        }
+    }
+    let custom_fields = manifest
+        .custom_fields
+        .iter()
+        .map(|d| CustomFieldRow {
+            id: d.id,
+            key: d.key.clone(),
+            name: d.name.clone(),
+            kind: d.kind.clone(),
+            applies_to_models: d.applies_to_models,
+            applies_to_bundles: d.applies_to_bundles,
+            visibility: d.visibility.clone(),
+            value_count: value_counts.get(&d.id).copied().unwrap_or(0),
+            suggested_field_id: match suggest_mapping(d, &local_by_key) {
+                CustomFieldMapping::Existing { field_id } => Some(field_id),
+                _ => None,
+            },
+        })
+        .collect();
+    let local_custom_fields = local
+        .into_iter()
+        .map(|f| LocalCustomField {
+            id: f.id,
+            key: f.key,
+            name: f.name,
+            kind: serde_json::to_value(f.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            applies_to_models: f.applies_to_models,
+            applies_to_bundles: f.applies_to_bundles,
+        })
+        .collect();
+
     Ok(Json(RestorePreview {
         schema: manifest.schema.clone(),
+        custom_fields,
+        local_custom_fields,
         exported_at: manifest.exported_at,
         models,
         bundles,
@@ -126,6 +212,12 @@ struct RestoreBody {
     /// with the same slug already exists.
     #[serde(default)]
     fresh: Vec<Uuid>,
+    /// What to do with each custom field the archive carries, by its
+    /// manifest-local id: `{"action":"skip"}`, `{"action":"create"}`, or
+    /// `{"action":"existing","field_id":"…"}`. A field left out takes the same
+    /// default the preview suggested.
+    #[serde(default)]
+    custom_fields: std::collections::HashMap<Uuid, CustomFieldMapping>,
 }
 
 async fn restore_commit(
@@ -164,6 +256,7 @@ async fn restore_commit(
 
     let options = RestoreOptions {
         fresh: body.fresh.into_iter().collect(),
+        custom_fields: body.custom_fields,
     };
     let entities = std::time::Instant::now();
     let summary = transfer::restore(&state, &user, &manifest, &options).await?;
@@ -172,6 +265,8 @@ async fn restore_commit(
         bundles = summary.bundles_created,
         files = summary.files,
         images = summary.images,
+        custom_fields = summary.custom_fields_created,
+        custom_field_values = summary.custom_field_values,
         elapsed_ms = entities.elapsed().as_millis(),
         total_ms = started.elapsed().as_millis(),
         "restore: complete"
