@@ -94,6 +94,11 @@ pub struct FileRecord {
 
 /// Kind heuristic from the filename; an explicit `kind` form field overrides.
 pub fn guess_kind(filename: &str) -> FileKind {
+    // Archives first: theirs are the only extensions that come in more than one
+    // piece (`.tar.gz`), so a last-dot split can't see them.
+    if crate::services::archive::format_of(filename).is_some() {
+        return FileKind::Archive;
+    }
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "stl" | "obj" | "step" | "stp" | "ply" | "gltf" | "glb" => FileKind::Model,
@@ -102,7 +107,6 @@ pub fn guess_kind(filename: &str) -> FileKind {
         // Sliced output: one printer, one set of settings, no going back.
         "ctb" | "gcode" => FileKind::Raw,
         "pdf" | "txt" | "md" | "html" | "epub" | "doc" | "docx" => FileKind::Document,
-        "zip" | "rar" | "7z" => FileKind::Archive,
         _ => FileKind::Other,
     }
 }
@@ -348,17 +352,22 @@ async fn consume_fields(
     Ok(records)
 }
 
-/// What happens to a zip once its bytes are stored: it unpacks in the background
-/// into its owner's files — onto a variant, into a model's or bundle's "unsorted"
-/// bucket, or into an import's staging bucket. The archive itself only lives as
-/// long as the import does — committing one drops the original and keeps a
-/// `source_archives` row in its place (services/gc.rs).
+/// What happens to an archive once its bytes are stored: it unpacks in the
+/// background into its owner's files — onto a variant, into a model's or
+/// bundle's "unsorted" bucket, or into an import's staging bucket. The archive
+/// itself only lives as long as the import does — committing one drops the
+/// original and keeps a `source_archives` row in its place (services/gc.rs).
+///
+/// The gate is [`archive::format_of`], the same table that labelled the file
+/// `archive` in the first place. Anything narrower and a format we *call* an
+/// archive never gets an unpack queued, which reads on the Import page as an
+/// archive already dealt with (see the unpack state on [`FileRecord`]).
 ///
 /// One exception: a zip that lands in an import and turns out to be a MeshTrove
 /// export (it carries a manifest.json) is *restored*, not carved. Peek its central
 /// directory — a cheap read that never unpacks the rest — and if it is one, flag
 /// the import and skip the unpack; the Import page then offers "restore"
-/// (routes/transfer).
+/// (routes/transfer). Only zips are ever exports, so only zips are peeked.
 ///
 /// Shared by every ingest path — a browser upload and a dropbox pickup
 /// (services/dropbox.rs) — so an archive behaves the same whichever door it came
@@ -371,10 +380,15 @@ pub(crate) async fn on_archive_ingested(
     filename: &str,
     sha256: &str,
 ) -> Result<(), ApiError> {
-    if !matches!(kind, FileKind::Archive) || !filename.to_lowercase().ends_with(".zip") {
+    use crate::services::archive::Format;
+    let Some(format) = crate::services::archive::format_of(filename) else {
+        return Ok(());
+    };
+    if !matches!(kind, FileKind::Archive) {
         return Ok(());
     }
-    let is_export = matches!(owner, Owner::Import(_))
+    let is_export = format == Format::Zip
+        && matches!(owner, Owner::Import(_))
         && crate::services::transfer::read_manifest_from_blob(&state.store, sha256)
             .await?
             .is_some();

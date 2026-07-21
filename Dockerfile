@@ -60,6 +60,11 @@ RUN cargo build --release
 # renderer. rustls (used by sqlx and reqwest) needs no OpenSSL; ca-certificates
 # covers TLS trust roots when talking to a TLS-terminated Postgres.
 #
+# libarchive-tools provides bsdtar, the unpacker for every archive format that
+# isn't zip: tar and its compressed forms, 7z, and rar (libarchive reads rar5
+# with its own code, so no non-free unrar source is involved). Without it those
+# imports fail the unpack job — see services/importer.rs.
+#
 # trixie, not bookworm, for f3d: bookworm only has f3d 1.3.1 (2021), trixie has
 # 3.1.0. The upstream .deb releases are not an option — they are x86_64-only and
 # this image is built for arm64. The backend binary is built on bookworm and
@@ -70,6 +75,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         f3d \
+        libarchive-tools \
         xvfb \
         xauth \
     && rm -rf /var/lib/apt/lists/* \

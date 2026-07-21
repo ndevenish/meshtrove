@@ -1,12 +1,17 @@
-//! import_archive job: unpack an uploaded zip (already stored as a blob) into
-//! individual files on the owning variant, preserving the archive's folder
+//! import_archive job: unpack an uploaded archive (already stored as a blob)
+//! into individual files on the owning variant, preserving the archive's folder
 //! structure, then queue preview renders for the model files found.
+//!
+//! Zip is read in-process; tar, 7z and rar are handed to libarchive. Which is
+//! which — and what counts as an archive at all — lives in
+//! [`crate::services::archive`].
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::services::archive;
 use crate::services::blobstore::BlobStore;
 use crate::services::jobs;
 use crate::state::AppState;
@@ -67,43 +72,19 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         None => archive.path.clone(),
     };
 
-    // Extract entries to temp files in a blocking task (the zip crate is
-    // sync), then stream each into the content-addressed store.
-    let entries =
-        tokio::task::spawn_blocking(move || -> Result<Vec<(String, std::path::PathBuf)>> {
-            let file = std::fs::File::open(&archive_path)
-                .with_context(|| format!("opening archive blob {}", archive_path.display()))?;
-            let mut zip = zip::ZipArchive::new(file).context("reading zip structure")?;
-            let tmp_dir = std::env::temp_dir().join(format!("meshtrove-import-{}", Uuid::new_v4()));
-            std::fs::create_dir_all(&tmp_dir)?;
-
-            let mut extracted = Vec::new();
-            for i in 0..zip.len() {
-                let mut entry = zip.by_index(i).context("reading zip entry")?;
-                if entry.is_dir() {
-                    continue;
-                }
-                // enclosed_name rejects entries that escape via ../ or absolute paths
-                let Some(name) = entry.enclosed_name() else {
-                    tracing::warn!(entry = entry.name(), "skipping unsafe zip entry path");
-                    continue;
-                };
-                let logical = name.to_string_lossy().replace('\\', "/");
-                if crate::routes::files::is_os_junk(&logical) {
-                    continue;
-                }
-                let tmp_file = tmp_dir.join(format!("{i}"));
-                let mut out = std::fs::File::create(&tmp_file)?;
-                std::io::copy(&mut entry, &mut out)
-                    .with_context(|| format!("extracting {logical}"))?;
-                extracted.push((logical, tmp_file));
-            }
-            Ok(extracted)
-        })
-        .await
-        .context("extraction task panicked")??;
+    let format = archive::format_of(&archive.filename)
+        .ok_or_else(|| anyhow!("{} is not an archive format we unpack", archive.filename))?;
+    let tmp_dir = std::env::temp_dir().join(format!("meshtrove-import-{}", Uuid::new_v4()));
+    let entries = match extract(format, &archive_path, &tmp_dir).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            return Err(error);
+        }
+    };
 
     if entries.is_empty() {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         return Err(anyhow!("archive contained no usable files"));
     }
 
@@ -163,12 +144,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         }
     }
 
-    // Clean up temp extraction dir
-    if let Some((_, first_tmp)) = entries.first()
-        && let Some(dir) = first_tmp.parent()
-    {
-        let _ = tokio::fs::remove_dir_all(dir).await;
-    }
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
 
     // Queue a preview render for the owner's first STL if it has no image yet.
     // The renderer stamps the image onto whichever owner the source file
@@ -208,6 +184,147 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         renders_queued = i32::from(!model_file_ids.is_empty()),
         "archive imported"
     );
+    Ok(())
+}
+
+/// libarchive's CLI. Reads tar (and its compressed forms), 7z, rar and rar5
+/// from one binary, sniffing the format from the bytes — which is what we need,
+/// since a blob in the store has no extension to go on. Debian ships it as
+/// `libarchive-tools`; the Dockerfile installs it beside f3d.
+const BSDTAR: &str = "bsdtar";
+
+/// Unpack `archive_path` into a fresh `tmp_dir`, returning each file as
+/// `(logical path within the archive, path on disk)`. The caller owns `tmp_dir`
+/// and removes it once the files have been read into the store.
+async fn extract(
+    format: archive::Format,
+    archive_path: &std::path::Path,
+    tmp_dir: &std::path::Path,
+) -> Result<Vec<(String, std::path::PathBuf)>> {
+    tokio::fs::create_dir_all(tmp_dir).await?;
+    match format {
+        archive::Format::Zip => {
+            extract_zip(archive_path.to_path_buf(), tmp_dir.to_path_buf()).await
+        }
+        archive::Format::Libarchive => extract_libarchive(archive_path, tmp_dir).await,
+    }
+}
+
+/// Zip stays in-process: the `zip` crate is already a dependency, and the
+/// commonest format by far shouldn't need an external binary on PATH.
+async fn extract_zip(
+    archive_path: std::path::PathBuf,
+    tmp_dir: std::path::PathBuf,
+) -> Result<Vec<(String, std::path::PathBuf)>> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<(String, std::path::PathBuf)>> {
+        let file = std::fs::File::open(&archive_path)
+            .with_context(|| format!("opening archive blob {}", archive_path.display()))?;
+        let mut zip = zip::ZipArchive::new(file).context("reading zip structure")?;
+
+        let mut extracted = Vec::new();
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).context("reading zip entry")?;
+            if entry.is_dir() {
+                continue;
+            }
+            // enclosed_name rejects entries that escape via ../ or absolute paths
+            let Some(name) = entry.enclosed_name() else {
+                tracing::warn!(entry = entry.name(), "skipping unsafe zip entry path");
+                continue;
+            };
+            let logical = name.to_string_lossy().replace('\\', "/");
+            if crate::routes::files::is_os_junk(&logical) {
+                continue;
+            }
+            let tmp_file = tmp_dir.join(format!("{i}"));
+            let mut out = std::fs::File::create(&tmp_file)?;
+            std::io::copy(&mut entry, &mut out).with_context(|| format!("extracting {logical}"))?;
+            extracted.push((logical, tmp_file));
+        }
+        Ok(extracted)
+    })
+    .await
+    .context("extraction task panicked")?
+}
+
+/// Everything else goes through bsdtar, which unpacks the real tree into
+/// `tmp_dir`; the logical paths are then read back off the filesystem.
+///
+/// Path safety is bsdtar's: without `-P` it strips leading slashes and refuses
+/// entries that climb out with `..`, so nothing lands outside `tmp_dir`.
+/// `--no-same-permissions` applies the umask instead of the archive's modes —
+/// an entry recorded as mode 000, or a directory with no `+x`, would otherwise
+/// unpack into something we can't read back or delete.
+async fn extract_libarchive(
+    archive_path: &std::path::Path,
+    tmp_dir: &std::path::Path,
+) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let output = tokio::process::Command::new(BSDTAR)
+        .arg("-x")
+        .arg("--no-same-owner")
+        .arg("--no-same-permissions")
+        .arg("-f")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(tmp_dir)
+        // An encrypted archive asks for a passphrase; with no stdin it fails
+        // and the job records the error, instead of hanging a worker forever.
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("launching {BSDTAR} — is libarchive-tools installed?"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{BSDTAR} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(2000)
+                .collect::<String>()
+        ));
+    }
+
+    let root = tmp_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut extracted = Vec::new();
+        collect_files(&root, &root, &mut extracted)?;
+        extracted.sort();
+        Ok(extracted)
+    })
+    .await
+    .context("walk task panicked")?
+}
+
+/// Walk what bsdtar wrote, keeping regular files only. Symlinks are skipped
+/// rather than followed: an archive is free to carry one pointing anywhere on
+/// the host, and a model file it isn't.
+fn collect_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            collect_files(root, &path, out)?;
+            continue;
+        }
+        if !meta.is_file() {
+            tracing::warn!(path = %path.display(), "skipping non-regular archive entry");
+            continue;
+        }
+        let logical = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if crate::routes::files::is_os_junk(&logical) {
+            continue;
+        }
+        out.push((logical, path));
+    }
     Ok(())
 }
 
@@ -255,12 +372,10 @@ fn dest_for(path: &str, filename: &str, has_siblings: bool) -> String {
     if !has_siblings {
         return path.to_string();
     }
-    // `supported.zip` → `supported`. A name that is nothing but an extension
-    // leaves no stem to call the folder after.
-    let stem = filename
-        .rsplit_once('.')
-        .map_or(filename, |(stem, _)| stem)
-        .trim();
+    // `supported.zip` → `supported`, `wave1.tar.gz` → `wave1`: the whole
+    // suffix goes, or the folder is called `wave1.tar`. A name that is nothing
+    // but an extension leaves no stem to call the folder after.
+    let stem = archive::stem_of(filename).trim();
     let stem = if stem.is_empty() { "extracted" } else { stem };
     if path.is_empty() {
         stem.to_string()
@@ -292,7 +407,70 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::dest_for;
+    use super::{BSDTAR, dest_for, extract};
+    use crate::services::archive::Format;
+
+    /// Build `name` from a fixed little tree via bsdtar, extract it back
+    /// through [`extract`], and return the logical paths it recovered.
+    /// `None` when bsdtar is missing, so a machine without libarchive-tools
+    /// skips rather than fails.
+    async fn round_trip(name: &str) -> Option<Vec<String>> {
+        let root = std::env::temp_dir().join(format!("meshtrove-test-{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("parts")).unwrap();
+        std::fs::write(src.join("readme.txt"), "hi").unwrap();
+        std::fs::write(src.join("parts/body.stl"), "solid body").unwrap();
+        // Junk the unpack is expected to drop on the way in.
+        std::fs::write(src.join("parts/.DS_Store"), "junk").unwrap();
+
+        let archive = root.join(name);
+        let built = tokio::process::Command::new(BSDTAR)
+            .arg("-a")
+            .arg("-c")
+            .arg("-f")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&src)
+            .arg("readme.txt")
+            .arg("parts")
+            .status()
+            .await;
+        let built = match built {
+            Ok(status) => status,
+            // bsdtar not on PATH: nothing to test here.
+            Err(_) => {
+                std::fs::remove_dir_all(&root).ok();
+                return None;
+            }
+        };
+        assert!(built.success(), "building {name}");
+
+        let out = root.join("out");
+        let entries = extract(Format::Libarchive, &archive, &out).await.unwrap();
+        let mut paths: Vec<String> = entries
+            .into_iter()
+            .map(|(logical, on_disk)| {
+                assert!(on_disk.is_file(), "{logical} should be on disk");
+                logical
+            })
+            .collect();
+        paths.sort();
+        std::fs::remove_dir_all(&root).ok();
+        Some(paths)
+    }
+
+    #[tokio::test]
+    async fn libarchive_formats_unpack_with_their_tree_intact() {
+        // The reported bug: these staged as files and were never opened.
+        for name in ["pack.tar.gz", "pack.7z", "pack.tar"] {
+            let Some(paths) = round_trip(name).await else {
+                eprintln!("skipping {name}: {BSDTAR} not on PATH");
+                return;
+            };
+            // Folder structure preserved, OS junk dropped.
+            assert_eq!(paths, vec!["parts/body.stl", "readme.txt"], "{name}");
+        }
+    }
 
     #[test]
     fn an_archive_alone_in_its_folder_unpacks_in_place() {
@@ -322,5 +500,12 @@ mod tests {
     #[test]
     fn only_the_last_extension_goes() {
         assert_eq!(dest_for("", "dragon.v2.zip", true), "dragon.v2");
+    }
+
+    #[test]
+    fn a_two_part_extension_goes_whole() {
+        // Not `dragon.tar`: the suffix is one extension in two pieces.
+        assert_eq!(dest_for("", "dragon.tar.gz", true), "dragon");
+        assert_eq!(dest_for("Pack", "supported.rar", true), "Pack/supported");
     }
 }

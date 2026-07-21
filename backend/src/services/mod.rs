@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod blobstore;
 pub mod dropbox;
 pub mod export_job;
