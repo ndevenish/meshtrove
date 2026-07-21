@@ -82,18 +82,48 @@ jobs:
       - name: Check (live query verification)
         run: cargo check --all-targets
 
-      # The other direction: the committed offline cache must agree with what the
-      # live database says, or `docker.yml` publishes `:latest` from a stale one.
-      # docker.yml only runs on main, so without this a pull request could land a
-      # mismatch that only breaks after merge.
-      - name: Offline query cache is current
-        run: cargo sqlx prepare --check -- --all-targets
-
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         run: cargo test
+
+  # The other direction, and the reason it is a job of its own with no database
+  # in sight: `docker.yml` builds with SQLX_OFFLINE=true against the committed
+  # `.sqlx` cache, so a query changed without re-running `cargo sqlx prepare`
+  # breaks `:latest` while every live-database build stays green. docker.yml only
+  # runs on main, so without this a pull request lands the break and it surfaces
+  # for whoever pushes next.
+  #
+  # Deliberately NOT `sqlx prepare --check`: that regenerates the cache against
+  # whichever database it is given and compares byte-for-byte, and the recorded
+  # nullability depends on the query plan — so it reports a difference whenever
+  # the database differs from the one that generated the cache, stale or not.
+  # Compiling against the cache asks the question that actually matters.
+  offline:
+    name: Backend (offline query cache)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      SQLX_OFFLINE: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          key: offline
+
+      - name: Build from the committed cache alone
+        run: cargo check --all-targets
 
   frontend:
     name: Frontend
