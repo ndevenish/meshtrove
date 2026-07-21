@@ -1,0 +1,126 @@
+name: Check
+
+# The backend's sqlx `query!` macros are verified against a *live* database at
+# compile time, and sqlx infers each column's nullability from the query plan —
+# which shifts with the table statistics. A query can therefore compile on a
+# developer's populated database and fail on an empty one, and the committed
+# `.sqlx` offline cache hides it from the Docker build (which sets
+# SQLX_OFFLINE=true and never asks a real database anything).
+#
+# So this runs against the one shape that matters most and nobody develops on:
+# a freshly migrated, empty database, exactly as a new deployment sees it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (fresh database)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: meshtrove
+          POSTGRES_PASSWORD: meshtrove
+          POSTGRES_DB: meshtrove
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgres://meshtrove:meshtrove@localhost:5432/meshtrove
+      # Belt and braces: DATABASE_URL alone already sends the macros to the live
+      # database, but the whole point of this job is that it must never fall back
+      # to the cache.
+      SQLX_OFFLINE: "false"
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      # Also a test of the migrations themselves: they have to apply in order,
+      # from nothing, without a hand-held step.
+      - name: Migrate the empty database
+        run: sqlx migrate run
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      # The step this workflow exists for: every `query!` re-verified against a
+      # database with no rows in it.
+      - name: Check (live query verification)
+        run: cargo check --all-targets
+
+      # The other direction: the committed offline cache must agree with what the
+      # live database says, or `docker.yml` publishes `:latest` from a stale one.
+      # docker.yml only runs on main, so without this a pull request could land a
+      # mismatch that only breaks after merge.
+      - name: Offline query cache is current
+        run: cargo sqlx prepare --check -- --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Formatting
+        run: npx prettier --check .
+
+      - name: Typecheck
+        run: npx tsc -b
+
+      - name: Build
+        run: npm run build
