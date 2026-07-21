@@ -1,36 +1,59 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Dialog,
   DialogTitle,
   DialogContent,
   Box,
+  Button,
+  Stack,
   Typography,
   IconButton,
   Alert,
 } from '@mui/material'
+import { useTheme } from '@mui/material/styles'
 import CloseIcon from '@mui/icons-material/Close'
+import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import * as THREE from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
-import { downloadUrl } from '../api'
+import { downloadUrl, renderPreviewUrl } from '../api'
+
+// Above this size, downloading the whole mesh and building the interactive
+// scene is slow enough that we show a server-rendered still first and let the
+// user opt into the live viewer. Live preview streams the file end-to-end, so
+// the cost scales with the file.
+const LIVE_PREVIEW_THRESHOLD = 5 * 1024 * 1024
 
 /// An interactive three.js viewer for a single STL file. The mesh is streamed
 /// straight from the file's download endpoint (same-origin, so the session
 /// cookie rides along — staged import files stay gated to editors). The whole
 /// scene lives and dies with the dialog: opening loads and builds it, closing
 /// disposes every GPU resource so a big mesh doesn't linger.
+///
+/// Large meshes don't build the scene until asked: they open to an f3d-rendered
+/// still (see `renderPreviewUrl`) with a button to load the live viewer.
 export default function StlPreviewDialog({
   open,
   fileId,
   filename,
+  size,
   onClose,
 }: {
   open: boolean
   fileId: string | null
   filename: string
+  /** File size in bytes; drives whether we defer to a rendered still first. */
+  size: number
   onClose: () => void
 }) {
+  const theme = useTheme()
+  // The canvas and scene backdrop follow the app theme. Kept in a ref so a
+  // theme toggle mid-view can recolour the live scene without tearing it down
+  // and re-downloading the mesh.
+  const bg = theme.palette.background.default
+  const sceneRef = useRef<THREE.Scene | null>(null)
+
   // A callback ref held in state, not a plain ref: MUI's dialog transition mounts
   // this Box *after* the effect would first fire, so gating on a ref read would
   // bail before the node exists. Storing the node in state re-runs the effect the
@@ -39,14 +62,24 @@ export default function StlPreviewDialog({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Large files start on the rendered still; small ones go straight to live.
+  // Recomputed each time a new file opens.
+  const [live, setLive] = useState(size <= LIVE_PREVIEW_THRESHOLD)
+  const [stillError, setStillError] = useState(false)
   useEffect(() => {
-    if (!open || !fileId || !mount) return
+    setLive(size <= LIVE_PREVIEW_THRESHOLD)
+    setStillError(false)
+  }, [fileId, size])
+
+  useEffect(() => {
+    if (!open || !fileId || !mount || !live) return
 
     setLoading(true)
     setError(null)
 
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x1e1e1e)
+    scene.background = new THREE.Color(bg)
+    sceneRef.current = scene
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000)
     const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -132,6 +165,7 @@ export default function StlPreviewDialog({
 
     return () => {
       disposed = true
+      sceneRef.current = null
       cancelAnimationFrame(frame)
       observer.disconnect()
       controls.dispose()
@@ -143,7 +177,12 @@ export default function StlPreviewDialog({
       renderer.dispose()
       if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement)
     }
-  }, [open, fileId, mount])
+  }, [open, fileId, mount, live, bg])
+
+  // Recolour a live scene on a theme toggle without rebuilding it.
+  useEffect(() => {
+    if (sceneRef.current) sceneRef.current.background = new THREE.Color(bg)
+  }, [bg])
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -162,7 +201,7 @@ export default function StlPreviewDialog({
       <DialogContent>
         {error ? (
           <Alert severity="error">{error}</Alert>
-        ) : (
+        ) : live ? (
           <Box sx={{ position: 'relative' }}>
             <Box
               ref={setMount}
@@ -171,7 +210,7 @@ export default function StlPreviewDialog({
                 height: { xs: 320, sm: 480 },
                 borderRadius: 1,
                 overflow: 'hidden',
-                bgcolor: '#1e1e1e',
+                bgcolor: 'background.default',
                 '& canvas': { display: 'block' },
               }}
             />
@@ -187,6 +226,61 @@ export default function StlPreviewDialog({
             <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
               Drag to rotate · scroll to zoom · right-drag to pan
             </Typography>
+          </Box>
+        ) : (
+          // Large mesh: a rendered still first, live viewer on request. The
+          // still is rendered on demand server-side and not persisted.
+          <Box>
+            <Box
+              sx={{
+                position: 'relative',
+                width: '100%',
+                height: { xs: 320, sm: 480 },
+                borderRadius: 1,
+                overflow: 'hidden',
+                bgcolor: 'background.default',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {stillError ? (
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ px: 2, textAlign: 'center' }}
+                >
+                  Couldn't render a preview image. Load the interactive preview below.
+                </Typography>
+              ) : (
+                fileId && (
+                  <Box
+                    component="img"
+                    src={renderPreviewUrl(fileId)}
+                    alt={`Rendered preview of ${filename}`}
+                    onError={() => setStillError(true)}
+                    sx={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                  />
+                )
+              )}
+            </Box>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ mt: 1, alignItems: 'center', justifyContent: 'space-between' }}
+            >
+              <Typography variant="caption" color="text.secondary">
+                Large file — showing a rendered still.
+              </Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<ViewInArIcon />}
+                onClick={() => setLive(true)}
+              >
+                Load interactive preview
+              </Button>
+            </Stack>
           </Box>
         )}
       </DialogContent>

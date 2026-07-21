@@ -797,6 +797,10 @@ export interface PatchApplyResult {
 
 export const imageUrl = (id: string) => `/api/images/${id}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
+/// An f3d-rendered PNG still of a single file, rendered on demand and not
+/// persisted. The STL viewer shows this first for large meshes, before the user
+/// opts into the heavier interactive preview.
+export const renderPreviewUrl = (fileId: string) => `/api/files/${fileId}/render/preview`
 
 // --- Export / import archives ----------------------------------------------
 

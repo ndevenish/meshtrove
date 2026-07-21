@@ -72,28 +72,24 @@ enum RenderMode {
     Replace,
 }
 
-pub async fn render_preview(state: &AppState, payload: &Value) -> Result<()> {
-    let payload: RenderPayload =
-        serde_json::from_value(payload.clone()).context("bad render_preview payload")?;
-    let config = current_config(state).await?;
-
-    let file = sqlx::query!(
-        "SELECT blob_sha256, filename, model_id, variant_id, bundle_id FROM files WHERE id = $1",
-        payload.file_id,
-    )
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| anyhow!("file {} no longer exists", payload.file_id))?;
-
-    let blob_path = state.store.path_for(&file.blob_sha256);
-
+/// Render a stored blob to a PNG via the external renderer, into a fresh temp
+/// dir. On success returns `(work_dir, output_png)`; the caller owns `work_dir`
+/// and MUST remove it once it has consumed the PNG. On failure the temp dir is
+/// cleaned up here. Shared by the `render_preview` job (which persists the PNG as
+/// an image) and the on-demand preview endpoint (which streams it and throws it
+/// away).
+pub async fn render_blob_to_png(
+    config: &RendererConfig,
+    blob_path: &std::path::Path,
+    filename: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     // The renderer needs a recognizable extension; the store path has none,
     // so hard-link (fall back to copy) into a temp name preserving it.
     let work_dir = std::env::temp_dir().join(format!("meshtrove-render-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&work_dir).await?;
-    let input = work_dir.join(&file.filename);
-    if tokio::fs::hard_link(&blob_path, &input).await.is_err() {
-        tokio::fs::copy(&blob_path, &input)
+    let input = work_dir.join(filename);
+    if tokio::fs::hard_link(blob_path, &input).await.is_err() {
+        tokio::fs::copy(blob_path, &input)
             .await
             .context("staging input file")?;
     }
@@ -137,6 +133,25 @@ pub async fn render_preview(state: &AppState, payload: &Value) -> Result<()> {
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
         return Err(error);
     }
+
+    Ok((work_dir, output))
+}
+
+pub async fn render_preview(state: &AppState, payload: &Value) -> Result<()> {
+    let payload: RenderPayload =
+        serde_json::from_value(payload.clone()).context("bad render_preview payload")?;
+    let config = current_config(state).await?;
+
+    let file = sqlx::query!(
+        "SELECT blob_sha256, filename, model_id, variant_id, bundle_id FROM files WHERE id = $1",
+        payload.file_id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| anyhow!("file {} no longer exists", payload.file_id))?;
+
+    let blob_path = state.store.path_for(&file.blob_sha256);
+    let (work_dir, output) = render_blob_to_png(&config, &blob_path, &file.filename).await?;
 
     // Store the PNG and record the image with renderer provenance.
     let png = tokio::fs::File::open(&output).await?;

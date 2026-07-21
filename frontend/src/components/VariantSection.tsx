@@ -659,6 +659,7 @@ export const FileTree = memo(function FileTree({
             open
             fileId={previewFile.id}
             filename={previewFile.filename}
+            size={previewFile.size}
             onClose={() => setPreviewFile(null)}
           />
         </Suspense>

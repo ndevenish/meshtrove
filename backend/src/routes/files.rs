@@ -38,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/files/{id}", patch(update_file).delete(delete_file))
         .route("/api/files/{id}/download", get(download_file))
         .route("/api/files/{id}/render", post(render_file))
+        .route("/api/files/{id}/render/preview", get(render_file_preview))
         // Uploads are multi-GB; the store streams to disk, so no body cap.
         .layer(DefaultBodyLimit::disable())
 }
@@ -884,6 +885,52 @@ async fn render_file(
 #[derive(Serialize, ToSchema)]
 pub struct RenderQueued {
     pub job_id: i64,
+}
+
+/// Render this file to a PNG *right now* and stream it straight back, persisting
+/// nothing. The in-browser STL viewer defers to this for large meshes: a
+/// server-rendered still appears at once while the multi-MB download that the
+/// interactive three.js viewer needs is held until the user actually asks for
+/// it. Unlike `POST .../render`, no image row is created and the blob store is
+/// left untouched — the temp render is removed before the response is built.
+async fn render_file_preview(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let file = sqlx::query!(
+        r#"SELECT blob_sha256, filename, import_id, kind as "kind: FileKind"
+           FROM files WHERE id = $1"#,
+        id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    // Same visibility as a download: committed files are public (browse is open),
+    // but a still-staged import file is gated to editor+.
+    if file.import_id.is_some() {
+        user.require_editor()?;
+    }
+
+    // The renderer reads geometry; only model/project files carry any.
+    if !matches!(file.kind, FileKind::Model | FileKind::Project) {
+        return Err(ApiError::BadRequest(format!(
+            "{} is a {:?} file — only models and projects can be rendered",
+            file.filename, file.kind
+        )));
+    }
+
+    let config = crate::services::renderer::current_config(&state).await?;
+    let blob_path = state.store.path_for(&file.blob_sha256);
+    let (work_dir, output) =
+        crate::services::renderer::render_blob_to_png(&config, &blob_path, &file.filename).await?;
+
+    let bytes = tokio::fs::read(&output).await;
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    let bytes = bytes.map_err(|e| ApiError::Internal(e.into()))?;
+
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
 }
 
 async fn download_file(
