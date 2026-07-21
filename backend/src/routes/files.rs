@@ -962,7 +962,13 @@ async fn download_file(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let row = sqlx::query!(
-        r#"SELECT f.blob_sha256, f.filename, f.mime, f.import_id,
+        // The `!` on the two NOT NULL columns is load-bearing: `f` is the
+        // preserved side of both LEFT JOINs so they can never be null here, but
+        // sqlx infers nullability from the query plan, which shifts with the
+        // table statistics — without these the build breaks on some databases
+        // and not others.
+        r#"SELECT f.blob_sha256 as "blob_sha256!", f.filename as "filename!",
+                  f.mime, f.import_id,
                   cf.visibility as "visibility?: CustomFieldVisibility"
            FROM files f
            LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id

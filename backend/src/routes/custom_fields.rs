@@ -428,11 +428,18 @@ pub async fn fetch_values(
     // value with one query for either side: the null column matches the null
     // stored in the row that isn't the owner.
     let rows = sqlx::query!(
-        r#"SELECT cf.id, cf.key as "key: String", cf.name,
-                  cf.kind as "kind: CustomFieldKind", cf.options,
-                  cf.applies_to_models, cf.applies_to_bundles,
-                  cf.bundle_persists_to_model, cf.bundle_persist_overwrites,
-                  cf.visibility as "visibility: CustomFieldVisibility", cf.position,
+        // Every `cf.` column is annotated non-null: they are NOT NULL on the
+        // preserved side of the LEFT JOINs, but sqlx reads nullability off the
+        // query plan, which moves with the table statistics — leave them bare
+        // and the build passes or fails depending on what is in the database.
+        r#"SELECT cf.id as "id!", cf.key as "key!: String", cf.name as "name!",
+                  cf.kind as "kind!: CustomFieldKind", cf.options as "options!",
+                  cf.applies_to_models as "applies_to_models!",
+                  cf.applies_to_bundles as "applies_to_bundles!",
+                  cf.bundle_persists_to_model as "bundle_persists_to_model!",
+                  cf.bundle_persist_overwrites as "bundle_persist_overwrites!",
+                  cf.visibility as "visibility!: CustomFieldVisibility",
+                  cf.position as "position!",
                   v.value,
                   f.id as "file_id?", f.filename as "filename?", f.mime as "mime?",
                   b.size as "size?"

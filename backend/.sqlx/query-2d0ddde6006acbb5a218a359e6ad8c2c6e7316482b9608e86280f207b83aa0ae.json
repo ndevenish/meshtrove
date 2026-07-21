@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT f.blob_sha256, f.filename, f.mime, f.import_id,\n                  cf.visibility as \"visibility?: CustomFieldVisibility\"\n           FROM files f\n           LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id\n           LEFT JOIN custom_fields cf ON cf.id = v.field_id\n           WHERE f.id = $1",
+  "query": "SELECT f.blob_sha256 as \"blob_sha256!\", f.filename as \"filename!\",\n                  f.mime, f.import_id,\n                  cf.visibility as \"visibility?: CustomFieldVisibility\"\n           FROM files f\n           LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id\n           LEFT JOIN custom_fields cf ON cf.id = v.field_id\n           WHERE f.id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "blob_sha256",
+        "name": "blob_sha256!",
         "type_info": "Bpchar",
         "origin": {
           "Table": {
@@ -16,7 +16,7 @@
       },
       {
         "ordinal": 1,
-        "name": "filename",
+        "name": "filename!",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -77,12 +77,12 @@
       ]
     },
     "nullable": [
-      false,
-      false,
+      true,
+      true,
       true,
       true,
       true
     ]
   },
-  "hash": "cd715099573db26180c9b0b8580bf727ab03eb530ca75a805ff2dce426e69c29"
+  "hash": "2d0ddde6006acbb5a218a359e6ad8c2c6e7316482b9608e86280f207b83aa0ae"
 }
