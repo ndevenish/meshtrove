@@ -1038,13 +1038,51 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
   )
 })
 
+/// What the sticky toolbar's jump cycles through. Unmatched is the default —
+/// tuning a layout is mostly a hunt for what it missed — but the reverse matters
+/// as soon as a rule matches only a handful of a few thousand files: a rule that
+/// catches twelve is unverifiable if you can't find the twelve. Conflicts are
+/// rarest and the most consequential (that rule was dropped for those files), and
+/// until now they could only be found by spotting a warning icon in the margin.
+type JumpMode = 'unmatched' | 'matched' | 'conflict'
+const JUMP_MODES: Record<
+  JumpMode,
+  {
+    label: string
+    test: (a: FileAnnotation) => boolean
+    count: (n: number, total: number) => string
+    none: string
+  }
+> = {
+  unmatched: {
+    label: 'unmatched',
+    test: (a) => !a.matched,
+    count: (n, total) => `${n} of ${total} unmatched`,
+    none: 'every file matches',
+  },
+  matched: {
+    label: 'matched',
+    test: (a) => a.matched,
+    count: (n, total) => `${n} of ${total} matched`,
+    none: 'nothing matches yet',
+  },
+  conflict: {
+    label: 'conflicts',
+    test: (a) => a.invalid_rules.length > 0,
+    count: (n) => `${n} with a rule conflict`,
+    none: 'no rule conflicts',
+  },
+}
+
 /// The staged file list — all of it — annotated by the active plan: capture
 /// groups highlighted in role colours, resolved model/tags chips trailing each
 /// row. Consecutive files sharing a highlighted prefix print it once as a
 /// header and hang the rest below it (`groupByPrefix`), which keeps a deep
 /// archive readable and leaves the rows their width for the chips. A sticky
-/// toolbar jumps to the next file no rule matched, so tuning a layout towards
-/// full coverage doesn't mean scrolling a few thousand rows by eye. Memoised
+/// toolbar cycles through the files of one kind — unmatched, matched, or
+/// conflicted (`JUMP_MODES`) — so neither tuning a layout towards full coverage
+/// nor checking what a narrow rule actually caught means scrolling a few
+/// thousand rows by eye. Memoised
 /// because the parent re-renders on every form keystroke while this component's
 /// inputs only change when a new plan lands.
 export const AnnotatedFileList = memo(function AnnotatedFileList({
@@ -1060,20 +1098,22 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
 }) {
   const byId = useMemo(() => new Map(annotations.map((a) => [a.id, a])), [annotations])
   const groups = useMemo(() => groupByPrefix(files, byId), [files, byId])
-  // The rows "Next unmatched" cycles through. A file with no annotation at all
-  // (the archive itself) was never a carve candidate, so it doesn't count.
-  const unmatched = useMemo(
-    () => files.filter((f) => byId.get(f.id)?.matched === false).map((f) => f.id),
-    [files, byId],
-  )
-  // Where the last jump landed (a file id, so a re-plan that reshuffles the
-  // unmatched set just restarts the cycle from the top instead of pointing at
-  // a row that may have since matched).
+  const [mode, setMode] = useState<JumpMode>('unmatched')
+  // The rows the jump cycles through, in each mode. A file with no annotation at
+  // all (the archive itself) was never a carve candidate, so it counts as
+  // neither matched nor unmatched.
+  const targets = useMemo(() => {
+    const test = JUMP_MODES[mode].test
+    return files.filter((f) => (byId.has(f.id) ? test(byId.get(f.id)!) : false)).map((f) => f.id)
+  }, [files, byId, mode])
+  // Where the last jump landed (a file id, so a re-plan that reshuffles the set
+  // — or a switch of mode — just restarts the cycle from the top instead of
+  // pointing at a row that no longer qualifies).
   const [cursor, setCursor] = useState('')
   const jumpNext = () => {
-    if (unmatched.length === 0) return
+    if (targets.length === 0) return
     // indexOf -1 (no jump yet, or the cursor's file got matched) rolls to 0.
-    const next = unmatched[(unmatched.indexOf(cursor) + 1) % unmatched.length]
+    const next = targets[(targets.indexOf(cursor) + 1) % targets.length]
     setCursor(next)
     // Instant, not smooth: with content-visibility the browser estimates
     // offscreen heights, and a long smooth scroll drifts as they realise.
@@ -1100,14 +1140,33 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
           size="small"
           startIcon={<ArrowDownwardIcon />}
           onClick={jumpNext}
-          disabled={unmatched.length === 0}
+          disabled={targets.length === 0}
         >
-          Next unmatched
+          Next
         </Button>
+        {/* One jump button with a mode beside it, rather than a button per mode:
+            the toolbar is sticky over a narrow column, and the modes are
+            alternatives — you are hunting for one kind of row at a time. */}
+        <Select
+          size="small"
+          variant="standard"
+          // No visible label — it reads as part of the button's sentence
+          // ("Next … unmatched") — so name it for screen readers explicitly.
+          inputProps={{ 'aria-label': 'What to jump to' }}
+          value={mode}
+          onChange={(e) => setMode(e.target.value as JumpMode)}
+          sx={{ fontSize: 13 }}
+        >
+          {(Object.keys(JUMP_MODES) as JumpMode[]).map((m) => (
+            <MenuItem key={m} value={m} sx={{ fontSize: 13 }}>
+              {JUMP_MODES[m].label}
+            </MenuItem>
+          ))}
+        </Select>
         <Typography variant="body2" color="text.secondary">
-          {unmatched.length === 0
-            ? 'every file matches'
-            : `${unmatched.length} of ${files.length} unmatched`}
+          {targets.length === 0
+            ? JUMP_MODES[mode].none
+            : JUMP_MODES[mode].count(targets.length, files.length)}
         </Typography>
       </Stack>
       {groups.map((group, gi) => (
