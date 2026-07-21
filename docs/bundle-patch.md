@@ -85,12 +85,33 @@ ignores them today and may use them later.
 ### Text encoding
 
 All read text fields (`source.url`, `bundle.name/creator/description_md`,
-`models[].name/category/tags/description_md/source_url`, `match.name/aliases`) are
+`models[].name/category/tags/description_md/source_url`, `match.name/aliases`, and
+the string values inside `custom_fields`) are
 **HTML-entity-decoded on ingest** — `&amp;` → `&`, `&#8211;` → `–` — so a scraper that lifts strings
 straight out of markup doesn't have to clean them. The two exceptions are
 `bundle.images` and `models[].image`/`models[].images`: image references are
 left untouched so they keep matching zip entry names byte for byte. Prefer emitting clean text
 anyway; the decoding is a safety net, not a feature to lean on.
+
+### Custom field values
+
+`custom_fields` is an object of `key: value`, where `key` is a custom field's
+**key** (Admin → Custom fields) — matched case-insensitively, and deliberately
+not its display name, so renaming a field for readability never breaks a
+scraper. What `value` may be depends on the field's kind:
+
+| Kind | JSON value | Clears the field when |
+|---|---|---|
+| `text` | a string | blank or whitespace |
+| `checkbox` | `true` / `false` | never — `false` is an answer, not an absence |
+| `choice` | a string equal to one of the field's defined choices | `""` |
+| `rating` | an integer, 1 up to the field's maximum | `0` or less |
+| `file` | — | a patch is JSON and has no bytes; always skipped with a warning |
+
+`null` clears any field. A value of the wrong JSON type, a choice the field
+doesn't define, or a rating above its maximum is **skipped with a warning**, not
+an error — same as an unknown key. Only the pairs that resolve are counted in
+the preview's `custom_fields_applied`.
 
 ## Matching: how a patch model finds its library model
 
