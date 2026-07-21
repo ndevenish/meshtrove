@@ -85,11 +85,23 @@ pub struct FileRecord {
     pub kind: FileKind,
     pub size: i64,
     pub created_at: DateTime<Utc>,
-    /// An `archive` staged in an import whose unpack has not run yet — queued
-    /// behind the rest of its batch, or still going. False everywhere else: a
-    /// committed model's files were unpacked long ago, and a non-archive never
-    /// unpacks at all.
-    pub unpacking: bool,
+    /// How the unpack of this archive went, read off its `import_archive` job.
+    /// `None` when there is no such job: a non-archive, an export awaiting
+    /// restore, or an archive in a format nothing here opens — never "unpacked
+    /// fine". The absence of a *running* job is not evidence of a finished one,
+    /// and reading it that way is what let unqueued formats sit in an import
+    /// wearing an "extracted" badge.
+    pub unpack: Option<UnpackState>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum UnpackState {
+    /// Queued behind the rest of its batch, or running now.
+    Pending,
+    Done,
+    /// The job gave up. The archive is still here to download and retry by hand.
+    Failed,
 }
 
 /// Kind heuristic from the filename; an explicit `kind` form field overrides.
@@ -466,7 +478,7 @@ pub(crate) async fn insert_file(
         kind: record.kind,
         size,
         created_at: record.created_at,
-        unpacking: false,
+        unpack: None,
     })
 }
 
@@ -496,7 +508,7 @@ async fn list_variant_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
-                unpacking: false,
+                unpack: None,
             })
             .collect(),
     ))
@@ -531,7 +543,7 @@ async fn list_model_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
-                unpacking: false,
+                unpack: None,
             })
             .collect(),
     ))
@@ -565,7 +577,7 @@ async fn list_bundle_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
-                unpacking: false,
+                unpack: None,
             })
             .collect(),
     ))
@@ -582,20 +594,25 @@ async fn list_import_files(
     // don't list them to a signed-out visitor (a guest viewer). The model/bundle
     // listings above stay open — those own committed, browsable content.
     user.require_editor()?;
-    // Whether *this* archive has unpacked yet, not whether the import as a whole
-    // is busy: a pickup holds every unpack until the batch is staged, so the
-    // zips sit there waiting their turn and one that has landed must not be
-    // lumped in with one that hasn't.
+    // How *this* archive's own unpack went, not whether the import as a whole is
+    // busy: a pickup holds every unpack until the batch is staged, so the
+    // archives sit there waiting their turn and one that has landed must not be
+    // lumped in with one that hasn't. The job row itself is the record — an
+    // archive with no job never had one queued, which is a different thing from
+    // one whose job has finished, and the two must not report the same.
     let rows = sqlx::query!(
-        r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
-                  f.kind as "kind: FileKind", f.created_at, b.size,
-                  EXISTS (
-                    SELECT 1 FROM jobs j
-                    WHERE j.kind = 'import_archive'
-                      AND j.status IN ('queued', 'running')
-                      AND j.payload->>'archive_file_id' = f.id::text
-                  ) as "unpacking!"
-           FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256
+        r#"SELECT f.id as "id!", f.blob_sha256 as "blob_sha256!", f.path as "path!",
+                  f.filename as "filename!", f.mime,
+                  f.kind as "kind!: FileKind", f.created_at as "created_at!", b.size as "size!",
+                  j.status::text as unpack_status
+           FROM files f
+           JOIN blobs b ON b.sha256 = f.blob_sha256
+           LEFT JOIN LATERAL (
+             SELECT j.status FROM jobs j
+             WHERE j.kind = 'import_archive'
+               AND j.payload->>'archive_file_id' = f.id::text
+             ORDER BY j.id DESC LIMIT 1
+           ) j ON true
            WHERE f.import_id = $1
            ORDER BY f.path, f.filename"#,
         id
@@ -613,7 +630,12 @@ async fn list_import_files(
                 kind: r.kind,
                 size: r.size,
                 created_at: r.created_at,
-                unpacking: r.unpacking,
+                unpack: r.unpack_status.as_deref().map(|status| match status {
+                    "queued" | "running" => UnpackState::Pending,
+                    "succeeded" => UnpackState::Done,
+                    // cancelled counts as failed: either way nothing came out.
+                    _ => UnpackState::Failed,
+                }),
             })
             .collect(),
     ))
@@ -852,7 +874,7 @@ async fn update_file(
         kind: record.kind,
         size: record.size,
         created_at: record.created_at,
-        unpacking: false,
+        unpack: None,
     }))
 }
 

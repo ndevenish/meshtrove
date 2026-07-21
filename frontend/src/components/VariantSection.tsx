@@ -55,6 +55,37 @@ import { changeTags, pasteTags } from '../tags'
 // it out of the main bundle.
 const StlPreviewDialog = lazy(() => import('./StlPreviewDialog'))
 
+/// What the archive chip says for each unpack state. `none` covers a staged
+/// archive with no unpack job behind it at all — which used to be shown as
+/// 'extracted', so a format the backend never opened looked dealt with. It
+/// isn't an error state on its own: a MeshTrove export waits here for a
+/// restore rather than being carved.
+const UNPACK_CHIP = {
+  pending: {
+    label: 'extracting…',
+    color: 'info',
+    title: 'Waiting for the rest of the drop to be staged, then unpacking into this import.',
+  },
+  done: {
+    label: 'extracted',
+    color: 'default',
+    title:
+      'Already unpacked into this import. The archive is kept as a record of what was dropped, and is never carved into a model.',
+  },
+  failed: {
+    label: 'extract failed',
+    color: 'error',
+    title:
+      'The unpack job gave up — see the Jobs page for why. The archive is still here to download and open by hand.',
+  },
+  none: {
+    label: 'not extracted',
+    color: 'warning',
+    title:
+      'Nothing has unpacked this archive: either it is a MeshTrove export waiting to be restored, or it is in a format MeshTrove cannot open. Its contents are not staged in this import.',
+  },
+} as const
+
 /// Wait for one job to settle. The render is the *job's* doing, so the picture is
 /// there when the job says so — no inferring it from the shape of the queue.
 /// Gives up after ~2 minutes and lets the caller refetch anyway; a render that
@@ -621,24 +652,20 @@ export const FileTree = memo(function FileTree({
                   </IconButton>
                 </Tooltip>
               )}
-              {/* Say where the zip has got to, or it reads as one more thing
+              {/* Say where the archive has got to, or it reads as one more thing
                   waiting to be dealt with. Once unpacked it is kept only as the
-                  record of what was dropped, and is never carved. */}
+                  record of what was dropped, and is never carved. A `null`
+                  unpack means no job ever ran for it: the chip says so rather
+                  than passing it off as extracted. */}
               {archivesExtracted && file.kind === 'archive' && (
-                <Tooltip
-                  title={
-                    file.unpacking
-                      ? 'Waiting for the rest of the drop to be staged, then unpacking into this import.'
-                      : 'Already unpacked into this import. The zip is kept as a record of what was dropped, and is never carved into a model.'
-                  }
-                >
+                <Tooltip title={UNPACK_CHIP[file.unpack ?? 'none'].title}>
                   <Chip
                     icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
-                    label={file.unpacking ? 'extracting…' : 'extracted'}
+                    label={UNPACK_CHIP[file.unpack ?? 'none'].label}
                     size="small"
                     variant="outlined"
-                    color={file.unpacking ? 'info' : 'default'}
-                    sx={{ height: 20, opacity: file.unpacking ? 1 : 0.7 }}
+                    color={UNPACK_CHIP[file.unpack ?? 'none'].color}
+                    sx={{ height: 20, opacity: file.unpack === 'done' ? 0.7 : 1 }}
                   />
                 </Tooltip>
               )}

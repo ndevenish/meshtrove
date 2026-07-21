@@ -131,9 +131,10 @@ export interface FileRecord {
   kind: 'model' | 'project' | 'raw' | 'document' | 'archive' | 'other'
   size: number
   created_at: string
-  /** An archive staged in an import that has not unpacked yet — its job is
-      queued behind the rest of the batch, or still running. */
-  unpacking: boolean
+  /** How this archive's unpack went. `null` when no unpack was ever queued —
+      a non-archive, an export awaiting restore, or a format nothing here
+      opens. Not the same as "unpacked fine", and must not be shown as such. */
+  unpack: 'pending' | 'done' | 'failed' | null
 }
 
 export interface VariantDetail {
