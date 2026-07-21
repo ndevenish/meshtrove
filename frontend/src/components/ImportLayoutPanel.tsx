@@ -24,6 +24,7 @@ import SaveIcon from '@mui/icons-material/Save'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
+import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
@@ -775,6 +776,140 @@ export default memo(function ImportLayoutPanel({
   )
 })
 
+type PathParts = FileAnnotation['parts']
+
+/// The character offsets a shared prefix is allowed to end at: just past a '/',
+/// and never *strictly inside* a highlighted run — a capture routinely straddles
+/// a slash (see WrappedPath), and cutting one in half would leave a header
+/// colouring the front of a value whose back is on another line. A slash at the
+/// very end of a roled part is a part boundary, not an interior split, so it
+/// stays allowed; and cutting a plain, role-less run is invisible, so those are
+/// allowed anywhere. That last case is what lets unmatched files — which arrive
+/// as a single unroled segment — group at all.
+function allowedCuts(parts: PathParts): number[] {
+  const cuts: number[] = []
+  let offset = 0
+  for (const part of parts) {
+    for (let i = 0; i < part.text.length; i++) {
+      if (part.text[i] === '/' && (part.role === undefined || i === part.text.length - 1)) {
+        cuts.push(offset + i + 1)
+      }
+    }
+    offset += part.text.length
+  }
+  return cuts
+}
+
+/// The parts covering `[from, to)` of the reassembled path, splitting the parts
+/// at either end and carrying their roles onto both halves.
+function sliceParts(parts: PathParts, from: number, to = Infinity): PathParts {
+  const out: PathParts = []
+  let offset = 0
+  for (const part of parts) {
+    const start = offset
+    offset += part.text.length
+    if (offset <= from || start >= to) continue
+    const text = part.text.slice(Math.max(0, from - start), Math.min(part.text.length, to - start))
+    if (text) out.push({ text, role: part.role })
+  }
+  return out
+}
+
+/// A prefix's identity: its text *and* its colouring. Two files in one folder can
+/// legitimately want different highlighting on the same path — a rule that
+/// contradicts itself is dropped for that file alone, taking its highlights with
+/// it — so keying on text would let a header show one file's colours over both.
+/// Keying on both simply splits them into two runs, and each header stays true.
+const prefixKey = (parts: PathParts, cut: number): string =>
+  sliceParts(parts, 0, cut)
+    .map((p) => `${p.role ?? ''}:${p.text}`)
+    .join(' ')
+
+/// A run of consecutive files sharing a highlighted prefix, which the list
+/// prints once as a header instead of on every row.
+interface FileGroup {
+  /** null for a lone file that shares nothing with its neighbours */
+  prefix: PathParts | null
+  key: string
+  rows: { file: FileRecord; parts: PathParts }[]
+}
+
+/// Fold the flat file list into prefix-sharing runs. Files arrive
+/// `ORDER BY path, filename`, so a run is a folder's worth of siblings.
+///
+/// Deepest prefix wins: two files in `Gold/32mm/` group under that, not under
+/// the `Gold/` they merely share with the folder next door. A header needs at
+/// least two rows to be worth its line. Grouping is deliberately one level deep and
+/// non-nesting — a header carries the whole shared prefix rather than stacking
+/// `Gold/` over `32mm/` — because recursive headers would rebuild the folder
+/// tree this view exists to flatten, and a depth-proportional indent would eat
+/// the row width the dedent is meant to hand to the chips.
+function groupByPrefix(files: FileRecord[], annotations: Map<string, FileAnnotation>): FileGroup[] {
+  const rows = files.map((file) => ({
+    file,
+    parts: annotations.get(file.id)?.parts ?? [
+      { text: file.path ? `${file.path}/${file.filename}` : file.filename },
+    ],
+  }))
+  const cuts = rows.map((row) =>
+    allowedCuts(row.parts).map((cut) => ({ cut, key: prefixKey(row.parts, cut) })),
+  )
+  const keys = cuts.map((list) => new Set(list.map((c) => c.key)))
+
+  // The deepest prefix each file shares with the one before it. Runs are built
+  // from *adjacent* pairs, not from "the deepest prefix of the first file that
+  // two or more files share": a file sitting alone in its folder shares only
+  // something shallow with its neighbour, and grouping on that would swallow
+  // every folder after it — one `Clockspring/` header over two thousand rows.
+  // Here it simply ends up in a run of one, and the next folder starts its own.
+  const shared: ({ cut: number; key: string } | null)[] = rows.map((_row, i) => {
+    if (i === 0) return null
+    for (let c = cuts[i].length - 1; c >= 0; c--) {
+      if (keys[i - 1].has(cuts[i][c].key)) return cuts[i][c]
+    }
+    return null
+  })
+
+  // Each file belongs with whichever neighbour it shares *more* with. Looking
+  // only backwards would hand a folder's first file to the run above it — the
+  // `images/a1.jpg` that shares merely the parent with the `.stl` before it, but
+  // the whole `images/` folder with the a2 after it, printed above its own
+  // header. An identical key means an identical prefix, so its length (the cut)
+  // is the same for every file in the run.
+  const belongs = shared.map((_pair, i) => {
+    const back = shared[i]
+    const forward = shared[i + 1] ?? null
+    if (!back) return forward
+    if (!forward) return back
+    return forward.cut > back.cut ? forward : back
+  })
+
+  const groups: FileGroup[] = []
+  let i = 0
+  while (i < rows.length) {
+    // A run is a maximal stretch of files that all chose the same prefix.
+    const run = belongs[i]
+    let end = i
+    if (run) while (end + 1 < rows.length && belongs[end + 1]?.key === run.key) end++
+    // A header over a single row would cost a line and save nothing.
+    if (run && end > i) {
+      groups.push({
+        prefix: sliceParts(rows[i].parts, 0, run.cut),
+        key: run.key,
+        rows: rows.slice(i, end + 1).map((row) => ({
+          file: row.file,
+          parts: sliceParts(row.parts, run.cut),
+        })),
+      })
+      i = end + 1
+    } else {
+      groups.push({ prefix: null, key: rows[i].file.id, rows: [rows[i]] })
+      i++
+    }
+  }
+  return groups
+}
+
 /// One row of the annotated list, memoised. The list runs to *every* staged
 /// file — thousands, not a 400-row excerpt — so a row must only re-render when
 /// its own inputs change: without the memo, each keystroke anywhere on the
@@ -784,21 +919,26 @@ export default memo(function ImportLayoutPanel({
 /// steady), so a re-plan costs roughly the visible screenful.
 const AnnotatedFileRow = memo(function AnnotatedFileRow({
   file,
+  parts,
   annotation,
   rules,
   highlighted,
+  indented,
 }: {
   file: FileRecord
+  /** the path to print: the whole thing, or just the part below the group's
+      header. Built once per plan by `groupByPrefix`, so it stays referentially
+      stable across the parent's keystroke re-renders and the memo holds. */
+  parts: PathParts
   annotation?: FileAnnotation
   /** the active rules, only so a self-contradicting one can be named in the
       warning marker */
   rules?: LayoutRule[]
   /** the row "Next unmatched" last jumped to */
   highlighted: boolean
+  /** sitting under a prefix header */
+  indented: boolean
 }) {
-  const parts = annotation?.parts ?? [
-    { text: file.path ? `${file.path}/${file.filename}` : file.filename },
-  ]
   const invalid = annotation?.invalid_rules ?? []
   return (
     <Stack
@@ -808,6 +948,10 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
       sx={{
         alignItems: 'flex-start',
         py: 0.25,
+        // One fixed step, not one per folder: the point of the header is to give
+        // width back to the trailing chips, and a depth-scaled indent takes it
+        // straight back again on a deep archive.
+        pl: indented ? 2 : 0,
         opacity: annotation?.matched ? 1 : 0.6,
         contentVisibility: 'auto',
         containIntrinsicBlockSize: 'auto 26px',
@@ -896,10 +1040,13 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
 
 /// The staged file list — all of it — annotated by the active plan: capture
 /// groups highlighted in role colours, resolved model/tags chips trailing each
-/// row. A sticky toolbar jumps to the next file no rule matched, so tuning a
-/// layout towards full coverage doesn't mean scrolling a few thousand rows by
-/// eye. Memoised because the parent re-renders on every form keystroke while
-/// this component's inputs only change when a new plan lands.
+/// row. Consecutive files sharing a highlighted prefix print it once as a
+/// header and hang the rest below it (`groupByPrefix`), which keeps a deep
+/// archive readable and leaves the rows their width for the chips. A sticky
+/// toolbar jumps to the next file no rule matched, so tuning a layout towards
+/// full coverage doesn't mean scrolling a few thousand rows by eye. Memoised
+/// because the parent re-renders on every form keystroke while this component's
+/// inputs only change when a new plan lands.
 export const AnnotatedFileList = memo(function AnnotatedFileList({
   files,
   annotations,
@@ -912,6 +1059,7 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
   rules?: LayoutRule[]
 }) {
   const byId = useMemo(() => new Map(annotations.map((a) => [a.id, a])), [annotations])
+  const groups = useMemo(() => groupByPrefix(files, byId), [files, byId])
   // The rows "Next unmatched" cycles through. A file with no annotation at all
   // (the archive itself) was never a carve candidate, so it doesn't count.
   const unmatched = useMemo(
@@ -962,14 +1110,45 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
             : `${unmatched.length} of ${files.length} unmatched`}
         </Typography>
       </Stack>
-      {files.map((file) => (
-        <AnnotatedFileRow
-          key={file.id}
-          file={file}
-          annotation={byId.get(file.id)}
-          rules={rules}
-          highlighted={cursor === file.id}
-        />
+      {groups.map((group, gi) => (
+        <Box key={`${gi}-${group.key}`}>
+          {group.prefix && (
+            // Never foldable, by design: a collapsed header would hide unmatched
+            // files from the eye *and* from the jump below, which is the one job
+            // this list has. It dedents; it isn't the folder tree.
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{
+                alignItems: 'center',
+                pt: 0.5,
+                // Match the rows: a header over nothing but unmatched files is
+                // as faded as they are, so the eye still reads dimness as "no
+                // rule reached this".
+                opacity: group.rows.some((r) => byId.get(r.file.id)?.matched) ? 1 : 0.6,
+              }}
+            >
+              <FolderOpenIcon sx={{ fontSize: 14, opacity: 0.5, flexShrink: 0 }} />
+              <Typography
+                variant="body2"
+                sx={{ fontFamily: 'monospace', fontSize: 12, minWidth: 0, color: 'text.secondary' }}
+              >
+                <WrappedPath parts={group.prefix} />
+              </Typography>
+            </Stack>
+          )}
+          {group.rows.map((row) => (
+            <AnnotatedFileRow
+              key={row.file.id}
+              file={row.file}
+              parts={row.parts}
+              annotation={byId.get(row.file.id)}
+              rules={rules}
+              highlighted={cursor === row.file.id}
+              indented={!!group.prefix}
+            />
+          ))}
+        </Box>
       ))}
     </Box>
   )
