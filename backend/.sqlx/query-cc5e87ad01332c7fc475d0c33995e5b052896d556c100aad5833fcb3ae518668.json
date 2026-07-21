@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, spec FROM exports WHERE id = $1",
+  "query": "SELECT name, spec, created_by FROM exports WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -24,6 +24,17 @@
             "name": "spec"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "created_by",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "exports",
+            "name": "created_by"
+          }
+        }
       }
     ],
     "parameters": {
@@ -33,8 +44,9 @@
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "a9aba1cac743a55912add24484b6ec0f2028c4dedd91afbca6960591a967ebc6"
+  "hash": "cc5e87ad01332c7fc475d0c33995e5b052896d556c100aad5833fcb3ae518668"
 }

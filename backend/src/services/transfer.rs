@@ -55,9 +55,50 @@ pub struct Manifest {
     pub models: Vec<Model>,
     #[serde(default)]
     pub bundles: Vec<Bundle>,
+    /// Definitions of every custom field the exported values reference. Carried
+    /// with the values because the vocabulary is an instance-wide admin setting:
+    /// the receiving instance may know nothing about these fields, so the import
+    /// has to be able to offer to create them.
+    #[serde(default)]
+    pub custom_fields: Vec<CustomFieldDef>,
     /// Every blob the file/image entries reference, with its size.
     #[serde(default)]
     pub blobs: Vec<Blob>,
+}
+
+/// A custom field definition as the archive carries it. `id` is a
+/// manifest-local key the values point at; `key` is what an import matches
+/// against the receiving instance's own vocabulary.
+#[derive(Serialize, Deserialize)]
+pub struct CustomFieldDef {
+    pub id: Uuid,
+    pub key: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub options: serde_json::Value,
+    pub applies_to_models: bool,
+    pub applies_to_bundles: bool,
+    #[serde(default)]
+    pub bundle_persists_to_model: bool,
+    #[serde(default)]
+    pub bundle_persist_overwrites: bool,
+    pub visibility: String,
+    #[serde(default)]
+    pub position: i32,
+}
+
+/// One custom field value on a model or bundle.
+#[derive(Serialize, Deserialize)]
+pub struct CustomFieldValue {
+    /// Manifest-local id of the definition in `Manifest::custom_fields`.
+    pub field_id: Uuid,
+    /// The scalar. Null for a file-kind value, which carries `file` instead.
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+    /// A file-kind value's payload, laid out in the archive like any other file.
+    #[serde(default)]
+    pub file: Option<File>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,6 +158,8 @@ pub struct Model {
     pub files: Vec<File>,
     #[serde(default)]
     pub images: Vec<Image>,
+    #[serde(default)]
+    pub custom_fields: Vec<CustomFieldValue>,
     #[serde(default)]
     pub source_archive: Option<SourceArchive>,
 }
@@ -223,6 +266,8 @@ pub struct Bundle {
     pub files: Vec<File>,
     #[serde(default)]
     pub images: Vec<Image>,
+    #[serde(default)]
+    pub custom_fields: Vec<CustomFieldValue>,
     #[serde(default)]
     pub source_archive: Option<SourceArchive>,
 }
@@ -420,8 +465,13 @@ pub struct ExportSpec {
 /// Gather an export from its spec: the chosen models (their filtered variants),
 /// and — if a bundle is named — that bundle's metadata with the members nested
 /// inside it under its category tabs.
+///
+/// `viewer` is whoever asked for the archive: custom field values they are not
+/// allowed to see are left out of it. An export is a file they walk away with,
+/// so the visibility rule has to hold here exactly as it does on the page.
 pub async fn gather_export(
     db: &PgPool,
+    viewer: &User,
     spec: &ExportSpec,
     exported_at: DateTime<Utc>,
 ) -> Result<Export, ApiError> {
@@ -445,6 +495,7 @@ pub async fn gather_export(
     let bundle_ids: Vec<Uuid> = spec.bundle_id.into_iter().collect();
     gather_core(
         db,
+        viewer,
         &spec.model_ids,
         &bundle_ids,
         &placement,
@@ -521,6 +572,7 @@ async fn bundle_placement(
 #[allow(clippy::too_many_arguments)]
 async fn gather_core(
     db: &PgPool,
+    viewer: &User,
     model_ids: &[Uuid],
     bundle_ids: &[Uuid],
     placement: &Placement,
@@ -534,6 +586,7 @@ async fn gather_core(
 
     let models = gather_models(
         db,
+        viewer,
         model_ids,
         placement,
         filter,
@@ -545,6 +598,7 @@ async fn gather_core(
     .await?;
     let bundles = gather_bundles(
         db,
+        viewer,
         bundle_ids,
         placement,
         kind_exclude,
@@ -610,6 +664,42 @@ async fn gather_core(
     })
     .collect();
 
+    // The definitions behind every value we exported: without them the receiving
+    // instance has a value and no idea what it means.
+    let mut field_ids: HashSet<Uuid> = HashSet::new();
+    for m in &models {
+        field_ids.extend(m.custom_fields.iter().map(|v| v.field_id));
+    }
+    for b in &bundles {
+        field_ids.extend(b.custom_fields.iter().map(|v| v.field_id));
+    }
+    let field_ids: Vec<Uuid> = field_ids.into_iter().collect();
+    let custom_fields = sqlx::query!(
+        r#"SELECT id, key::text as "key!", name, kind::text as "kind!", options,
+                  applies_to_models, applies_to_bundles,
+                  bundle_persists_to_model, bundle_persist_overwrites,
+                  visibility::text as "visibility!", position
+           FROM custom_fields WHERE id = ANY($1) ORDER BY position, name"#,
+        &field_ids
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .map(|r| CustomFieldDef {
+        id: r.id,
+        key: r.key,
+        name: r.name,
+        kind: r.kind,
+        options: r.options,
+        applies_to_models: r.applies_to_models,
+        applies_to_bundles: r.applies_to_bundles,
+        bundle_persists_to_model: r.bundle_persists_to_model,
+        bundle_persist_overwrites: r.bundle_persist_overwrites,
+        visibility: r.visibility,
+        position: r.position,
+    })
+    .collect();
+
     let mut blob_list: Vec<Blob> = blobs
         .into_iter()
         .map(|(sha256, size)| Blob { sha256, size })
@@ -638,6 +728,7 @@ async fn gather_core(
             variant_tags,
             models,
             bundles,
+            custom_fields,
             blobs: blob_list,
         },
         texts,
@@ -675,6 +766,7 @@ struct RawImage {
 #[allow(clippy::too_many_arguments)]
 async fn gather_models(
     db: &PgPool,
+    viewer: &User,
     model_ids: &[Uuid],
     placement: &Placement,
     filter: &VariantFilter,
@@ -780,6 +872,15 @@ async fn gather_models(
             blobs,
         );
         let images = build_images(model_images(db, r.id).await?, &base, assigner, blobs);
+        let custom_fields = gather_custom_fields(
+            db,
+            viewer,
+            crate::routes::custom_fields::ValueOwner::Model(r.id),
+            &base,
+            assigner,
+            blobs,
+        )
+        .await?;
         let source_archive = gather_source_archive_model(db, r.id).await?;
 
         models.push(Model {
@@ -799,6 +900,7 @@ async fn gather_models(
             variants,
             files,
             images,
+            custom_fields,
             source_archive,
         });
     }
@@ -808,6 +910,7 @@ async fn gather_models(
 #[allow(clippy::too_many_arguments)]
 async fn gather_bundles(
     db: &PgPool,
+    viewer: &User,
     bundle_ids: &[Uuid],
     placement: &Placement,
     kind_exclude: &[String],
@@ -890,6 +993,15 @@ async fn gather_bundles(
         // art stays namespaced under images/.
         let img_dir = format!("{base}/images");
         let images = build_images(bundle_images(db, r.id).await?, &img_dir, assigner, blobs);
+        let custom_fields = gather_custom_fields(
+            db,
+            viewer,
+            crate::routes::custom_fields::ValueOwner::Bundle(r.id),
+            &base,
+            assigner,
+            blobs,
+        )
+        .await?;
         let source_archive = gather_source_archive_bundle(db, r.id).await?;
 
         bundles.push(Bundle {
@@ -908,6 +1020,7 @@ async fn gather_bundles(
             categories,
             files,
             images,
+            custom_fields,
             source_archive,
         });
     }
@@ -1019,6 +1132,85 @@ async fn bundle_files(db: &PgPool, id: Uuid) -> Result<Vec<RawFile>, ApiError> {
     )
     .fetch_all(db)
     .await?)
+}
+
+/// Custom field values for one owner, with a file-kind value's file laid out
+/// under `base`. `kind_exclude` deliberately does not apply: a reference PDF is
+/// the *metadata's* payload, not one of the collection's documents, and dropping
+/// it would leave a value pointing at bytes the archive doesn't carry.
+async fn gather_custom_fields(
+    db: &PgPool,
+    viewer: &User,
+    owner: crate::routes::custom_fields::ValueOwner,
+    base: &str,
+    assigner: &mut PathAssigner,
+    blobs: &mut HashMap<String, i64>,
+) -> Result<Vec<CustomFieldValue>, ApiError> {
+    let (model_id, bundle_id) = match owner {
+        crate::routes::custom_fields::ValueOwner::Model(id) => (Some(id), None),
+        crate::routes::custom_fields::ValueOwner::Bundle(id) => (None, Some(id)),
+    };
+    let rows = sqlx::query!(
+        r#"SELECT v.field_id, v.value,
+                  cf.visibility as "visibility: crate::routes::custom_fields::CustomFieldVisibility",
+                  f.id as "file_id?", f.blob_sha256 as "blob_sha256?", f.path as "path?",
+                  f.filename as "filename?", f.mime as "mime?", f.kind::text as "file_kind?",
+                  f.created_at as "file_created_at?", b.size as "size?"
+           FROM custom_field_values v
+           JOIN custom_fields cf ON cf.id = v.field_id
+           LEFT JOIN files f ON f.custom_field_value_id = v.id
+           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256
+           WHERE v.model_id IS NOT DISTINCT FROM $1
+             AND v.bundle_id IS NOT DISTINCT FROM $2
+           ORDER BY v.field_id"#,
+        model_id,
+        bundle_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    let dir = format!("{base}/custom-fields");
+    let mut values = Vec::with_capacity(rows.len());
+    for r in rows {
+        if !viewer.can_see(r.visibility) {
+            continue;
+        }
+        let file = match (
+            r.file_id,
+            r.blob_sha256,
+            r.filename,
+            r.file_kind,
+            r.file_created_at,
+            r.size,
+        ) {
+            (Some(id), Some(sha256), Some(filename), Some(kind), Some(created_at), Some(size)) => {
+                build_files(
+                    vec![RawFile {
+                        id,
+                        blob_sha256: sha256,
+                        path: r.path.unwrap_or_default(),
+                        filename,
+                        mime: r.mime,
+                        kind,
+                        created_at,
+                        size,
+                    }],
+                    &dir,
+                    &[],
+                    assigner,
+                    blobs,
+                )
+                .pop()
+            }
+            _ => None,
+        };
+        values.push(CustomFieldValue {
+            field_id: r.field_id,
+            value: r.value,
+            file,
+        });
+    }
+    Ok(values)
 }
 
 async fn model_images(db: &PgPool, id: Uuid) -> Result<Vec<RawImage>, ApiError> {

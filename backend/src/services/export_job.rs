@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::extractors::{User, UserRole};
 use crate::services::transfer::{self, ExportSpec};
 use crate::state::AppState;
 
@@ -47,17 +48,46 @@ pub async fn export_archive(state: &AppState, payload: &Value) -> Result<()> {
     result
 }
 
+/// Who asked for this export, as the visibility rules see them. A nil
+/// `created_by` is the synthetic `--anonymous` admin, which has no `users` row;
+/// a row that has since been deleted falls back to the guest, which sees least.
+async fn requester(state: &AppState, created_by: Uuid) -> Result<User> {
+    if created_by.is_nil() {
+        return Ok(User {
+            id: Uuid::nil(),
+            username: "anonymous".into(),
+            role: UserRole::Admin,
+        });
+    }
+    Ok(sqlx::query_as!(
+        User,
+        r#"SELECT id, username as "username: String", role as "role: UserRole"
+           FROM users WHERE id = $1"#,
+        created_by,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or_else(User::guest))
+}
+
 async fn build(state: &AppState, export_id: Uuid) -> Result<()> {
-    let row = sqlx::query!("SELECT name, spec FROM exports WHERE id = $1", export_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| anyhow!("export {export_id} no longer exists"))?;
+    let row = sqlx::query!(
+        "SELECT name, spec, created_by FROM exports WHERE id = $1",
+        export_id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| anyhow!("export {export_id} no longer exists"))?;
 
     let spec: ExportSpec =
         serde_json::from_value(row.spec).context("stored export spec is unreadable")?;
+    // The archive carries only what the person who asked for it may see (custom
+    // fields have per-field visibility), so the job has to gather as them rather
+    // than as nobody in particular.
+    let requester = requester(state, row.created_by).await?;
 
     // gather + zip can be slow and CPU/IO-bound; do them without holding a txn.
-    let export = transfer::gather_export(&state.db, &spec, Utc::now())
+    let export = transfer::gather_export(&state.db, &requester, &spec, Utc::now())
         .await
         .map_err(|e| anyhow!("gathering export: {e}"))?;
 

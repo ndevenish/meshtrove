@@ -1,0 +1,156 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT v.field_id, v.value,\n                  cf.visibility as \"visibility: crate::routes::custom_fields::CustomFieldVisibility\",\n                  f.id as \"file_id?\", f.blob_sha256 as \"blob_sha256?\", f.path as \"path?\",\n                  f.filename as \"filename?\", f.mime as \"mime?\", f.kind::text as \"file_kind?\",\n                  f.created_at as \"file_created_at?\", b.size as \"size?\"\n           FROM custom_field_values v\n           JOIN custom_fields cf ON cf.id = v.field_id\n           LEFT JOIN files f ON f.custom_field_value_id = v.id\n           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE v.model_id IS NOT DISTINCT FROM $1\n             AND v.bundle_id IS NOT DISTINCT FROM $2\n           ORDER BY v.field_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "field_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "custom_field_values",
+            "name": "field_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "value",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "custom_field_values",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "visibility: crate::routes::custom_fields::CustomFieldVisibility",
+        "type_info": {
+          "Custom": {
+            "name": "custom_field_visibility",
+            "kind": {
+              "Enum": [
+                "anonymous",
+                "viewer",
+                "editor",
+                "admin"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "custom_fields",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "file_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "blob_sha256?",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "blob_sha256"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "path?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "filename?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "filename"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "mime?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "mime"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "file_kind?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "file_created_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "size?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "blobs",
+            "name": "size"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "57307e12d61dafa6e3818d1450bec0f4df3d1867f007696c11eae8533761baa8"
+}
