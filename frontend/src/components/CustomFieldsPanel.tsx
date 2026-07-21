@@ -313,8 +313,8 @@ function CustomFieldDialog({
             required
             helperText={
               target === 'new'
-                ? 'Letters, digits, - and _. Scraped metadata is matched against this; it follows the name until you change it.'
-                : 'Letters, digits, - and _. Scraped metadata is matched against this — changing it means any patch using the old key stops matching.'
+                ? 'How this field is identified when metadata is imported or exported — never shown on a model. Letters, digits, - and _. Follows the name until you change it.'
+                : 'How this field is identified when metadata is imported or exported — never shown on a model. Changing it means any patch using the old key stops matching.'
             }
           />
           <TextField
