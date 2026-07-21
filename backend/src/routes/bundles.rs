@@ -21,6 +21,7 @@ use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::custom_fields::{
     CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
+    persist_bundle_fields,
 };
 use crate::routes::models::{
     DescriptionInput, ImageSummary, LabelInput, ModelSummary, Revision, SearchQuery,
@@ -498,6 +499,9 @@ async fn update(
     set_bundle_tags(&mut tx, id, &input.tags).await?;
     if let Some(values) = &input.custom_fields {
         apply_values(&mut tx, ValueOwner::Bundle(id), values, &user).await?;
+        // A field marked "persists to model" reaches its members when the
+        // bundle's value is written, and only then.
+        persist_bundle_fields(&mut tx, id, &user).await?;
     }
     tx.commit().await?;
 

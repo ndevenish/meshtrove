@@ -675,6 +675,86 @@ pub async fn apply_values(
     Ok(())
 }
 
+/// Copy a bundle's persisting fields down onto its member models.
+///
+/// Runs when the bundle's value is *written* — an edit, a patch, a file upload
+/// — and only then: a model that joins the bundle later is not backfilled, and
+/// clearing the bundle's value doesn't reach in and clear the members' (they
+/// were given a value, and taking it back away is not what "persists to model"
+/// promises). A member that already has an answer of its own keeps it unless
+/// the field is marked to overwrite.
+pub async fn persist_bundle_fields(
+    db: &mut sqlx::PgConnection,
+    bundle_id: Uuid,
+    user: &User,
+) -> Result<(), ApiError> {
+    let fields = sqlx::query!(
+        r#"SELECT cf.id as field_id, cf.kind as "kind: CustomFieldKind",
+                  cf.bundle_persist_overwrites, v.id as value_id, v.value
+           FROM custom_fields cf
+           JOIN custom_field_values v ON v.field_id = cf.id AND v.bundle_id = $1
+           WHERE cf.bundle_persists_to_model AND cf.applies_to_models"#,
+        bundle_id,
+    )
+    .fetch_all(&mut *db)
+    .await?;
+    if fields.is_empty() {
+        return Ok(());
+    }
+
+    let members = sqlx::query_scalar!(
+        "SELECT model_id FROM bundle_models WHERE bundle_id = $1",
+        bundle_id,
+    )
+    .fetch_all(&mut *db)
+    .await?;
+    let editor = editor_id(user);
+
+    for field in &fields {
+        for &model_id in &members {
+            let occupied = sqlx::query_scalar!(
+                "SELECT id FROM custom_field_values WHERE field_id = $1 AND model_id = $2",
+                field.field_id,
+                model_id,
+            )
+            .fetch_optional(&mut *db)
+            .await?
+            .is_some();
+            if occupied && !field.bundle_persist_overwrites {
+                continue;
+            }
+            // A file-kind value carries no JSON; its row exists to own the file.
+            let value = field.value.clone().unwrap_or(serde_json::Value::Null);
+            let target = write_value(
+                &mut *db,
+                ValueOwner::Model(model_id),
+                field.field_id,
+                Some(&value),
+                editor,
+            )
+            .await?
+            .expect("a written value has a row");
+            if matches!(field.kind, CustomFieldKind::File) {
+                // Blobs are content-addressed, so "copying" the file is a row
+                // insert pointing at bytes that are already on disk.
+                sqlx::query!("DELETE FROM files WHERE custom_field_value_id = $1", target)
+                    .execute(&mut *db)
+                    .await?;
+                sqlx::query!(
+                    "INSERT INTO files (blob_sha256, custom_field_value_id, path, filename, mime, kind)
+                     SELECT f.blob_sha256, $2, f.path, f.filename, f.mime, f.kind
+                     FROM files f WHERE f.custom_field_value_id = $1",
+                    field.value_id,
+                    target,
+                )
+                .execute(&mut *db)
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn upload_model_file(
     State(state): State<AppState>,
     user: User,
@@ -753,6 +833,9 @@ async fn upload_file(
         crate::routes::files::guess_kind(&filename),
     )
     .await?;
+    if let ValueOwner::Bundle(bundle_id) = owner {
+        persist_bundle_fields(&mut conn, bundle_id, &user).await?;
+    }
 
     one_value(&state, owner, field.id, &user).await.map(Json)
 }
