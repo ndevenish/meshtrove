@@ -64,6 +64,10 @@ pub fn resolve(dropbox: &Path, entry: &str) -> Result<PathBuf> {
 /// Everything a pickup of `entry` would stage. A plain file is one `DropFile`; a
 /// folder is its tree, OS cruft dropped the same way the zip importer drops it.
 ///
+/// One exception: volume 1 of a multi-volume rar drags in the rest of its set
+/// (see [`volumes_beside`]). The set is one archive, and picking up a third of
+/// it would stage something nothing can open.
+///
 /// Blocking (it stats a tree) — call from `spawn_blocking`.
 pub fn scan(entry: &Path) -> Result<Vec<DropFile>> {
     let name = entry
@@ -79,13 +83,57 @@ pub fn scan(entry: &Path) -> Result<Vec<DropFile>> {
     if meta.is_dir() {
         collect(entry, &name, 0, &mut out)?;
     } else if !files::is_os_junk(&name) {
-        out.push(DropFile {
-            dir: String::new(),
-            filename: name,
-            size: meta.len(),
-            source: entry.to_path_buf(),
-        });
+        for path in volumes_beside(entry, &name)? {
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            let size = std::fs::metadata(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+                .len();
+            out.push(DropFile {
+                dir: String::new(),
+                filename,
+                size,
+                source: path,
+            });
+        }
     }
+    Ok(out)
+}
+
+/// Every file a pickup of `entry` takes when `entry` is a lone file: itself,
+/// plus the other volumes of its rar set if it is volume 1 of one — sorted, so
+/// the list is the same on every scan.
+///
+/// A set downloaded straight into the dropbox arrives as `Dragon.part1.rar`,
+/// `Dragon.part2.rar`, … side by side. Each is a top-level entry, so without
+/// this each becomes its own import and volume 1's unpack fails on an archive
+/// that is two thirds missing. Gathered up, they stage into one import at one
+/// path, which is what the unpack needs (see
+/// [`crate::services::importer::stage_volumes`]).
+pub fn volumes_beside(entry: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    use crate::services::archive;
+    let is_first = archive::volume_of(name).is_some_and(|v| v.index == 1);
+    let Some(dir) = entry.parent().filter(|_| is_first) else {
+        return Ok(vec![entry.to_path_buf()]);
+    };
+    let mut out = vec![entry.to_path_buf()];
+    for found in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let found = found?;
+        let Some(other) = found.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if other == name || !archive::same_volume_set(name, &other) {
+            continue;
+        }
+        // A folder named like a volume is not one, and a link is followed only
+        // when it is the entry the admin actually named.
+        if found.metadata()?.is_file() {
+            out.push(found.path());
+        }
+    }
+    out.sort();
     Ok(out)
 }
 
@@ -189,6 +237,35 @@ mod tests {
         assert_eq!(files[0].dir, "");
         assert_eq!(files[0].filename, "set.zip");
         assert_eq!(files[0].size, 3);
+    }
+
+    /// A rar set downloaded straight into the dropbox is several files that are
+    /// one archive. Picking up volume 1 on its own stages an archive with two
+    /// thirds missing, and the unpack fails on it.
+    #[test]
+    fn a_pickup_of_volume_one_takes_the_whole_set() {
+        let root = temp_dropbox();
+        let dropbox = root.join("dropbox");
+        for name in ["Dragon.part1.rar", "Dragon.part2.rar", "Dragon.part3.rar"] {
+            std::fs::write(dropbox.join(name), b"rar").unwrap();
+        }
+        // Not part of it: another archive, and another set.
+        std::fs::write(dropbox.join("Griffin.part1.rar"), b"rar").unwrap();
+        std::fs::write(dropbox.join("Dragon.zip"), b"zip").unwrap();
+
+        let files = scan(&dropbox.join("Dragon.part1.rar")).unwrap();
+        let staged: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+        assert_eq!(
+            staged,
+            vec!["Dragon.part1.rar", "Dragon.part2.rar", "Dragon.part3.rar"]
+        );
+        // They land side by side at the import's root, which is what lets the
+        // unpack put them in one directory.
+        assert!(files.iter().all(|f| f.dir.is_empty()));
+        // Volume 2 speaks only for itself — it is listed under volume 1, and
+        // only ever picked up through it.
+        let alone = scan(&dropbox.join("Dragon.part2.rar")).unwrap();
+        assert_eq!(alone.len(), 1);
     }
 }
 

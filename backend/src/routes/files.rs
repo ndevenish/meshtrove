@@ -107,8 +107,12 @@ pub enum UnpackState {
 /// Kind heuristic from the filename; an explicit `kind` form field overrides.
 pub fn guess_kind(filename: &str) -> FileKind {
     // Archives first: theirs are the only extensions that come in more than one
-    // piece (`.tar.gz`), so a last-dot split can't see them.
-    if crate::services::archive::format_of(filename).is_some() {
+    // piece (`.tar.gz`), so a last-dot split can't see them. A `.r00` is an
+    // archive too — half of one, opened only alongside its `.rar` — and calling
+    // it anything else would carve it into a model as though it were content.
+    if crate::services::archive::format_of(filename).is_some()
+        || crate::services::archive::volume_of(filename).is_some()
+    {
         return FileKind::Archive;
     }
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -399,6 +403,15 @@ pub(crate) async fn on_archive_ingested(
     if !matches!(kind, FileKind::Archive) {
         return Ok(());
     }
+    // A multi-volume rar is one archive in several files, and it unpacks from
+    // volume 1: libarchive walks to the rest by name once they are side by side
+    // (services/importer stages them that way). Queuing the later volumes too
+    // would be one job that duplicates the set's contents and n-1 that fail on a
+    // truncated archive — so the set gets exactly one job, and the volumes
+    // behind it report its state (see `list_import_files`).
+    if !crate::services::archive::is_first_volume(filename) {
+        return Ok(());
+    }
     let is_export = format == Format::Zip
         && matches!(owner, Owner::Import(_))
         && crate::services::transfer::read_manifest_from_blob(&state.store, sha256)
@@ -619,26 +632,58 @@ async fn list_import_files(
     )
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| FileRecord {
-                id: r.id,
-                blob_sha256: r.blob_sha256,
-                path: r.path,
-                filename: r.filename,
-                mime: r.mime,
-                kind: r.kind,
-                size: r.size,
-                created_at: r.created_at,
-                unpack: r.unpack_status.as_deref().map(|status| match status {
-                    "queued" | "running" => UnpackState::Pending,
-                    "succeeded" => UnpackState::Done,
-                    // cancelled counts as failed: either way nothing came out.
-                    _ => UnpackState::Failed,
-                }),
-            })
-            .collect(),
-    ))
+    let mut records: Vec<FileRecord> = rows
+        .into_iter()
+        .map(|r| FileRecord {
+            id: r.id,
+            blob_sha256: r.blob_sha256,
+            path: r.path,
+            filename: r.filename,
+            mime: r.mime,
+            kind: r.kind,
+            size: r.size,
+            created_at: r.created_at,
+            unpack: r.unpack_status.as_deref().map(|status| match status {
+                "queued" | "running" => UnpackState::Pending,
+                "succeeded" => UnpackState::Done,
+                // cancelled counts as failed: either way nothing came out.
+                _ => UnpackState::Failed,
+            }),
+        })
+        .collect();
+    adopt_volume_unpack(&mut records);
+    Ok(Json(records))
+}
+
+/// Let the later volumes of a rar set report the set's unpack.
+///
+/// The set is one archive spread over several files and has one job, on volume 1
+/// (see [`on_archive_ingested`]). The volumes behind it have no job of their
+/// own, and no job is drawn as *not extracted* — which would put a warning chip
+/// on every volume but the first of a set that unpacked perfectly. What happened
+/// to the set is what happened to them.
+fn adopt_volume_unpack(records: &mut [FileRecord]) {
+    use crate::services::archive;
+    let firsts: Vec<(String, String, Option<UnpackState>)> = records
+        .iter()
+        .filter(|r| archive::volume_of(&r.filename).is_some_and(|v| v.index == 1))
+        .map(|r| (r.path.clone(), r.filename.clone(), r.unpack))
+        .collect();
+    for record in records.iter_mut() {
+        // A set lives in one folder, so volume 1 is looked for in this one.
+        let set = match archive::volume_of(&record.filename) {
+            Some(volume) if volume.index > 1 => firsts
+                .iter()
+                .find(|(path, name, _)| {
+                    *path == record.path && archive::same_volume_set(name, &record.filename)
+                })
+                .map(|(_, _, unpack)| *unpack),
+            _ => None,
+        };
+        if let Some(unpack) = set {
+            record.unpack = unpack;
+        }
+    }
 }
 
 /// The container a file is sorted within: a model (directly or via a variant),
@@ -1134,7 +1179,61 @@ fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileKind, guess_kind, is_os_junk, parse_range};
+    use super::{
+        FileKind, FileRecord, UnpackState, adopt_volume_unpack, guess_kind, is_os_junk, parse_range,
+    };
+
+    fn staged(path: &str, filename: &str, unpack: Option<UnpackState>) -> FileRecord {
+        FileRecord {
+            id: uuid::Uuid::nil(),
+            blob_sha256: String::new(),
+            path: path.into(),
+            filename: filename.into(),
+            mime: None,
+            kind: guess_kind(filename),
+            size: 0,
+            created_at: chrono::Utc::now(),
+            unpack,
+        }
+    }
+
+    /// A set has one unpack job, on volume 1. Read the rest as "no job ever ran"
+    /// and every volume behind it wears a *not extracted* warning while sitting
+    /// in an import that unpacked perfectly.
+    #[test]
+    fn the_later_volumes_of_a_set_report_its_unpack() {
+        let mut records = vec![
+            staged("Pack", "Dragon.part1.rar", Some(UnpackState::Done)),
+            staged("Pack", "Dragon.part2.rar", None),
+            staged("Pack", "Dragon.part3.rar", None),
+            // Its own archive, with its own job: untouched.
+            staged("Pack", "Griffin.zip", Some(UnpackState::Failed)),
+            // A set whose volume 1 is elsewhere speaks only for itself.
+            staged("Other", "Dragon.part2.rar", None),
+        ];
+        adopt_volume_unpack(&mut records);
+        let state: Vec<Option<UnpackState>> = records.iter().map(|r| r.unpack).collect();
+        assert_eq!(
+            state,
+            vec![
+                Some(UnpackState::Done),
+                Some(UnpackState::Done),
+                Some(UnpackState::Done),
+                Some(UnpackState::Failed),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_set_still_unpacking_says_so_on_every_volume() {
+        let mut records = vec![
+            staged("", "Dragon.rar", Some(UnpackState::Pending)),
+            staged("", "Dragon.r00", None),
+        ];
+        adopt_volume_unpack(&mut records);
+        assert_eq!(records[1].unpack, Some(UnpackState::Pending));
+    }
 
     /// The 'model' kind is geometry, and only geometry. What a slicer or CAD
     /// tool *works in* is a project; what it spits out for one printer is raw.
@@ -1151,6 +1250,10 @@ mod tests {
         }
         assert!(matches!(guess_kind("readme.pdf"), FileKind::Document));
         assert!(matches!(guess_kind("pack.zip"), FileKind::Archive));
+        // Half an archive is still an archive: staged beside its `.rar`, never
+        // carved into a model as content.
+        assert!(matches!(guess_kind("Dragon.r00"), FileKind::Archive));
+        assert!(matches!(guess_kind("Dragon.part2.rar"), FileKind::Archive));
     }
 
     #[test]

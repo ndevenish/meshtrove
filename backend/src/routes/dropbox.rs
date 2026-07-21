@@ -81,12 +81,31 @@ async fn list(State(state): State<AppState>, user: User) -> Result<Json<DropboxL
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
             Err(e) => return Err(e.into()),
         };
+        let read: Vec<std::fs::DirEntry> = read.collect::<std::io::Result<Vec<_>>>()?;
+        // Names present, so a volume can tell whether the volume 1 that speaks
+        // for it is here.
+        let present: Vec<String> = read
+            .iter()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .collect();
         for entry in read {
-            let entry = entry?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
             if name.starts_with('.') {
+                continue;
+            }
+            // One archive, one entry: a rar set shows as its volume 1, whose
+            // count and size cover the whole set and whose pickup takes all of
+            // it (services/dropbox::volumes_beside). Listing the other volumes
+            // beside it would offer three imports of one third of an archive.
+            let volume = crate::services::archive::volume_of(&name);
+            if volume.is_some_and(|v| v.index > 1)
+                && present.iter().any(|other| {
+                    crate::services::archive::volume_of(other).is_some_and(|v| v.index == 1)
+                        && crate::services::archive::same_volume_set(other, &name)
+                })
+            {
                 continue;
             }
             let meta = entry.metadata()?;
@@ -246,21 +265,28 @@ async fn remove(
     let path = dropbox::resolve(&state.config.dropbox_dir(), query.entry.trim())
         .map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
 
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+    let name = query.entry.trim().to_string();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         // The entry may be a symlink (a dropbox pointed at a NAS share). Removing
         // it must unlink the entry itself — never recurse through the link and
         // wipe the share behind it — so branch on the *link's* own type, not the
         // target's. On Unix `remove_file` unlinks a symlink whatever it points at.
         let kind = std::fs::symlink_metadata(&path)?.file_type();
         if kind.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
+            std::fs::remove_dir_all(&path)?;
+            return Ok(());
         }
+        // A rar set is listed as one entry and picked up as one archive, so it
+        // is deleted as one too: leaving volumes 2..n behind would leave the
+        // dropbox holding an archive with no beginning.
+        for volume in dropbox::volumes_beside(&path, &name)? {
+            std::fs::remove_file(&volume)?;
+        }
+        Ok(())
     })
     .await
     .map_err(|e| ApiError::Internal(anyhow::Error::new(e)))?
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .map_err(ApiError::Internal)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

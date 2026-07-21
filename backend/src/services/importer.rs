@@ -74,17 +74,39 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
 
     let format = archive::format_of(&archive.filename)
         .ok_or_else(|| anyhow!("{} is not an archive format we unpack", archive.filename))?;
-    let tmp_dir = std::env::temp_dir().join(format!("meshtrove-import-{}", Uuid::new_v4()));
-    let entries = match extract(format, &archive_path, &tmp_dir).await {
+    // Two dirs, not one: `out` is walked afterwards for what came out, so the
+    // volume links a multi-volume set needs can't live in it.
+    let work = std::env::temp_dir().join(format!("meshtrove-import-{}", Uuid::new_v4()));
+    let tmp_dir = work.join("out");
+    let entries = match stage_volumes(
+        state,
+        Volume {
+            file_id: payload.archive_file_id,
+            filename: &archive.filename,
+            sha256: &archive.blob_sha256,
+            path: &archive.path,
+            owner: (model_id, variant_id, bundle_id, import_id),
+        },
+        &work,
+    )
+    .await
+    {
+        Ok(source) => {
+            let source = source.unwrap_or(archive_path);
+            extract(format, &source, &tmp_dir).await
+        }
+        Err(error) => Err(error),
+    };
+    let entries = match entries {
         Ok(entries) => entries,
         Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            let _ = tokio::fs::remove_dir_all(&work).await;
             return Err(error);
         }
     };
 
     if entries.is_empty() {
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        let _ = tokio::fs::remove_dir_all(&work).await;
         return Err(anyhow!("archive contained no usable files"));
     }
 
@@ -144,7 +166,7 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         }
     }
 
-    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    let _ = tokio::fs::remove_dir_all(&work).await;
 
     // Queue a preview render for the owner's first STL if it has no image yet.
     // The renderer stamps the image onto whichever owner the source file
@@ -238,6 +260,11 @@ pub async fn requeue_missed_archives(state: &AppState) -> Result<()> {
             .execute(&state.db)
             .await?;
         }
+        // The set unpacks from volume 1, which gets the one job; the volumes
+        // behind it are opened as part of it (see `stage_volumes`).
+        if !archive::is_first_volume(&file.filename) {
+            continue;
+        }
         jobs::enqueue(
             &state.db,
             "import_archive",
@@ -261,6 +288,142 @@ pub async fn requeue_missed_archives(state: &AppState) -> Result<()> {
 /// since a blob in the store has no extension to go on. Debian ships it as
 /// `libarchive-tools`; the Dockerfile installs it beside f3d.
 const BSDTAR: &str = "bsdtar";
+
+/// The archive an unpack was queued for, as [`stage_volumes`] needs to see it:
+/// enough to find the rest of its set, which is the files sharing its owner and
+/// its folder.
+struct Volume<'a> {
+    file_id: Uuid,
+    filename: &'a str,
+    sha256: &'a str,
+    path: &'a str,
+    /// `(model, variant, bundle, import)` — exactly one is set, and it is the
+    /// bucket the set was staged into.
+    owner: (Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<Uuid>),
+}
+
+/// Put every volume of a multi-volume rar in one directory under its real name,
+/// and return the path to volume 1 — what bsdtar should be pointed at instead of
+/// the blob. `None` when `archive` is not part of a set, which is every other
+/// archive there is.
+///
+/// This is the whole reason a `.partN.rar` needs handling at all. libarchive
+/// reads a set by opening volume 1 and then *guessing the next volume's
+/// filename* from it, in the same directory. Our copy of each volume is a blob
+/// at `store/ab/cd/<sha256>` — no name to guess from, no two volumes in one
+/// directory — so pointing bsdtar at the blob gets volume 1's worth of files and
+/// a "truncated archive" error. A directory of symlinks costs nothing (the bytes
+/// stay in the store, read straight through the link) and gives libarchive
+/// exactly the layout it expects.
+///
+/// Symlinks, not hardlinks: the scratch dir and the store are routinely on
+/// different filesystems, and a hardlink can't cross one.
+async fn stage_volumes(
+    state: &AppState,
+    archive: Volume<'_>,
+    work: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(mine) = archive::volume_of(archive.filename) else {
+        return Ok(None);
+    };
+    let (model_id, variant_id, bundle_id, import_id) = archive.owner;
+    // Everything else staged in the same bucket, in the same folder. Which of
+    // them are volumes of *this* set is a question for the name, not for SQL.
+    let siblings = sqlx::query!(
+        r#"SELECT f.filename, f.blob_sha256
+           FROM files f
+           WHERE f.path = $1 AND f.id <> $2
+             AND f.model_id IS NOT DISTINCT FROM $3
+             AND f.variant_id IS NOT DISTINCT FROM $4
+             AND f.bundle_id IS NOT DISTINCT FROM $5
+             AND f.import_id IS NOT DISTINCT FROM $6"#,
+        archive.path,
+        archive.file_id,
+        model_id,
+        variant_id,
+        bundle_id,
+        import_id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut set: Vec<(u32, String, String)> = siblings
+        .into_iter()
+        .filter(|f| archive::same_volume_set(archive.filename, &f.filename))
+        .filter_map(|f| {
+            archive::volume_of(&f.filename).map(|v| (v.index, f.filename.clone(), f.blob_sha256))
+        })
+        .collect();
+    if set.is_empty() {
+        // A lone `.rar` reads as volume 1 of a set of one — which is just an
+        // archive, and unpacks straight from its blob like every other one.
+        return Ok(None);
+    }
+    set.push((
+        mine.index,
+        archive.filename.to_string(),
+        archive.sha256.to_string(),
+    ));
+    set.sort();
+
+    // Only volume 1 is ever queued, but a job can be retried by hand long after
+    // the set it belonged to changed shape.
+    if mine.index != 1 {
+        return Err(anyhow!(
+            "{} is volume {} of its set — the set unpacks from volume 1",
+            archive.filename,
+            mine.index,
+        ));
+    }
+    // A gap is worth naming: libarchive would report it as a truncated archive,
+    // which reads as a corrupt download rather than a missing file.
+    for (want, (have, name, _)) in (1u32..).zip(&set) {
+        if have != &want {
+            return Err(anyhow!(
+                "volume {want} of {} is missing — got {name} where it should be",
+                archive::stem_of(archive.filename),
+            ));
+        }
+    }
+
+    let dir = work.join("volumes");
+    tokio::fs::create_dir_all(&dir).await?;
+    for (_, name, sha256) in &set {
+        // The link name comes from a filename column, which is a name and not a
+        // path — but a link that escaped `dir` would be one bsdtar happily reads
+        // and writes through, so this is checked rather than assumed.
+        if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+            return Err(anyhow!("{name:?} is not a usable volume name"));
+        }
+        // Absolute: the link lives in the scratch dir, so a store path relative
+        // to the working directory would not resolve from there.
+        let blob = std::fs::canonicalize(state.store.path_for(sha256))
+            .with_context(|| format!("locating the blob for volume {name}"))?;
+        link_volume(&blob, &dir.join(name))
+            .with_context(|| format!("staging volume {name} for the unpack"))?;
+    }
+    tracing::info!(
+        set = archive::stem_of(archive.filename),
+        volumes = set.len(),
+        "unpacking a multi-volume archive"
+    );
+    Ok(Some(dir.join(archive.filename)))
+}
+
+/// One volume in place under the name libarchive will look for.
+#[cfg(unix)]
+fn link_volume(blob: &std::path::Path, link: &std::path::Path) -> Result<()> {
+    std::os::unix::fs::symlink(blob, link)?;
+    Ok(())
+}
+
+/// No symlinks to rely on: copy the blob instead. Costs the bytes, and only on
+/// a platform we don't deploy to.
+#[cfg(not(unix))]
+fn link_volume(blob: &std::path::Path, link: &std::path::Path) -> Result<()> {
+    std::fs::copy(blob, link)?;
+    Ok(())
+}
 
 /// Unpack `archive_path` into a fresh `tmp_dir`, returning each file as
 /// `(logical path within the archive, path on disk)`. The caller owns `tmp_dir`
@@ -453,17 +616,20 @@ async fn unpack_dest(
     path: &str,
     filename: &str,
 ) -> Result<String> {
-    let has_siblings = sqlx::query_scalar!(
-        r#"SELECT EXISTS (
-             SELECT 1 FROM files
-             WHERE import_id = $1 AND path = $2 AND id <> $3
-           ) as "exists!""#,
+    let others = sqlx::query_scalar!(
+        "SELECT filename FROM files WHERE import_id = $1 AND path = $2 AND id <> $3",
         import_id,
         path,
         archive_file_id,
     )
-    .fetch_one(db)
+    .fetch_all(db)
     .await?;
+    // The other volumes of a set are not company — they are the same archive.
+    // A drop of `Dragon.part1.rar` … `Dragon.part3.rar` is one archive dropped
+    // alone, and unpacks in place like any other archive dropped alone.
+    let has_siblings = others
+        .iter()
+        .any(|other| !archive::same_volume_set(filename, other));
     Ok(dest_for(path, filename, has_siblings))
 }
 
@@ -571,6 +737,52 @@ mod tests {
             // Folder structure preserved, OS junk dropped.
             assert_eq!(paths, vec!["parts/body.stl", "readme.txt"], "{name}");
         }
+    }
+
+    /// A multi-volume set is unpacked through a directory of symlinks named
+    /// after its volumes, because a blob has no name for libarchive to walk the
+    /// set by (see [`super::stage_volumes`]). Building a real multi-volume rar
+    /// needs the non-free `rar` to write one, so what is checked here is the
+    /// half we own: bsdtar reads the archive perfectly well when the path it is
+    /// given is a link into the store under a made-up name.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_archive_unpacks_through_a_link_named_after_it() {
+        let root = std::env::temp_dir().join(format!("meshtrove-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("store")).unwrap();
+        std::fs::create_dir_all(root.join("volumes")).unwrap();
+        std::fs::write(root.join("src.stl"), "solid body").unwrap();
+
+        // Stand in for a blob: content-addressed, so no extension and no name.
+        let blob = root.join("store/9f86d081884c7d659a2feaa0c55ad015");
+        let built = tokio::process::Command::new(BSDTAR)
+            .arg("-a")
+            .arg("-c")
+            .arg("--format=7zip")
+            .arg("-f")
+            .arg(&blob)
+            .arg("-C")
+            .arg(&root)
+            .arg("src.stl")
+            .status()
+            .await;
+        match built {
+            Ok(status) => assert!(status.success(), "building the archive"),
+            Err(_) => {
+                eprintln!("skipping: {BSDTAR} not on PATH");
+                std::fs::remove_dir_all(&root).ok();
+                return;
+            }
+        }
+
+        let link = root.join("volumes/Dragon.part1.rar");
+        std::os::unix::fs::symlink(&blob, &link).unwrap();
+        let entries = extract(Format::Libarchive, &link, &root.join("out"))
+            .await
+            .unwrap();
+        let paths: Vec<String> = entries.into_iter().map(|(logical, _)| logical).collect();
+        assert_eq!(paths, vec!["src.stl"]);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Modes come out of the archive, and an archive is free to record ones
