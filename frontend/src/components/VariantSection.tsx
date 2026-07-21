@@ -30,6 +30,9 @@ import AddIcon from '@mui/icons-material/Add'
 import DownloadIcon from '@mui/icons-material/Download'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import FolderIcon from '@mui/icons-material/Folder'
+import FolderOpenIcon from '@mui/icons-material/FolderOpen'
+import UnfoldMoreIcon from '@mui/icons-material/UnfoldMore'
+import UnfoldLessIcon from '@mui/icons-material/UnfoldLess'
 import CreateNewFolderIcon from '@mui/icons-material/CreateNewFolder'
 import EditIcon from '@mui/icons-material/Edit'
 import CheckIcon from '@mui/icons-material/Check'
@@ -427,6 +430,11 @@ export const FileTree = memo(function FileTree({
   const [splitName, setSplitName] = useState('')
   const [splitting, setSplitting] = useState(false)
   const [previewFile, setPreviewFile] = useState<FileRecord | null>(null)
+  // Folders the user has folded shut. Collapsing a folder takes everything
+  // under it with it, so this holds only the folders clicked, not their
+  // descendants — a descendant keeps whatever state it had for when its parent
+  // opens again.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   const startFolder = (dir: string) => {
     setEditingDir(dir)
@@ -506,7 +514,9 @@ export const FileTree = memo(function FileTree({
         const parts = dir.split('/')
         for (let i = 1; i < parts.length; i++) {
           const ancestor = parts.slice(0, i).join('/')
-          if (!byDir.has(ancestor)) byDir.set(ancestor, [])
+          // The root group's key is '/', whose first "ancestor" is the empty
+          // string — not a folder, and it used to be listed as one.
+          if (ancestor && !byDir.has(ancestor)) byDir.set(ancestor, [])
         }
       }
     }
@@ -520,6 +530,50 @@ export const FileTree = memo(function FileTree({
   /// non-empty.
   const under = (dir: string) =>
     groups.filter(([d]) => d.startsWith(`${dir}/`)).flatMap(([, entries]) => entries)
+
+  /// Every folder in the tree, and how many files sit anywhere beneath it —
+  /// what a collapsed folder reports it is hiding. Counted by walking each
+  /// file's path once and crediting all of its ancestors, so the whole map
+  /// costs one pass rather than a scan per folder.
+  const subtreeCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const file of files) {
+      const dir = file.path || '/'
+      if (dir === '/') continue
+      const parts = dir.split('/')
+      for (let i = 1; i <= parts.length; i++) {
+        const ancestor = parts.slice(0, i).join('/')
+        counts.set(ancestor, (counts.get(ancestor) ?? 0) + 1)
+      }
+    }
+    return counts
+  }, [files])
+
+  const dirs = useMemo(() => groups.map(([dir]) => dir).filter((dir) => dir !== '/'), [groups])
+  // A folder is folded away if any ancestor is collapsed. The root group is in
+  // no folder, so nothing can fold it away.
+  const hidden = (dir: string) => {
+    if (dir === '/') return false
+    const parts = dir.split('/')
+    for (let i = 1; i < parts.length; i++) {
+      if (collapsed.has(parts.slice(0, i).join('/'))) return true
+    }
+    return false
+  }
+  /// Fold a folder shut or open it again. `deep` (alt/option-click, as in
+  /// Finder and VS Code) puts everything under it into the same state, so
+  /// opening a folder that way reveals the whole subtree rather than whatever
+  /// each descendant was left at.
+  const toggleDir = (dir: string, deep: boolean) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      const collapsing = !prev.has(dir)
+      const apply = (d: string) => (collapsing ? next.add(d) : next.delete(d))
+      apply(dir)
+      if (deep) for (const d of dirs) if (d.startsWith(`${dir}/`)) apply(d)
+      return next
+    })
+  }
 
   // Reserve the 3D-preview column on every row once any file can show it, so the
   // download/render icons stay in aligned columns next to files (projects,
@@ -538,223 +592,291 @@ export const FileTree = memo(function FileTree({
 
   return (
     <Box>
-      {groups.map(([dir, entries]) => (
-        <Box key={dir} sx={{ mb: 1 }}>
-          {(dir !== '/' || !!onFolderRename) && (
-            <Stack
-              direction="row"
-              spacing={0.75}
-              sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}
-            >
-              <FolderIcon sx={{ fontSize: 18, opacity: 0.6 }} />
-              {editingDir === dir ? (
-                <>
-                  <TextField
+      {/* Only earns its space once there is a structure to navigate. */}
+      {dirs.length > 1 && (
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', mb: 0.5 }}>
+          <Button
+            size="small"
+            startIcon={<UnfoldMoreIcon sx={{ fontSize: 16 }} />}
+            onClick={() => setCollapsed(new Set())}
+            disabled={collapsed.size === 0}
+            sx={{ textTransform: 'none' }}
+          >
+            Expand all
+          </Button>
+          <Button
+            size="small"
+            startIcon={<UnfoldLessIcon sx={{ fontSize: 16 }} />}
+            onClick={() => setCollapsed(new Set(dirs))}
+            disabled={collapsed.size === dirs.length}
+            sx={{ textTransform: 'none' }}
+          >
+            Collapse all
+          </Button>
+        </Stack>
+      )}
+      {groups.map(([dir, entries]) => {
+        if (hidden(dir)) return null
+        const depth = dir === '/' ? 0 : dir.split('/').length - 1
+        const shut = collapsed.has(dir)
+        // Nesting is shown by indent, so the header only needs the folder's own
+        // name — except where its parent has no row of its own to sit under
+        // (folder actions are off, so the in-between folders were never
+        // synthesised), when the full path is the only thing that locates it.
+        const parent = dir.slice(0, dir.lastIndexOf('/'))
+        const label = depth > 0 && groups.some(([d]) => d === parent) ? dir.split('/').pop() : dir
+        return (
+          // Indent by depth, capped: past a few levels the rows would run out
+          // of width in the import page's side column and the file names, which
+          // are the point, would go first.
+          <Box key={dir} sx={{ mb: 1, ml: Math.min(depth, 6) * 2 }}>
+            {(dir !== '/' || !!onFolderRename) && (
+              <Stack
+                direction="row"
+                spacing={0.75}
+                sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}
+              >
+                {dir !== '/' && (
+                  <Tooltip
+                    title={`${shut ? 'Expand' : 'Collapse'} folder — alt-click for everything below it`}
+                  >
+                    <IconButton
+                      size="small"
+                      aria-label={`${shut ? 'Expand' : 'Collapse'} ${dir}`}
+                      aria-expanded={!shut}
+                      sx={{ p: 0.25 }}
+                      onClick={(e) => toggleDir(dir, e.altKey)}
+                    >
+                      {shut ? (
+                        <FolderIcon sx={{ fontSize: 18, opacity: 0.6 }} />
+                      ) : (
+                        <FolderOpenIcon sx={{ fontSize: 18, opacity: 0.6 }} />
+                      )}
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {editingDir === dir ? (
+                  <>
+                    <TextField
+                      size="small"
+                      variant="standard"
+                      autoFocus
+                      value={draft}
+                      disabled={savingDir}
+                      placeholder="(no folder — leave empty for root)"
+                      onChange={(e) => setDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void commitFolder(entries)
+                        if (e.key === 'Escape') cancelFolder()
+                      }}
+                      sx={{ maxWidth: 340, flexGrow: 1 }}
+                    />
+                    <Tooltip title="Save">
+                      <span>
+                        <IconButton
+                          size="small"
+                          disabled={savingDir}
+                          onClick={() => void commitFolder(entries)}
+                        >
+                          <CheckIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title="Cancel">
+                      <span>
+                        <IconButton size="small" disabled={savingDir} onClick={cancelFolder}>
+                          <CloseIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </>
+                ) : dir === '/' ? (
+                  <Button
                     size="small"
-                    variant="standard"
-                    autoFocus
-                    value={draft}
-                    disabled={savingDir}
-                    placeholder="(no folder — leave empty for root)"
-                    onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void commitFolder(entries)
-                      if (e.key === 'Escape') cancelFolder()
-                    }}
-                    sx={{ maxWidth: 340, flexGrow: 1 }}
-                  />
-                  <Tooltip title="Save">
-                    <span>
-                      <IconButton
-                        size="small"
-                        disabled={savingDir}
-                        onClick={() => void commitFolder(entries)}
-                      >
-                        <CheckIcon sx={{ fontSize: 18 }} />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
-                  <Tooltip title="Cancel">
-                    <span>
-                      <IconButton size="small" disabled={savingDir} onClick={cancelFolder}>
-                        <CloseIcon sx={{ fontSize: 18 }} />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
-                </>
-              ) : dir === '/' ? (
-                <Button
-                  size="small"
-                  startIcon={<CreateNewFolderIcon sx={{ fontSize: 18 }} />}
-                  onClick={() => startFolder('/')}
-                  sx={{ textTransform: 'none' }}
-                >
-                  Add folder
-                </Button>
-              ) : (
-                <>
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                    {dir}
-                  </Typography>
-                  {/* Rename and remove rewrite the paths of the files in the
+                    startIcon={<CreateNewFolderIcon sx={{ fontSize: 18 }} />}
+                    onClick={() => startFolder('/')}
+                    sx={{ textTransform: 'none' }}
+                  >
+                    Add folder
+                  </Button>
+                ) : (
+                  <>
+                    <Typography
+                      variant="body2"
+                      sx={{ fontWeight: 600, cursor: 'pointer' }}
+                      onClick={(e) => toggleDir(dir, e.altKey)}
+                    >
+                      {label}
+                    </Typography>
+                    {/* What folding it away is hiding — the whole subtree, since
+                      that is what went with it. */}
+                    {shut && (
+                      <Typography variant="caption" color="text.secondary">
+                        {subtreeCounts.get(dir) ?? 0} file
+                        {(subtreeCounts.get(dir) ?? 0) === 1 ? '' : 's'}
+                      </Typography>
+                    )}
+                    {/* Rename and remove rewrite the paths of the files in the
                       group, so they have nothing to do on a folder that only
                       holds other folders. */}
-                  {onFolderRename && entries.length > 0 && (
-                    <>
-                      <Tooltip title="Remove folder">
+                    {onFolderRename && entries.length > 0 && (
+                      <>
+                        <Tooltip title="Remove folder">
+                          <span>
+                            <IconButton
+                              size="small"
+                              disabled={savingDir}
+                              onClick={() => void removeFolder(entries)}
+                            >
+                              <CloseIcon sx={{ fontSize: 15 }} />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                        <Tooltip title="Rename folder">
+                          <IconButton size="small" onClick={() => startFolder(dir)}>
+                            <EditIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                        </Tooltip>
+                      </>
+                    )}
+                    {onFolderSplit && (
+                      <Tooltip title="Split this folder and everything under it into a separate import">
                         <span>
                           <IconButton
                             size="small"
-                            disabled={savingDir}
-                            onClick={() => void removeFolder(entries)}
+                            onClick={() => {
+                              setSplitName(dir.split('/').pop() ?? dir)
+                              setConfirmSplit({
+                                dir,
+                                count: entries.length + under(dir).length,
+                              })
+                            }}
                           >
-                            <CloseIcon sx={{ fontSize: 15 }} />
+                            <CallSplitIcon sx={{ fontSize: 16 }} />
                           </IconButton>
                         </span>
                       </Tooltip>
-                      <Tooltip title="Rename folder">
-                        <IconButton size="small" onClick={() => startFolder(dir)}>
-                          <EditIcon sx={{ fontSize: 15 }} />
-                        </IconButton>
+                    )}
+                    {onFolderDiscard && (
+                      <Tooltip title="Discard folder — delete its files without importing them">
+                        <span>
+                          <IconButton
+                            size="small"
+                            color="error"
+                            disabled={discardingDir === dir}
+                            onClick={() => {
+                              setDiscardTree(true)
+                              setConfirmDiscard({ dir, entries, nested: under(dir) })
+                            }}
+                          >
+                            <FolderDeleteIcon sx={{ fontSize: 17 }} />
+                          </IconButton>
+                        </span>
                       </Tooltip>
-                    </>
-                  )}
-                  {onFolderSplit && (
-                    <Tooltip title="Split this folder and everything under it into a separate import">
-                      <span>
-                        <IconButton
-                          size="small"
-                          onClick={() => {
-                            setSplitName(dir.split('/').pop() ?? dir)
-                            setConfirmSplit({
-                              dir,
-                              count: entries.length + under(dir).length,
-                            })
-                          }}
-                        >
-                          <CallSplitIcon sx={{ fontSize: 16 }} />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                  )}
-                  {onFolderDiscard && (
-                    <Tooltip title="Discard folder — delete its files without importing them">
-                      <span>
-                        <IconButton
-                          size="small"
-                          color="error"
-                          disabled={discardingDir === dir}
-                          onClick={() => {
-                            setDiscardTree(true)
-                            setConfirmDiscard({ dir, entries, nested: under(dir) })
-                          }}
-                        >
-                          <FolderDeleteIcon sx={{ fontSize: 17 }} />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                  )}
-                </>
-              )}
-            </Stack>
-          )}
-          {entries.map((file) => (
-            <Stack
-              key={file.id}
-              direction="row"
-              spacing={1}
-              sx={{ alignItems: 'center', pl: dir !== '/' ? 3 : 0, py: 0.25 }}
-            >
-              {selectable && (
-                <Checkbox
-                  size="small"
-                  sx={{ p: 0.25 }}
-                  checked={selected?.has(file.id) ?? false}
-                  onChange={() => onToggle?.(file.id)}
-                />
-              )}
-              <InsertDriveFileIcon sx={{ fontSize: 16, opacity: 0.5 }} />
-              <Typography variant="body2" sx={{ flexGrow: 1 }} noWrap>
-                {file.filename}
-              </Typography>
-              {onKindChange ? (
-                <Select
-                  size="small"
-                  variant="standard"
-                  value={file.kind}
-                  onChange={(e) => onKindChange(file.id, e.target.value as FileRecord['kind'])}
-                  sx={{ minWidth: 96, fontSize: 13 }}
+                    )}
+                  </>
+                )}
+              </Stack>
+            )}
+            {!shut &&
+              entries.map((file) => (
+                <Stack
+                  key={file.id}
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: 'center', pl: dir !== '/' ? 3 : 0, py: 0.25 }}
                 >
-                  {FILE_KINDS.map((k) => (
-                    <MenuItem key={k} value={k} sx={{ fontSize: 13 }}>
-                      {k}
-                    </MenuItem>
-                  ))}
-                </Select>
-              ) : (
-                <Chip label={file.kind} size="small" variant="outlined" sx={{ height: 20 }} />
-              )}
-              <Typography variant="caption" color="text.secondary" sx={{ width: 64 }}>
-                {formatBytes(file.size)}
-              </Typography>
-              {/* STL is the one format we can render live in the browser
+                  {selectable && (
+                    <Checkbox
+                      size="small"
+                      sx={{ p: 0.25 }}
+                      checked={selected?.has(file.id) ?? false}
+                      onChange={() => onToggle?.(file.id)}
+                    />
+                  )}
+                  <InsertDriveFileIcon sx={{ fontSize: 16, opacity: 0.5 }} />
+                  <Typography variant="body2" sx={{ flexGrow: 1 }} noWrap>
+                    {file.filename}
+                  </Typography>
+                  {onKindChange ? (
+                    <Select
+                      size="small"
+                      variant="standard"
+                      value={file.kind}
+                      onChange={(e) => onKindChange(file.id, e.target.value as FileRecord['kind'])}
+                      sx={{ minWidth: 96, fontSize: 13 }}
+                    >
+                      {FILE_KINDS.map((k) => (
+                        <MenuItem key={k} value={k} sx={{ fontSize: 13 }}>
+                          {k}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  ) : (
+                    <Chip label={file.kind} size="small" variant="outlined" sx={{ height: 20 }} />
+                  )}
+                  <Typography variant="caption" color="text.secondary" sx={{ width: 64 }}>
+                    {formatBytes(file.size)}
+                  </Typography>
+                  {/* STL is the one format we can render live in the browser
                   (three.js). Give it a viewer; other model formats fall back to
                   the server-rendered picture. The slot is held open for non-STL
                   rows too so the download/render icons line up down the list. */}
-              {anyStl && (
-                <Box sx={{ width: 30, flexShrink: 0 }}>
-                  {file.filename.toLowerCase().endsWith('.stl') && (
-                    <Tooltip title="Preview 3D model">
-                      <IconButton size="small" onClick={() => setPreviewFile(file)}>
-                        <ViewInArIcon sx={{ fontSize: 18 }} />
+                  {anyStl && (
+                    <Box sx={{ width: 30, flexShrink: 0 }}>
+                      {file.filename.toLowerCase().endsWith('.stl') && (
+                        <Tooltip title="Preview 3D model">
+                          <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                            <ViewInArIcon sx={{ fontSize: 18 }} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                    </Box>
+                  )}
+                  <Tooltip title="Download">
+                    <IconButton size="small" component="a" href={downloadUrl(file.id)}>
+                      <DownloadIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </Tooltip>
+                  {/* The carve renders one picture per variant and picks the file
+                  itself. This is the override for when it picked the base plate:
+                  render *this* one, and it joins the model's images. */}
+                  {onRender && (file.kind === 'model' || file.kind === 'project') && (
+                    <Tooltip title="Render a preview from this file">
+                      <IconButton size="small" onClick={() => onRender(file.id)}>
+                        <PhotoCameraIcon sx={{ fontSize: 18 }} />
                       </IconButton>
                     </Tooltip>
                   )}
-                </Box>
-              )}
-              <Tooltip title="Download">
-                <IconButton size="small" component="a" href={downloadUrl(file.id)}>
-                  <DownloadIcon sx={{ fontSize: 18 }} />
-                </IconButton>
-              </Tooltip>
-              {/* The carve renders one picture per variant and picks the file
-                  itself. This is the override for when it picked the base plate:
-                  render *this* one, and it joins the model's images. */}
-              {onRender && (file.kind === 'model' || file.kind === 'project') && (
-                <Tooltip title="Render a preview from this file">
-                  <IconButton size="small" onClick={() => onRender(file.id)}>
-                    <PhotoCameraIcon sx={{ fontSize: 18 }} />
-                  </IconButton>
-                </Tooltip>
-              )}
-              {/* Say where the archive has got to, or it reads as one more thing
+                  {/* Say where the archive has got to, or it reads as one more thing
                   waiting to be dealt with. Once unpacked it is kept only as the
                   record of what was dropped, and is never carved. A `null`
                   unpack means no job ever ran for it: the chip says so rather
                   than passing it off as extracted. */}
-              {archivesExtracted && file.kind === 'archive' && (
-                <Tooltip title={UNPACK_CHIP[file.unpack ?? 'none'].title}>
-                  <Chip
-                    icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
-                    label={UNPACK_CHIP[file.unpack ?? 'none'].label}
-                    size="small"
-                    variant="outlined"
-                    color={UNPACK_CHIP[file.unpack ?? 'none'].color}
-                    sx={{ height: 20, opacity: file.unpack === 'done' ? 0.7 : 1 }}
-                  />
-                </Tooltip>
-              )}
-              {onDelete && (
-                <Tooltip title="Delete file">
-                  <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>
-                    <DeleteIcon sx={{ fontSize: 18 }} />
-                  </IconButton>
-                </Tooltip>
-              )}
-            </Stack>
-          ))}
-        </Box>
-      ))}
+                  {archivesExtracted && file.kind === 'archive' && (
+                    <Tooltip title={UNPACK_CHIP[file.unpack ?? 'none'].title}>
+                      <Chip
+                        icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
+                        label={UNPACK_CHIP[file.unpack ?? 'none'].label}
+                        size="small"
+                        variant="outlined"
+                        color={UNPACK_CHIP[file.unpack ?? 'none'].color}
+                        sx={{ height: 20, opacity: file.unpack === 'done' ? 0.7 : 1 }}
+                      />
+                    </Tooltip>
+                  )}
+                  {onDelete && (
+                    <Tooltip title="Delete file">
+                      <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>
+                        <DeleteIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </Stack>
+              ))}
+          </Box>
+        )
+      })}
       {previewFile && (
         <Suspense fallback={null}>
           <StlPreviewDialog
