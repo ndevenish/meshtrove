@@ -82,7 +82,7 @@ const UNPACK_CHIP = {
     label: 'not extracted',
     color: 'warning',
     title:
-      'Nothing has unpacked this archive: either it is a MeshTrove export waiting to be restored, or it is in a format MeshTrove cannot open. Its contents are not staged in this import.',
+      'Nothing has unpacked this archive — most likely a format MeshTrove cannot open. Its contents are not staged in this import.',
   },
 } as const
 
