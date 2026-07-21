@@ -36,6 +36,7 @@ import CheckIcon from '@mui/icons-material/Check'
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import FolderDeleteIcon from '@mui/icons-material/FolderDelete'
+import CallSplitIcon from '@mui/icons-material/CallSplit'
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
@@ -383,6 +384,7 @@ export const FileTree = memo(function FileTree({
   archivesExtracted,
   onFolderRename,
   onFolderDiscard,
+  onFolderSplit,
 }: {
   files: FileRecord[]
   selectable?: boolean
@@ -404,6 +406,10 @@ export const FileTree = memo(function FileTree({
       and keeps the files. Used on the import page to drop chaff before committing.
       When set, real folder headers gain a "Discard folder" control. */
   onFolderDiscard?: (fileIds: string[]) => void | Promise<void>
+  /** Lift a folder and everything under it out into an import of its own — one
+      drop is often several things. Takes the folder's path and the name for the
+      new import; the folder itself becomes its top directory. */
+  onFolderSplit?: (dir: string, name: string) => void | Promise<void>
 }) {
   const [editingDir, setEditingDir] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -417,6 +423,9 @@ export const FileTree = memo(function FileTree({
   } | null>(null)
   // Which of the two a discard means, for a folder that has folders under it.
   const [discardTree, setDiscardTree] = useState(true)
+  const [confirmSplit, setConfirmSplit] = useState<{ dir: string; count: number } | null>(null)
+  const [splitName, setSplitName] = useState('')
+  const [splitting, setSplitting] = useState(false)
   const [previewFile, setPreviewFile] = useState<FileRecord | null>(null)
 
   const startFolder = (dir: string) => {
@@ -468,14 +477,41 @@ export const FileTree = memo(function FileTree({
     }
   }
 
+  // Folder actions hang off a folder's header row, and a header row only exists
+  // for a path some file sits directly at. Where they're offered, give the
+  // folders in between one too — otherwise `Pack` can be neither split nor
+  // discarded the moment every file in it lives in `Pack/supported`.
+  const foldersActionable = !!onFolderDiscard || !!onFolderSplit
+  // Split the folder out: its files change import, they aren't deleted, so this
+  // is the one folder action that loses nothing.
+  const splitFolder = async (dir: string) => {
+    if (!onFolderSplit) return
+    setSplitting(true)
+    try {
+      await onFolderSplit(dir, splitName.trim() || dir.split('/').pop() || dir)
+      setConfirmSplit(null)
+    } finally {
+      setSplitting(false)
+    }
+  }
+
   const groups = useMemo(() => {
     const byDir = new Map<string, FileRecord[]>()
     for (const file of files) {
       const dir = file.path || '/'
       byDir.set(dir, [...(byDir.get(dir) ?? []), file])
     }
+    if (foldersActionable) {
+      for (const dir of [...byDir.keys()]) {
+        const parts = dir.split('/')
+        for (let i = 1; i < parts.length; i++) {
+          const ancestor = parts.slice(0, i).join('/')
+          if (!byDir.has(ancestor)) byDir.set(ancestor, [])
+        }
+      }
+    }
     return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b))
-  }, [files])
+  }, [files, foldersActionable])
 
   /// The files sitting in folders *under* `dir`. A folder here is a shared
   /// `path` string and each group holds only what sits directly at that path, so
@@ -560,7 +596,10 @@ export const FileTree = memo(function FileTree({
                   <Typography variant="body2" sx={{ fontWeight: 600 }}>
                     {dir}
                   </Typography>
-                  {onFolderRename && (
+                  {/* Rename and remove rewrite the paths of the files in the
+                      group, so they have nothing to do on a folder that only
+                      holds other folders. */}
+                  {onFolderRename && entries.length > 0 && (
                     <>
                       <Tooltip title="Remove folder">
                         <span>
@@ -579,6 +618,24 @@ export const FileTree = memo(function FileTree({
                         </IconButton>
                       </Tooltip>
                     </>
+                  )}
+                  {onFolderSplit && (
+                    <Tooltip title="Split this folder and everything under it into a separate import">
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={() => {
+                            setSplitName(dir.split('/').pop() ?? dir)
+                            setConfirmSplit({
+                              dir,
+                              count: entries.length + under(dir).length,
+                            })
+                          }}
+                        >
+                          <CallSplitIcon sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                   )}
                   {onFolderDiscard && (
                     <Tooltip title="Discard folder — delete its files without importing them">
@@ -715,7 +772,9 @@ export const FileTree = memo(function FileTree({
       >
         <DialogTitle>Discard folder?</DialogTitle>
         <DialogContent>
-          {confirmDiscard && confirmDiscard.nested.length > 0 ? (
+          {confirmDiscard &&
+          confirmDiscard.nested.length > 0 &&
+          confirmDiscard.entries.length > 0 ? (
             // A folder with folders under it: "delete this folder" is two
             // different things, and which one was meant is not ours to guess.
             // The whole subtree goes by default — that is what deleting a folder
@@ -755,12 +814,20 @@ export const FileTree = memo(function FileTree({
               </RadioGroup>
             </>
           ) : (
-            <Typography variant="body2">
-              Delete the {confirmDiscard?.entries.length}{' '}
-              {confirmDiscard?.entries.length === 1 ? 'file' : 'files'} in{' '}
-              <strong>{confirmDiscard?.dir}</strong> without importing{' '}
-              {confirmDiscard?.entries.length === 1 ? 'it' : 'them'}. This can't be undone.
-            </Typography>
+            // Either a leaf folder, or one that holds nothing but folders — in
+            // both cases there is only one thing "delete this folder" can mean.
+            (() => {
+              const count = confirmDiscard
+                ? confirmDiscard.entries.length + confirmDiscard.nested.length
+                : 0
+              return (
+                <Typography variant="body2">
+                  Delete the {count} {count === 1 ? 'file' : 'files'} in{' '}
+                  <strong>{confirmDiscard?.dir}</strong> without importing{' '}
+                  {count === 1 ? 'it' : 'them'}. This can't be undone.
+                </Typography>
+              )
+            })()
           )}
         </DialogContent>
         <DialogActions>
@@ -771,17 +838,59 @@ export const FileTree = memo(function FileTree({
             color="error"
             variant="contained"
             disabled={discardingDir !== null}
+            data-testid="confirm-discard"
             onClick={() =>
               confirmDiscard &&
               void discardFolder(
                 confirmDiscard.dir,
-                discardTree
+                discardTree || confirmDiscard.entries.length === 0
                   ? [...confirmDiscard.entries, ...confirmDiscard.nested]
                   : confirmDiscard.entries,
               )
             }
           >
             Discard
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={!!confirmSplit}
+        fullWidth
+        maxWidth="xs"
+        onClose={() => !splitting && setConfirmSplit(null)}
+      >
+        <DialogTitle>Split into a new import?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Move <strong>{confirmSplit?.dir}</strong> and everything under it —{' '}
+            {confirmSplit?.count} {confirmSplit?.count === 1 ? 'file' : 'files'} — to an import of
+            its own. Nothing is deleted, and the folders are kept, with{' '}
+            <strong>{confirmSplit?.dir.split('/').pop()}</strong> as the top one.
+          </Typography>
+          <TextField
+            fullWidth
+            size="small"
+            autoFocus
+            label="Name the new import"
+            value={splitName}
+            disabled={splitting}
+            onChange={(e) => setSplitName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && confirmSplit) void splitFolder(confirmSplit.dir)
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={splitting} onClick={() => setConfirmSplit(null)}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={splitting}
+            data-testid="confirm-split"
+            onClick={() => confirmSplit && void splitFolder(confirmSplit.dir)}
+          >
+            Split
           </Button>
         </DialogActions>
       </Dialog>

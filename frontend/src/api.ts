@@ -711,6 +711,10 @@ export const api = {
   renameImport: (id: string, name: string) =>
     request<ImportSummary>(`/api/imports/${id}`, { ...json({ name }), method: 'PUT' }),
   deleteImport: (id: string) => request<void>(`/api/imports/${id}`, { method: 'DELETE' }),
+  /** lift a staged folder (and everything under it) out into an import of its
+      own; the folder becomes the new import's top directory */
+  splitImport: (id: string, folder: string, name?: string) =>
+    request<ImportSummary>(`/api/imports/${id}/split`, json({ folder, name })),
   importFiles: (id: string) => request<FileRecord[]>(`/api/imports/${id}/files`),
   commitImport: (id: string, target: CommitTarget) =>
     request<CommitResult>(`/api/imports/${id}/commit`, json(target)),

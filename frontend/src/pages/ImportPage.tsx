@@ -28,6 +28,7 @@ import {
   type FileRecord,
   type LayoutPlan,
   type LayoutSpec,
+  type ImportSummary,
 } from '../api'
 import { FileTree } from '../components/VariantSection'
 import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayoutPanel'
@@ -80,6 +81,9 @@ function ImportWorkbench() {
   // Set after a partial ("keep unmatched files") commit, which stays on this
   // page: the import survived with the remainder, ready for another pass.
   const [notice, setNotice] = useState('')
+  // The import a folder was just split out into — announced with a link to it,
+  // since carving on here is the more likely next move.
+  const [splitOff, setSplitOff] = useState<ImportSummary | null>(null)
 
   // The facts about the drop, typed once. A box set is bought once, from one
   // creator, under one licence — so on a bundle commit these land on every member
@@ -264,6 +268,25 @@ function ImportWorkbench() {
       await queryClient.invalidateQueries({ queryKey: ['import', id] })
       await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
       await queryClient.invalidateQueries({ queryKey: ['imports'] })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // Lift a folder out into an import of its own. One drop is often several
+  // things — a dropbox pickup of a creator's back catalogue is a folder per
+  // product — and an import commits to exactly one destination.
+  //
+  // Staying put is the point: the drop being carved up is right here, and
+  // splitting the next folder out of it is the next thing you do. The new import
+  // is one link away on the toast.
+  const splitFolder = async (dir: string, name: string) => {
+    try {
+      const created = await api.splitImport(staged.id, dir, name)
+      await queryClient.invalidateQueries({ queryKey: ['import', id] })
+      await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
+      await queryClient.invalidateQueries({ queryKey: ['imports'] })
+      setSplitOff(created)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -541,7 +564,12 @@ function ImportWorkbench() {
               rules={layout.spec.rules}
             />
           ) : (
-            <FileTree files={fileList} archivesExtracted onFolderDiscard={discardFolder} />
+            <FileTree
+              files={fileList}
+              archivesExtracted
+              onFolderDiscard={discardFolder}
+              onFolderSplit={splitFolder}
+            />
           )}
         </Box>
       </Box>
@@ -564,6 +592,33 @@ function ImportWorkbench() {
       >
         <Alert severity="success" onClose={() => setNotice('')}>
           {notice}
+        </Alert>
+      </Snackbar>
+      <Snackbar
+        open={!!splitOff}
+        autoHideDuration={12000}
+        onClose={() => setSplitOff(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          severity="success"
+          onClose={() => setSplitOff(null)}
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              onClick={() => {
+                const target = splitOff
+                setSplitOff(null)
+                if (target) navigate(`/imports/${target.id}`)
+              }}
+            >
+              Open it
+            </Button>
+          }
+        >
+          {splitOff?.file_count} file{splitOff?.file_count === 1 ? '' : 's'} split into “
+          {splitOff?.name}”
         </Alert>
       </Snackbar>
     </Container>

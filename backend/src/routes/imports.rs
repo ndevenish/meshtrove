@@ -34,6 +34,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/imports", get(list).post(create))
         .route("/api/imports/{id}", get(detail).put(update).delete(remove))
+        .route("/api/imports/{id}/split", post(split))
         .route("/api/imports/{id}/plan", post(plan))
         .route("/api/imports/{id}/commit", post(commit))
 }
@@ -214,6 +215,116 @@ async fn remove(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SplitInput {
+    /// The staged folder to lift out, as it appears in the tree — the files
+    /// directly in it and everything under it move together.
+    pub folder: String,
+    /// What to call the new import. Defaults to the folder's own name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Lift a staged folder out into an import of its own.
+///
+/// One drop is routinely several things — a dropbox pickup of a creator's whole
+/// back catalogue is a folder per product — and an import commits to exactly one
+/// destination. Splitting is how that drop becomes the several imports it always
+/// was, without a re-upload: the file rows change owner, the blobs never move.
+///
+/// The folder becomes the new import's top directory and its ancestors are
+/// dropped: `Loot/KingIn_Yellow/images/a.jpg` splits to `KingIn_Yellow/images/a.jpg`.
+/// The path that identified the *drop* has no meaning in an import that is now
+/// only this folder, but the folder's own name carries what it is — it is what
+/// a layout's model-name capture reads, and what the files sat under all along.
+///
+/// Refused while the source is still unpacking: half a folder is staged at that
+/// point, and the rest would land in the import this one just left.
+async fn split(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<SplitInput>,
+) -> Result<Json<ImportSummary>, ApiError> {
+    let source = fetch_import(&state, id).await?;
+    user.require_can_edit(source.created_by)?;
+    if source.unpacking {
+        return Err(ApiError::BadRequest(
+            "this import is still unpacking — wait for it to finish before splitting it".into(),
+        ));
+    }
+    if source.is_export {
+        return Err(ApiError::BadRequest(
+            "an export is restored whole, not split".into(),
+        ));
+    }
+    // Trimmed the way a folder header shows it, and the way `path` is stored:
+    // no leading or trailing slashes.
+    let folder = input.folder.trim().trim_matches('/').to_string();
+    if folder.is_empty() {
+        return Err(ApiError::BadRequest(
+            "the whole import is not a folder to split out".into(),
+        ));
+    }
+    // What the folder is called, with its ancestors dropped: the new name, and
+    // the prefix every path loses.
+    let (prefix, leaf) = match folder.rsplit_once('/') {
+        Some((parent, leaf)) => (format!("{parent}/"), leaf),
+        None => (String::new(), folder.as_str()),
+    };
+    let name = match input.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => leaf.to_string(),
+    };
+
+    let mut tx = state.db.begin().await?;
+    // The new import belongs to whoever owned the drop, not to whoever pressed
+    // the button: it is the same staged work, carried on in a second window.
+    let new_id: Uuid = sqlx::query_scalar!(
+        "INSERT INTO imports (name, created_by, partial) VALUES ($1, $2, $3) RETURNING id",
+        name,
+        source.created_by,
+        // The split half is as partly-placed as the whole was.
+        source.partial,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    // `left(path, n) = folder || '/'` rather than LIKE: a folder name is free to
+    // contain `%` or `_`, and those are not wildcards here.
+    let moved = sqlx::query_scalar!(
+        r#"WITH moved AS (
+             UPDATE files
+                SET import_id = $2,
+                    path = substring(path from $4)
+              WHERE import_id = $1
+                AND (path = $3 OR left(path, length($3) + 1) = $3 || '/')
+              RETURNING 1
+           )
+           SELECT count(*) as "count!" FROM moved"#,
+        id,
+        new_id,
+        folder,
+        // 1-based, and in characters: `substring` counts characters, and a
+        // folder name is free to hold anything a filesystem allows.
+        (prefix.chars().count() + 1) as i32,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if moved == 0 {
+        tx.rollback().await?;
+        return Err(ApiError::BadRequest(format!(
+            "nothing is staged under {folder}"
+        )));
+    }
+    tx.commit().await?;
+
+    tracing::info!(
+        from = %id, to = %new_id, %folder, files = moved,
+        "split a folder out of an import"
+    );
+    Ok(Json(fetch_import(&state, new_id).await?))
 }
 
 pub async fn import_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiError> {

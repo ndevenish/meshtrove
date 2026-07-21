@@ -1,0 +1,82 @@
+# Production deployment: Postgres + the MeshTrove app. The app runs the
+# prebuilt ghcr.io/ndevenish/meshtrove:latest image, re-pulled on every `up`.
+#
+#   cp .env.prod.example .env.prod    # then fill it in
+#   docker compose --env-file .env.prod up -d
+#
+# See docs/deploy.md for the full walkthrough.
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: meshtrove
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: meshtrove
+    volumes:
+      - /tank/meshtrove/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meshtrove"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    image: ghcr.io/ndevenish/meshtrove:latest
+    pull_policy: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    user: "${MESHTROVE_UID:-10001}:${MESHTROVE_GID:-10001}"
+    environment:
+      # The app applies migrations itself at startup (sqlx::migrate!).
+      DATABASE_URL: postgres://meshtrove:${POSTGRES_PASSWORD}@postgres:5432/meshtrove
+      # REQUIRED: signing key for session cookies. Sessions are invalidated if it
+      # changes, so keep it stable. Generate: openssl rand -base64 64 | tr -d '\n'
+      MESHTROVE_COOKIE_KEY: ${MESHTROVE_COOKIE_KEY:?set MESHTROVE_COOKIE_KEY in .env.prod (openssl rand -base64 64 | tr -d '\n')}
+      # Optional: bootstrap an admin on first start (username:password). Empty = skip.
+      MESHTROVE_CREATE_ADMIN: ${MESHTROVE_CREATE_ADMIN:-}
+      MESHTROVE_BIND_ADDR: 0.0.0.0:3000
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${MESHTROVE_PORT:-3000}:3000"
+    volumes:
+      # Named volume by default. To back this with a ZFS dataset instead, replace
+      # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
+      #   - /srv/meshtrove/store:/app/store
+      - /tank/meshtrove/store:/app/store
+    restart: unless-stopped
+
+  # Optional: webhook-driven redeploy. Watchtower pulls the newest image and
+  # recreates `app` with the same config when it receives an authenticated
+  # POST /v1/update — nothing else. Polling is off (no schedule configured), so
+  # it acts ONLY on that trigger, which the CI workflow sends after publishing a
+  # new :latest. See docs/deploy.md → "Automatic redeploy on a new image".
+  # Drop this service if you'd rather redeploy by hand.
+  watchtower:
+    image: nickfedor/watchtower:latest # maintained fork of containrrr/watchtower
+    depends_on:
+      - app
+    volumes:
+      # Watchtower drives the Docker daemon to pull + recreate the container.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Enable only the update endpoint; every /v1/* route requires the token.
+      WATCHTOWER_HTTP_API_ENDPOINTS: update
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env.prod}
+      # Only touch containers carrying the enable label above (i.e. just `app`).
+      WATCHTOWER_LABEL_ENABLE: "true"
+      # Delete the superseded image after a successful update.
+      WATCHTOWER_CLEANUP: "true"
+    # Port 8080 is NOT published to the host. Reach it from your Cloudflare tunnel
+    # by name (http://watchtower:8080) if cloudflared shares this compose network,
+    # or add `ports: ["127.0.0.1:8080:8080"]` if cloudflared runs on the host.
+    # See docs/deploy.md — do not expose it to the public internet directly.
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  store:
