@@ -523,6 +523,36 @@ export const FileTree = memo(function FileTree({
     return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b))
   }, [files, foldersActionable])
 
+  /// Where a folder sits in the tree *as drawn*: how many of its ancestors have
+  /// rows of their own, and what is left of its path once the deepest of them is
+  /// stripped. Indenting by `path.split('/').length` instead would be a lie
+  /// wherever an in-between folder holds no files directly and so was never
+  /// synthesised (folder actions off): `Legs/Adjustable` would indent two levels
+  /// under an `Instructions` it has nothing to do with, because that is simply
+  /// the row above it.
+  const placement = useMemo(() => {
+    const shown = new Set(groups.map(([dir]) => dir))
+    const map = new Map<string, { depth: number; label: string }>()
+    for (const [dir] of groups) {
+      if (dir === '/') {
+        map.set(dir, { depth: 0, label: dir })
+        continue
+      }
+      const parts = dir.split('/')
+      let depth = 0
+      let deepest = ''
+      for (let i = 1; i < parts.length; i++) {
+        const ancestor = parts.slice(0, i).join('/')
+        if (shown.has(ancestor)) {
+          depth++
+          deepest = ancestor
+        }
+      }
+      map.set(dir, { depth, label: deepest ? dir.slice(deepest.length + 1) : dir })
+    }
+    return map
+  }, [groups])
+
   /// The files sitting in folders *under* `dir`. A folder here is a shared
   /// `path` string and each group holds only what sits directly at that path, so
   /// discarding `Pack` would leave `Pack/supported` behind, orphaned under a
@@ -617,14 +647,11 @@ export const FileTree = memo(function FileTree({
       )}
       {groups.map(([dir, entries]) => {
         if (hidden(dir)) return null
-        const depth = dir === '/' ? 0 : dir.split('/').length - 1
+        // Nesting is shown by indent, so the header carries only what its
+        // indent doesn't already say: the folder's own name under a parent that
+        // has a row, the whole path when nothing above it does.
+        const { depth, label } = placement.get(dir) ?? { depth: 0, label: dir }
         const shut = collapsed.has(dir)
-        // Nesting is shown by indent, so the header only needs the folder's own
-        // name — except where its parent has no row of its own to sit under
-        // (folder actions are off, so the in-between folders were never
-        // synthesised), when the full path is the only thing that locates it.
-        const parent = dir.slice(0, dir.lastIndexOf('/'))
-        const label = depth > 0 && groups.some(([d]) => d === parent) ? dir.split('/').pop() : dir
         return (
           // Indent by depth, capped: past a few levels the rows would run out
           // of width in the import page's side column and the file names, which
