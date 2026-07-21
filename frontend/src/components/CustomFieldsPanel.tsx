@@ -60,6 +60,16 @@ const kindLabel = (kind: CustomFieldKind) => KINDS.find((k) => k.value === kind)
 const visibilityLabel = (v: CustomFieldVisibility) =>
   VISIBILITIES.find((x) => x.value === v)?.label ?? v
 
+/// The key a name suggests: lowercased, with every run of anything the backend
+/// won't take (`validate_key` allows letters, digits, `-` and `_`) collapsed to
+/// a single underscore. "Printed?" → `printed`, "Print notes" → `print_notes`.
+/// Only ever a starting point — see `keyEdited` below.
+const keyFromName = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+
 const BLANK: CustomFieldInput = {
   key: '',
   name: '',
@@ -224,6 +234,10 @@ function CustomFieldDialog({
   const [draft, setDraft] = useState<CustomFieldInput>(BLANK)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Whether the key has been typed in by hand. Until it has, a new field's key
+  // follows its name — but the moment someone edits it, it is theirs and the
+  // name stops touching it.
+  const [keyEdited, setKeyEdited] = useState(false)
 
   // Reset the form whenever the dialog is pointed at something else.
   const targetId = target === 'new' ? 'new' : (target?.id ?? null)
@@ -231,11 +245,16 @@ function CustomFieldDialog({
   if (target && targetId !== lastId) {
     setLastId(targetId)
     setDraft(target === 'new' ? BLANK : { ...target })
+    // An existing field's key is already load-bearing: never re-derive it.
+    setKeyEdited(target !== 'new')
     setError('')
   }
 
   const set = <K extends keyof CustomFieldInput>(key: K, value: CustomFieldInput[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }))
+
+  const setName = (name: string) =>
+    setDraft((prev) => ({ ...prev, name, key: keyEdited ? prev.key : keyFromName(name) }))
 
   const choices = draft.options.choices ?? []
   const canSubmit =
@@ -280,16 +299,23 @@ function CustomFieldDialog({
           <TextField
             label="Name"
             value={draft.name}
-            onChange={(e) => set('name', e.target.value)}
+            onChange={(e) => setName(e.target.value)}
             autoFocus
             required
           />
           <TextField
             label="Key"
             value={draft.key}
-            onChange={(e) => set('key', e.target.value)}
+            onChange={(e) => {
+              setKeyEdited(true)
+              set('key', e.target.value)
+            }}
             required
-            helperText="Letters, digits, - and _. Scraped metadata is matched against this, so keep it stable."
+            helperText={
+              target === 'new'
+                ? 'Letters, digits, - and _. Scraped metadata is matched against this; it follows the name until you change it.'
+                : 'Letters, digits, - and _. Scraped metadata is matched against this — changing it means any patch using the old key stops matching.'
+            }
           />
           <TextField
             select
