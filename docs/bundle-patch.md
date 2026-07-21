@@ -51,6 +51,9 @@ your own use.
     "creator": "Loot Studios",            // READ: resolved/created by name
     "description_md": "**tagline**\n\nbody…", // READ: markdown; becomes a new revision
     "images": ["images/_cover.jpg", "images/_hero1.jpg"], // READ: covers, primary FIRST
+    "custom_fields": {                    // READ: admin-defined extra metadata, by field key
+      "printed": false, "material": "Resin" // unknown keys warn in the preview, never fail
+    },
     "categories": ["Heroes", "Enemies"],  // not read (yet)
     "extras": [ { "label": "Magazine", "url": "https://…" } ] // not read (yet)
   },
@@ -69,6 +72,7 @@ your own use.
       "images": ["images/a.png", "images/b.png"], // READ: a whole gallery, primary FIRST
       "category": "Heroes",               // the shop category; disambiguates duplicates
       "source_url": "https://…/product/gold/", // READ: this model's own page (see merge rules)
+      "custom_fields": { "quality": 4 },  // READ: same as bundle.custom_fields, per model
       "source_ref": "FN2110AC01"          // the site's own id; not read (yet)
     }
   ]
@@ -151,6 +155,7 @@ written until apply, and apply only touches what the options ask for.
 | `models[].tags` | **Model** tags (what the model *is*) — never variant tags. Upserted into the shared tag vocabulary. Mode `merge` (default: add, never remove), `replace` (drop the model's tags first), or `skip`. |
 | `models[].description_md` | Inserted as a new **model** description revision (newest = current; history kept). Gated by `model_descriptions`. Skipped when it equals the model's current description, so re-applying a patch doesn't stack duplicate revisions. |
 | `models[].image`, `models[].images` | The model's images, **first made primary**, the rest added alongside — the same rule as `bundle.images`. The two fields concatenate (`image` first, then `images`) and are deduped by path, so a scraper may send either or both. Mode `replace_generated` (default: delete the model's auto-rendered previews so the scrape's shots are what show), `add` (keep renders alongside), or `skip`. Deduped by content hash, so re-applying adds nothing. |
+| `bundle.custom_fields`, `models[].custom_fields` | Values for the admin-defined **custom fields** (Admin → Custom fields), matched to a definition by its `key`, case-insensitively. Written outright — the scrape is the authority on what it says. A key nothing is defined for, one whose field doesn't apply to that side (a models-only field sent for the bundle), a `file`-kind field (a patch is JSON; it has no bytes), or a value the field's kind can't take is **skipped with a warning in the preview** — never an error, because a scrape carries whatever the shop page had. A bundle value for a field marked *persists to model* then flows down to the members, honouring its overwrite flag. |
 | `match.aliases` | Every alias is stored on the matched model (deduped case-insensitively, ones equal to the model's final name dropped) — the patch *teaches* the library its other names, so the next import or patch resolves exactly. |
 
 Everything runs in one transaction; image blobs enter the content-addressed

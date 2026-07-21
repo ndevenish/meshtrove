@@ -856,6 +856,18 @@ export interface PatchPreview {
   unmatched_patch: PatchUnresolvedRow[]
   unmatched_members: string[]
   members: PatchMember[]
+  /** custom field values the patch carries that will be written */
+  custom_fields_applied: number
+  /** ...and the ones that won't, each with why — informational, never fatal */
+  custom_field_warnings: PatchCustomFieldWarning[]
+}
+
+/** One scraped metadata key the apply will skip, and why. */
+export interface PatchCustomFieldWarning {
+  /** "the bundle", or the patch model's label */
+  source: string
+  key: string
+  reason: string
 }
 
 export interface PatchApplyOptions {
@@ -877,6 +889,8 @@ export interface PatchApplyResult {
   tags_added: number
   aliases_added: number
   descriptions_added: number
+  /** custom field values written, bundle and members together */
+  custom_fields_set: number
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`

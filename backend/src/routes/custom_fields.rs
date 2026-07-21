@@ -675,6 +675,107 @@ pub async fn apply_values(
     Ok(())
 }
 
+/// The whole vocabulary, keyed by lowercased `key`, for matching scraped
+/// metadata against.
+pub async fn fields_by_key(
+    db: &mut sqlx::PgConnection,
+) -> Result<std::collections::HashMap<String, CustomField>, ApiError> {
+    let fields = sqlx::query_as!(
+        CustomField,
+        r#"SELECT id, key as "key: String", name,
+                  kind as "kind: CustomFieldKind", options,
+                  applies_to_models, applies_to_bundles,
+                  bundle_persists_to_model, bundle_persist_overwrites,
+                  visibility as "visibility: CustomFieldVisibility", position
+           FROM custom_fields"#,
+    )
+    .fetch_all(&mut *db)
+    .await?;
+    Ok(fields
+        .into_iter()
+        .map(|f| (f.key.to_lowercase(), f))
+        .collect())
+}
+
+/// What one scraped `key: value` pair turns out to be.
+#[derive(Debug, PartialEq)]
+pub enum Resolved {
+    /// Applicable and well-formed; `value` is None when the pair clears the field.
+    Value {
+        field_id: Uuid,
+        value: Option<serde_json::Value>,
+    },
+    /// Not applicable. A scrape carries whatever the shop page had, so this is
+    /// never an error — it is something to *tell* the user about in the preview
+    /// and then skip.
+    Warning(String),
+}
+
+/// Match one scraped pair against the vocabulary. Deliberately total: every
+/// input resolves to either a value to write or a warning to show.
+pub fn resolve_patch_value(
+    fields: &std::collections::HashMap<String, CustomField>,
+    owner: ValueOwner,
+    key: &str,
+    value: &serde_json::Value,
+) -> Resolved {
+    let Some(field) = fields.get(&key.trim().to_lowercase()) else {
+        return Resolved::Warning(format!("no custom field is defined with the key {key:?}"));
+    };
+    let applies = match owner {
+        ValueOwner::Model(_) => field.applies_to_models,
+        ValueOwner::Bundle(_) => field.applies_to_bundles,
+    };
+    if !applies {
+        return Resolved::Warning(format!(
+            "{} doesn't apply to {}",
+            field.name,
+            match owner {
+                ValueOwner::Model(_) => "models",
+                ValueOwner::Bundle(_) => "bundles",
+            }
+        ));
+    }
+    // A patch is JSON; a file field's payload is bytes it cannot carry.
+    if matches!(field.kind, CustomFieldKind::File) {
+        return Resolved::Warning(format!(
+            "{} is a file field — a patch can't fill it",
+            field.name
+        ));
+    }
+    match validate_value(field, value) {
+        Ok(value) => Resolved::Value {
+            field_id: field.id,
+            value,
+        },
+        Err(e) => Resolved::Warning(e.to_string()),
+    }
+}
+
+/// Write the pairs that resolve, collecting a warning for each that doesn't.
+pub async fn apply_patch_values(
+    db: &mut sqlx::PgConnection,
+    fields: &std::collections::HashMap<String, CustomField>,
+    owner: ValueOwner,
+    values: &std::collections::HashMap<String, serde_json::Value>,
+    user: &User,
+) -> Result<Vec<String>, ApiError> {
+    let mut warnings = Vec::new();
+    // Sorted so a patch with several bad keys warns in the same order twice —
+    // a HashMap's iteration order would shuffle the preview between runs.
+    let mut keys: Vec<&String> = values.keys().collect();
+    keys.sort();
+    for key in keys {
+        match resolve_patch_value(fields, owner, key, &values[key]) {
+            Resolved::Value { field_id, value } => {
+                write_value(&mut *db, owner, field_id, value.as_ref(), editor_id(user)).await?;
+            }
+            Resolved::Warning(reason) => warnings.push(reason),
+        }
+    }
+    Ok(warnings)
+}
+
 /// Copy a bundle's persisting fields down onto its member models.
 ///
 /// Runs when the bundle's value is *written* — an edit, a patch, a file upload
@@ -1059,6 +1160,45 @@ mod tests {
     fn a_file_field_cannot_be_written_as_json() {
         let file = field(CustomFieldKind::File, json!({}));
         assert!(validate_value(&file, &json!("something.pdf")).is_err());
+    }
+
+    /// A scrape carries whatever the shop page had: a key nobody defined, a
+    /// field that lives on the other side of the model/bundle divide, or a value
+    /// the kind can't take is something to *report*, never something that fails
+    /// the whole patch.
+    #[test]
+    fn unusable_patch_keys_warn_rather_than_fail() {
+        let mut printed = field(CustomFieldKind::Checkbox, json!({}));
+        printed.name = "Printed?".into();
+        let mut manual = field(CustomFieldKind::File, json!({}));
+        manual.applies_to_bundles = true;
+        let fields = std::collections::HashMap::from([
+            ("printed".to_string(), printed),
+            ("manual".to_string(), manual),
+        ]);
+        let model = ValueOwner::Model(Uuid::nil());
+        let bundle = ValueOwner::Bundle(Uuid::nil());
+
+        assert!(matches!(
+            resolve_patch_value(&fields, model, "PRINTED", &json!(true)),
+            Resolved::Value { .. }
+        ));
+        for (owner, key, value) in [
+            (model, "nonesuch", json!(true)),
+            // `printed` is a models-only field in this fixture.
+            (bundle, "printed", json!(true)),
+            // A patch is JSON; it has no bytes to give a file field.
+            (model, "manual", json!("manual.pdf")),
+            (model, "printed", json!("yes please")),
+        ] {
+            assert!(
+                matches!(
+                    resolve_patch_value(&fields, owner, key, &value),
+                    Resolved::Warning(_)
+                ),
+                "{key} {value}"
+            );
+        }
     }
 
     #[test]

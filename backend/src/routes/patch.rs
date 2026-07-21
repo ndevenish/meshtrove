@@ -21,6 +21,10 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::{
+    CustomField, Resolved, ValueOwner, apply_patch_values, fields_by_key, persist_bundle_fields,
+    resolve_patch_value,
+};
 use crate::routes::tags::upsert_tag;
 use crate::services::blobstore::BlobStore;
 use crate::state::AppState;
@@ -71,6 +75,11 @@ struct PatchBundle {
     /// Candidate covers, primary first (relative paths into the zip).
     #[serde(default)]
     images: Vec<String>,
+    /// Admin-defined extra metadata, by field key. A key the vocabulary doesn't
+    /// know is a warning in the preview, never an error — a scrape carries
+    /// whatever the shop page had.
+    #[serde(default)]
+    custom_fields: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -108,6 +117,10 @@ struct PatchModel {
     /// bundle-level `source.url` — see the apply below.
     #[serde(default)]
     source_url: Option<String>,
+    /// Admin-defined extra metadata for this model, by field key. Same lenient
+    /// rule as the bundle's.
+    #[serde(default)]
+    custom_fields: HashMap<String, serde_json::Value>,
 }
 
 /// An optional uuid that tolerates `""`/whitespace as "not given" — annotated
@@ -415,6 +428,58 @@ struct PatchPreview {
     /// Every member of the bundle, with its current tags — so the UI can offer a
     /// manual match and show, per candidate, what it already has.
     members: Vec<Candidate>,
+    /// Custom field values the patch carries that will be written.
+    custom_fields_applied: usize,
+    /// ...and the ones that won't, each with why. Never fatal: a scrape carries
+    /// whatever the shop page had, and the user decides whether it matters.
+    custom_field_warnings: Vec<CustomFieldWarning>,
+}
+
+/// One scraped metadata key that will be skipped, and why.
+#[derive(Serialize, ToSchema)]
+struct CustomFieldWarning {
+    /// "the bundle", or the patch model's label — where the key came from.
+    source: String,
+    key: String,
+    reason: String,
+}
+
+/// Walk the patch's `custom_fields` — the bundle's plus each targeted model's —
+/// reporting what would be written and what would be skipped. Shared shape
+/// between preview (which shows this) and apply (which acts on it).
+fn survey_custom_fields(
+    fields: &std::collections::HashMap<String, CustomField>,
+    patch: &Patch,
+    bundle_id: Uuid,
+    targets: &[(usize, Uuid)],
+) -> (usize, Vec<CustomFieldWarning>) {
+    let mut applied = 0;
+    let mut warnings = Vec::new();
+    let mut survey =
+        |source: String, owner: ValueOwner, pairs: &HashMap<String, serde_json::Value>| {
+            let mut keys: Vec<&String> = pairs.keys().collect();
+            keys.sort();
+            for key in keys {
+                match resolve_patch_value(fields, owner, key, &pairs[key]) {
+                    Resolved::Value { .. } => applied += 1,
+                    Resolved::Warning(reason) => warnings.push(CustomFieldWarning {
+                        source: source.clone(),
+                        key: key.clone(),
+                        reason,
+                    }),
+                }
+            }
+        };
+    survey(
+        "the bundle".to_string(),
+        ValueOwner::Bundle(bundle_id),
+        &patch.bundle.custom_fields,
+    );
+    for (idx, model_id) in targets {
+        let pm = &patch.models[*idx];
+        survey(pm.label(), ValueOwner::Model(*model_id), &pm.custom_fields);
+    }
+    (applied, warnings)
 }
 
 #[derive(Serialize, ToSchema)]
@@ -581,7 +646,20 @@ async fn preview(
         .map(|m| m.name.clone())
         .collect();
 
+    // Custom fields are surveyed against the rows that would auto-apply. A row
+    // the user resolves by hand isn't known yet, so its metadata isn't counted
+    // here — the apply writes it all the same.
+    let auto_targets: Vec<(usize, Uuid)> = matched.iter().map(|r| (r.key, r.model_id)).collect();
+    let (custom_fields_applied, custom_field_warnings) = survey_custom_fields(
+        &fields_by_key(&mut *state.db.acquire().await?).await?,
+        &archive.patch,
+        bundle_id,
+        &auto_targets,
+    );
+
     Ok(Json(PatchPreview {
+        custom_fields_applied,
+        custom_field_warnings,
         bundle_description: archive
             .patch
             .bundle
@@ -671,6 +749,8 @@ struct ApplyResult {
     tags_added: usize,
     aliases_added: usize,
     descriptions_added: usize,
+    /// Custom field values written, on the bundle and its members together.
+    custom_fields_set: usize,
 }
 
 /// A blob already put into the store, ready to become an image row.
@@ -814,7 +894,9 @@ async fn apply(
         tags_added: 0,
         aliases_added: 0,
         descriptions_added: 0,
+        custom_fields_set: 0,
     };
+    let custom_fields = fields_by_key(&mut *state.db.acquire().await?).await?;
     let mut tx = state.db.begin().await?;
 
     // ---- bundle-level ----
@@ -1137,9 +1219,40 @@ async fn apply(
             }
         }
 
+        // Scraped extra metadata. An unknown or inapplicable key was already
+        // reported as a warning by the preview; here it is simply skipped.
+        if !pm.custom_fields.is_empty() {
+            let skipped = apply_patch_values(
+                &mut tx,
+                &custom_fields,
+                ValueOwner::Model(*model_id),
+                &pm.custom_fields,
+                &user,
+            )
+            .await?;
+            if pm.custom_fields.len() > skipped.len() {
+                result.custom_fields_set += pm.custom_fields.len() - skipped.len();
+                touched = true;
+            }
+        }
+
         if touched {
             result.models_updated += 1;
         }
+    }
+
+    // The bundle's own extra metadata, and the members it reaches from there.
+    if !archive.patch.bundle.custom_fields.is_empty() {
+        let skipped = apply_patch_values(
+            &mut tx,
+            &custom_fields,
+            ValueOwner::Bundle(bundle_id),
+            &archive.patch.bundle.custom_fields,
+            &user,
+        )
+        .await?;
+        result.custom_fields_set += archive.patch.bundle.custom_fields.len() - skipped.len();
+        persist_bundle_fields(&mut tx, bundle_id, &user).await?;
     }
 
     tx.commit().await?;
@@ -1149,6 +1262,7 @@ async fn apply(
         tags = result.tags_added,
         aliases = result.aliases_added,
         descriptions = result.descriptions_added,
+        custom_fields = result.custom_fields_set,
         "patch apply: committed"
     );
     Ok(Json(result))
@@ -1354,6 +1468,7 @@ mod tests {
             images: Vec::new(),
             category: category.map(str::to_string),
             source_url: None,
+            custom_fields: HashMap::new(),
         }
     }
 
@@ -1530,6 +1645,7 @@ mod tests {
                 creator: Some("Bob &amp; Co".into()),
                 description_md: Some("Isn&#39;t it grand".into()),
                 images: vec!["cover&#8211;.png".into()],
+                custom_fields: HashMap::new(),
             },
             models: vec![PatchModel {
                 uuid: None,
@@ -1544,6 +1660,7 @@ mod tests {
                 images: vec!["gallery&#8211;.png".into()],
                 category: Some("Enemies &amp; Foes".into()),
                 source_url: Some("https://x.test/p?a=1&amp;b=2".into()),
+                custom_fields: HashMap::new(),
             }],
         };
         decode_entities(&mut patch);

@@ -146,7 +146,8 @@ export default function BundlePatchDialog({
       setDone(
         `Applied: ${result.models_updated} model(s) updated, ${result.tags_added} tag(s) added, ` +
           `${result.images_added} image(s) added, ${result.descriptions_added} description(s) set, ` +
-          `${result.aliases_added} alias(es) recorded.`,
+          `${result.aliases_added} alias(es) recorded, ` +
+          `${result.custom_fields_set} custom field value(s) set.`,
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -285,6 +286,29 @@ export default function BundlePatchDialog({
           />
         ) : (
           <Stack spacing={2}>
+            {/* A scrape carries whatever the shop page had, so a key nobody has
+                defined a field for is worth saying out loud — but it never
+                stops the rest of the patch applying. */}
+            {preview.custom_field_warnings.length > 0 && (
+              <Alert severity="warning">
+                <Typography variant="body2" sx={{ mb: 0.5 }}>
+                  {preview.custom_fields_applied > 0
+                    ? `${preview.custom_fields_applied} custom field value(s) will be applied; these will be skipped:`
+                    : 'These custom field values will be skipped:'}
+                </Typography>
+                <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                  {preview.custom_field_warnings.map((w, i) => (
+                    <Chip
+                      key={`${w.source}-${w.key}-${i}`}
+                      size="small"
+                      variant="outlined"
+                      color="warning"
+                      label={`${w.source}: ${w.key} — ${w.reason}`}
+                    />
+                  ))}
+                </Stack>
+              </Alert>
+            )}
             {(preview.bundle_covers.length > 0 || preview.bundle_description) && (
               <Box>
                 <Typography variant="subtitle2" gutterBottom>
