@@ -21,6 +21,9 @@ import {
   Checkbox,
   Select,
   MenuItem,
+  FormControlLabel,
+  Radio,
+  RadioGroup,
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import AddIcon from '@mui/icons-material/Add'
@@ -409,7 +412,11 @@ export const FileTree = memo(function FileTree({
   const [confirmDiscard, setConfirmDiscard] = useState<{
     dir: string
     entries: FileRecord[]
+    /** Files in folders *under* this one — empty for a leaf. */
+    nested: FileRecord[]
   } | null>(null)
+  // Which of the two a discard means, for a folder that has folders under it.
+  const [discardTree, setDiscardTree] = useState(true)
   const [previewFile, setPreviewFile] = useState<FileRecord | null>(null)
 
   const startFolder = (dir: string) => {
@@ -469,6 +476,14 @@ export const FileTree = memo(function FileTree({
     }
     return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b))
   }, [files])
+
+  /// The files sitting in folders *under* `dir`. A folder here is a shared
+  /// `path` string and each group holds only what sits directly at that path, so
+  /// discarding `Pack` would leave `Pack/supported` behind, orphaned under a
+  /// folder that no longer exists — hence the choice offered when this is
+  /// non-empty.
+  const under = (dir: string) =>
+    groups.filter(([d]) => d.startsWith(`${dir}/`)).flatMap(([, entries]) => entries)
 
   // Reserve the 3D-preview column on every row once any file can show it, so the
   // download/render icons stay in aligned columns next to files (projects,
@@ -566,13 +581,16 @@ export const FileTree = memo(function FileTree({
                     </>
                   )}
                   {onFolderDiscard && (
-                    <Tooltip title="Discard folder — delete these files without importing them">
+                    <Tooltip title="Discard folder — delete its files without importing them">
                       <span>
                         <IconButton
                           size="small"
                           color="error"
                           disabled={discardingDir === dir}
-                          onClick={() => setConfirmDiscard({ dir, entries })}
+                          onClick={() => {
+                            setDiscardTree(true)
+                            setConfirmDiscard({ dir, entries, nested: under(dir) })
+                          }}
                         >
                           <FolderDeleteIcon sx={{ fontSize: 17 }} />
                         </IconButton>
@@ -697,12 +715,53 @@ export const FileTree = memo(function FileTree({
       >
         <DialogTitle>Discard folder?</DialogTitle>
         <DialogContent>
-          <Typography variant="body2">
-            Delete the {confirmDiscard?.entries.length}{' '}
-            {confirmDiscard?.entries.length === 1 ? 'file' : 'files'} in{' '}
-            <strong>{confirmDiscard?.dir}</strong> without importing{' '}
-            {confirmDiscard?.entries.length === 1 ? 'it' : 'them'}. This can't be undone.
-          </Typography>
+          {confirmDiscard && confirmDiscard.nested.length > 0 ? (
+            // A folder with folders under it: "delete this folder" is two
+            // different things, and which one was meant is not ours to guess.
+            // The whole subtree goes by default — that is what deleting a folder
+            // means everywhere else — but the counts are spelled out either way.
+            <>
+              <Typography variant="body2" sx={{ mb: 1 }}>
+                <strong>{confirmDiscard.dir}</strong> has folders under it. Nothing here is
+                imported, and this can't be undone.
+              </Typography>
+              <RadioGroup
+                value={discardTree ? 'tree' : 'folder'}
+                onChange={(e) => setDiscardTree(e.target.value === 'tree')}
+              >
+                <FormControlLabel
+                  value="tree"
+                  control={<Radio size="small" />}
+                  disabled={discardingDir !== null}
+                  label={
+                    <Typography variant="body2">
+                      This folder and everything under it —{' '}
+                      {confirmDiscard.entries.length + confirmDiscard.nested.length} files
+                    </Typography>
+                  }
+                />
+                <FormControlLabel
+                  value="folder"
+                  control={<Radio size="small" />}
+                  disabled={discardingDir !== null}
+                  label={
+                    <Typography variant="body2">
+                      This folder only — {confirmDiscard.entries.length}{' '}
+                      {confirmDiscard.entries.length === 1 ? 'file' : 'files'}, leaving the{' '}
+                      {confirmDiscard.nested.length} below it staged
+                    </Typography>
+                  }
+                />
+              </RadioGroup>
+            </>
+          ) : (
+            <Typography variant="body2">
+              Delete the {confirmDiscard?.entries.length}{' '}
+              {confirmDiscard?.entries.length === 1 ? 'file' : 'files'} in{' '}
+              <strong>{confirmDiscard?.dir}</strong> without importing{' '}
+              {confirmDiscard?.entries.length === 1 ? 'it' : 'them'}. This can't be undone.
+            </Typography>
+          )}
         </DialogContent>
         <DialogActions>
           <Button disabled={discardingDir !== null} onClick={() => setConfirmDiscard(null)}>
@@ -713,7 +772,13 @@ export const FileTree = memo(function FileTree({
             variant="contained"
             disabled={discardingDir !== null}
             onClick={() =>
-              confirmDiscard && void discardFolder(confirmDiscard.dir, confirmDiscard.entries)
+              confirmDiscard &&
+              void discardFolder(
+                confirmDiscard.dir,
+                discardTree
+                  ? [...confirmDiscard.entries, ...confirmDiscard.nested]
+                  : confirmDiscard.entries,
+              )
             }
           >
             Discard

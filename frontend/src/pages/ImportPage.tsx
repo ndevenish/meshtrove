@@ -252,9 +252,15 @@ function ImportWorkbench() {
   // Drop a folder's staged files without importing them. There's no folder row
   // to delete — a folder is just its files' shared `path` — so delete each file
   // and refresh the list (and the summary's file_count) around them.
+  //
+  // A few at a time, not all at once: discarding a folder with its subfolders is
+  // routinely thousands of files, and firing that many requests in one breath
+  // buries the server under its own import.
   const discardFolder = async (fileIds: string[]) => {
     try {
-      await Promise.all(fileIds.map((fid) => api.deleteFile(fid)))
+      for (let i = 0; i < fileIds.length; i += 8) {
+        await Promise.all(fileIds.slice(i, i + 8).map((fid) => api.deleteFile(fid)))
+      }
       await queryClient.invalidateQueries({ queryKey: ['import', id] })
       await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
       await queryClient.invalidateQueries({ queryKey: ['imports'] })
