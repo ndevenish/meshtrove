@@ -1342,10 +1342,24 @@ fn decode_entities(patch: &mut Patch) {
             *s = html_escape::decode_html_entities(s).into_owned();
         }
     }
+    /// Custom field values, where they are text. A choice field's value has to
+    /// match one of its defined choices *exactly*, so an undecoded "Black &amp;
+    /// White" would be rejected as "not one of this field's choices" — the
+    /// entity has to go before the value is ever compared. Keys are left alone:
+    /// they are slugs by construction (letters, digits, `-`, `_`), so there is
+    /// nothing in one to decode.
+    fn dec_values(map: &mut HashMap<String, serde_json::Value>) {
+        for value in map.values_mut() {
+            if let serde_json::Value::String(s) = value {
+                *s = html_escape::decode_html_entities(s).into_owned();
+            }
+        }
+    }
     dec(&mut patch.source.url);
     dec(&mut patch.bundle.name);
     dec(&mut patch.bundle.creator);
     dec(&mut patch.bundle.description_md);
+    dec_values(&mut patch.bundle.custom_fields);
     for m in &mut patch.models {
         dec(&mut m.name);
         dec(&mut m.category);
@@ -1354,6 +1368,7 @@ fn decode_entities(patch: &mut Patch) {
         dec_all(&mut m.tags);
         dec(&mut m.match_hint.name);
         dec_all(&mut m.match_hint.aliases);
+        dec_values(&mut m.custom_fields);
     }
 }
 
@@ -1645,7 +1660,10 @@ mod tests {
                 creator: Some("Bob &amp; Co".into()),
                 description_md: Some("Isn&#39;t it grand".into()),
                 images: vec!["cover&#8211;.png".into()],
-                custom_fields: HashMap::new(),
+                custom_fields: HashMap::from([
+                    ("material".into(), serde_json::json!("Black &amp; White")),
+                    ("printed".into(), serde_json::json!(true)),
+                ]),
             },
             models: vec![PatchModel {
                 uuid: None,
@@ -1660,7 +1678,10 @@ mod tests {
                 images: vec!["gallery&#8211;.png".into()],
                 category: Some("Enemies &amp; Foes".into()),
                 source_url: Some("https://x.test/p?a=1&amp;b=2".into()),
-                custom_fields: HashMap::new(),
+                custom_fields: HashMap::from([(
+                    "notes".into(),
+                    serde_json::json!("supports &#8211; 45&#176;"),
+                )]),
             }],
         };
         decode_entities(&mut patch);
@@ -1683,6 +1704,20 @@ mod tests {
             Some("Crocodile & Camel")
         );
         assert_eq!(patch.models[0].match_hint.aliases, vec!["Croc – v2"]);
+        // A text custom field value is text like any other — a choice value has
+        // to match its defined choice exactly, and non-strings are untouched.
+        assert_eq!(
+            patch.bundle.custom_fields["material"],
+            serde_json::json!("Black & White")
+        );
+        assert_eq!(
+            patch.bundle.custom_fields["printed"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            patch.models[0].custom_fields["notes"],
+            serde_json::json!("supports – 45°")
+        );
         // Image references stay byte-for-byte so they still match zip entries.
         assert_eq!(patch.bundle.images, vec!["cover&#8211;.png"]);
         assert_eq!(patch.models[0].image.as_deref(), Some("model&#8211;.png"));
