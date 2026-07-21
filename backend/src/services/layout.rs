@@ -553,20 +553,29 @@ pub fn analyze(
                     );
                 }
                 match role {
-                    // Archives name their folders in camel case constantly, and the
-                    // capture becomes the model's name verbatim — so `DwarfBerserker`
-                    // would be the name in the library. Put the spaces back.
-                    Role::ModelName => model_name = Some(crate::util::expand_camel_case(raw)),
+                    // Archives name their folders in camel case and snake case
+                    // constantly, and the capture becomes the model's name verbatim —
+                    // so `DwarfBerserker` or `dwarf_berserker` would be the name in
+                    // the library. Put the spaces back.
+                    Role::ModelName => model_name = Some(crate::util::humanize_token(raw)),
                     // An id, not a title: keep it exactly as captured.
                     Role::CreatorRef => creator_ref = Some(raw.clone()),
                     // A label the creator chose — verbatim, like the creator id.
                     Role::ModelVersion => model_version = Some(raw.clone()),
+                    // A tag is a name a human reads in the browse sidebar, so it gets
+                    // the same treatment a variant tag's captured value does: the
+                    // folder `Fantasy_Creatures` tags the model "Fantasy Creatures",
+                    // not a tag with an underscore in it.
                     Role::ModelTag => {
-                        if !model_tags.iter().any(|t| fold(t) == fold(raw)) {
-                            model_tags.push(raw.clone());
+                        let humanised = crate::util::humanize_token(raw);
+                        if humanised.is_empty() {
+                            continue;
                         }
-                        if seen_model_tags.insert(fold(raw)) {
-                            model_tag_order.push(raw.clone());
+                        if !model_tags.iter().any(|t| fold(t) == fold(&humanised)) {
+                            model_tags.push(humanised.clone());
+                        }
+                        if seen_model_tags.insert(fold(&humanised)) {
+                            model_tag_order.push(humanised);
                         }
                     }
                     Role::VariantTag => {
@@ -1032,6 +1041,30 @@ mod tests {
     }
 
     #[test]
+    fn captured_names_and_model_tags_read_as_titles() {
+        // Both end up in front of a human — a model title, a tag in the browse
+        // sidebar — so a snake_case folder loses its underscores either way, and
+        // two spellings of one tag land as one.
+        let spec = spec_of(vec![rule(
+            r"[^/]+/([^/]+)/([^/]+)/[^/]+\.stl",
+            &[("1", Role::ModelTag), ("2", Role::ModelName)],
+        )]);
+        let files = vec![
+            file(1, "DownloadAll/Fantasy_Creatures/Dwarf_Berserker", "a.stl"),
+            file(2, "DownloadAll/FantasyCreatures/Dwarf_Berserker", "b.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        assert_eq!(
+            plan.models.len(),
+            1,
+            "one model, however its tag is spelled"
+        );
+        assert_eq!(plan.models[0].name, "Dwarf Berserker");
+        assert_eq!(plan.models[0].tags, vec!["Fantasy Creatures"]);
+        assert_eq!(plan.model_tag_order, vec!["Fantasy Creatures"]);
+    }
+
+    #[test]
     fn identity_is_resolved_tags_not_raw_captures() {
         // Supported_LYCHEE and Supported_Lychee fold to one mapped value; the
         // two files land on the same variant.
@@ -1165,7 +1198,9 @@ mod tests {
             "a.stl",
         )];
         let plan = analyze(&loot_spec(), CarveTarget::Bundle, &files, &vocab()).unwrap();
-        assert_eq!(plan.models[0].name, "Twin_Blade");
+        // The whole underscored name is captured — the lazy group doesn't stop at the
+        // first `_` — and then reads as a title, underscores spaced back out.
+        assert_eq!(plan.models[0].name, "Twin Blade");
     }
 
     #[test]
