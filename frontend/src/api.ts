@@ -793,8 +793,15 @@ export const api = {
     request<RestorePreview>(`/api/imports/${importId}/restore/preview`),
   /// Restore a previewed archive. `fresh` names the manifest-local ids of
   /// already-present entities to import as a fresh copy anyway.
-  restoreCommit: (importId: string, fresh: string[]) =>
-    request<RestoreSummary>(`/api/imports/${importId}/restore/commit`, json({ fresh })),
+  restoreCommit: (
+    importId: string,
+    fresh: string[],
+    custom_fields: Record<string, CustomFieldMapping> = {},
+  ) =>
+    request<RestoreSummary>(
+      `/api/imports/${importId}/restore/commit`,
+      json({ fresh, custom_fields }),
+    ),
 
   previewBundlePatch: (bundleId: string, zip: File) => {
     const form = new FormData()
@@ -953,11 +960,46 @@ export interface RestoreEntity {
   members?: number
 }
 
+/// A custom field definition the archive carries. The vocabulary is an
+/// instance-wide admin setting, so the receiving instance may know nothing about
+/// it — hence the per-field choice on import.
+export interface RestoreCustomField {
+  /** manifest-local id — the key of the `custom_fields` mapping on commit */
+  id: string
+  key: string
+  name: string
+  kind: CustomFieldKind
+  applies_to_models: boolean
+  applies_to_bundles: boolean
+  visibility: CustomFieldVisibility
+  /** how many values across the archive would be written under it */
+  value_count: number
+  /** the local field this instance would adopt by default, or null = create it */
+  suggested_field_id: string | null
+}
+
+/** This instance's own vocabulary, to choose from when mapping. */
+export interface RestoreLocalField {
+  id: string
+  key: string
+  name: string
+  kind: CustomFieldKind
+  applies_to_models: boolean
+  applies_to_bundles: boolean
+}
+
+/// What to do with one exported custom field: drop it, write its values onto a
+/// field already here, or add the archive's definition to the vocabulary.
+export type CustomFieldMapping =
+  { action: 'skip' } | { action: 'existing'; field_id: string } | { action: 'create' }
+
 export interface RestorePreview {
   schema: string
   exported_at: string
   models: RestoreEntity[]
   bundles: RestoreEntity[]
+  custom_fields: RestoreCustomField[]
+  local_custom_fields: RestoreLocalField[]
   blob_count: number
   total_size: number
 }
@@ -970,6 +1012,10 @@ export interface RestoreSummary {
   files: number
   images: number
   blobs: number
+  /** custom field definitions added to this instance's vocabulary */
+  custom_fields_created: number
+  /** values written under them (and under the fields they were mapped onto) */
+  custom_field_values: number
 }
 
 /// A short, human label for a source URL: just its origin (`https://host`), so
