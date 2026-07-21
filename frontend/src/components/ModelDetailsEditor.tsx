@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, uploadWithProgress, type FileRecord, type ModelDetail } from '../api'
 import { changeTags, pasteTags } from '../tags'
 import { useSuppressGlobalDrop } from '../globalDrop'
+import { CustomFieldControl, useCustomFieldDraft } from './CustomFieldControl'
 import Dropzone from './Dropzone'
 
 /// What the page can ask of the editor. Save and Cancel live in the page header,
@@ -44,6 +45,7 @@ const ModelDetailsEditor = forwardRef<
   const [description, setDescription] = useState(model.description_md ?? '')
   const [error, setError] = useState('')
   const [uploadPct, setUploadPct] = useState<number | null>(null)
+  const customFields = useCustomFieldDraft(model.custom_fields)
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
@@ -73,6 +75,7 @@ const ModelDetailsEditor = forwardRef<
         model_version: version.trim() || null,
         source_url: sourceUrl.trim() || null,
         tags,
+        custom_fields: customFields.payload(),
       })
       // Descriptions are immutable revisions: an edit inserts a new one, so only
       // write when it actually changed — otherwise every save grows the history
@@ -174,6 +177,26 @@ const ModelDetailsEditor = forwardRef<
         value={sourceUrl}
         onChange={(e) => setSourceUrl(e.target.value)}
       />
+      {/* A file-kind field writes itself the moment something is dropped on it
+          — there are no bytes to hold in a form — so it doesn't wait for save. */}
+      {model.custom_fields.map((entry) => (
+        <CustomFieldControl
+          key={entry.field.id}
+          entry={entry}
+          value={customFields.valueOf(entry)}
+          onChange={(value) => customFields.setValue(entry, value)}
+          onUploadFile={async (file) => {
+            const form = new FormData()
+            form.append('file', file)
+            await api.uploadCustomFieldFile('models', model.id, entry.field.id, form)
+            await queryClient.invalidateQueries({ queryKey: ['model', model.slug] })
+          }}
+          onClearFile={async () => {
+            await api.clearCustomField('models', model.id, entry.field.id)
+            await queryClient.invalidateQueries({ queryKey: ['model', model.slug] })
+          }}
+        />
+      ))}
       <TextField
         label="Description (markdown)"
         value={description}

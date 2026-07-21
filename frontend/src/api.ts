@@ -49,6 +49,33 @@ export interface CustomFieldDef {
 
 export type CustomFieldInput = Omit<CustomFieldDef, 'id'>
 
+/** The file behind a file-kind value; downloaded through the usual file route. */
+export interface CustomFieldFile {
+  file_id: string
+  filename: string
+  mime: string | null
+  size: number
+}
+
+/// One field as it appears on a model or bundle: the definition, plus whatever
+/// this owner has stored under it. Every applicable and visible field is listed,
+/// set or not, so an editor sees the blanks it could fill in.
+export interface CustomFieldValue {
+  field: CustomFieldDef
+  /** null when unset; always null for a file field — see `file` */
+  value: string | boolean | number | null
+  file: CustomFieldFile | null
+}
+
+/** One scalar write, carried in the model/bundle edit. A null value clears. */
+export interface CustomFieldValueInput {
+  field_id: string
+  value: string | boolean | number | null
+}
+
+/** Which side of the model/bundle divide a custom field value hangs off. */
+export type CustomFieldOwner = 'models' | 'bundles'
+
 export interface Creator {
   id: string
   name: string
@@ -147,6 +174,8 @@ export interface ModelDetail {
   order_ref: string | null
   tags: string[]
   description_md: string | null
+  /** every custom field applying to models that the caller may see, set or not */
+  custom_fields: CustomFieldValue[]
   variants: VariantDetail[]
   images: ImageRecord[]
   /** bundles this model belongs to */
@@ -193,6 +222,8 @@ export interface BundleDetail {
   source_url: string | null
   tags: string[]
   description_md: string | null
+  /** every custom field applying to bundles that the caller may see, set or not */
+  custom_fields: CustomFieldValue[]
   models: ModelSummary[]
   images: ImageRecord[]
   /** primary categories (import sections), in tab order; each is a model tag a
@@ -606,6 +637,16 @@ export const api = {
     request<CustomFieldDef>(`/api/custom-fields/${id}`, { ...json(body), method: 'PUT' }),
   deleteCustomField: (id: string) =>
     request<void>(`/api/custom-fields/${id}`, { method: 'DELETE' }),
+
+  /** Replace a file-kind value's file. The form carries one `file` part. */
+  uploadCustomFieldFile: (owner: CustomFieldOwner, id: string, fieldId: string, form: FormData) =>
+    request<CustomFieldValue>(`/api/${owner}/${id}/custom-fields/${fieldId}/file`, {
+      method: 'POST',
+      body: form,
+    }),
+  /** Unset one field on one owner, file and all. */
+  clearCustomField: (owner: CustomFieldOwner, id: string, fieldId: string) =>
+    request<void>(`/api/${owner}/${id}/custom-fields/${fieldId}`, { method: 'DELETE' }),
 
   searchModels: (params: URLSearchParams) => request<SearchResults>(`/api/models?${params}`),
   model: (id: string) => request<ModelDetail>(`/api/models/${id}`),

@@ -5,6 +5,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type BundleDetail } from '../api'
 import { changeTags, pasteTags } from '../tags'
+import { useSuppressGlobalDrop } from '../globalDrop'
+import { CustomFieldControl, useCustomFieldDraft } from './CustomFieldControl'
 import type { DetailsEditorHandle } from './ModelDetailsEditor'
 
 /// The bundle's fields, edited in place. Mirrors ModelDetailsEditor — a bundle
@@ -26,6 +28,11 @@ const BundleDetailsEditor = forwardRef<
   const [sourceUrl, setSourceUrl] = useState(bundle.source_url ?? '')
   const [description, setDescription] = useState(bundle.description_md ?? '')
   const [error, setError] = useState('')
+  const customFields = useCustomFieldDraft(bundle.custom_fields)
+  // A file-kind field puts a drop target on this page; while one is up, the
+  // app-wide "drop anywhere to import" overlay has to stand aside or it swallows
+  // the drop and stages an import instead.
+  useSuppressGlobalDrop(bundle.custom_fields.some((e) => e.field.kind === 'file'))
 
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
@@ -50,6 +57,7 @@ const BundleDetailsEditor = forwardRef<
         kind,
         source_url: sourceUrl.trim() || null,
         tags,
+        custom_fields: customFields.payload(),
       })
       // A description edit inserts a revision; only write when it changed.
       if (description !== (bundle.description_md ?? '')) {
@@ -114,6 +122,26 @@ const BundleDetailsEditor = forwardRef<
         value={sourceUrl}
         onChange={(e) => setSourceUrl(e.target.value)}
       />
+      {/* A file-kind field writes itself the moment something is dropped on it
+          — there are no bytes to hold in a form — so it doesn't wait for save. */}
+      {bundle.custom_fields.map((entry) => (
+        <CustomFieldControl
+          key={entry.field.id}
+          entry={entry}
+          value={customFields.valueOf(entry)}
+          onChange={(value) => customFields.setValue(entry, value)}
+          onUploadFile={async (file) => {
+            const form = new FormData()
+            form.append('file', file)
+            await api.uploadCustomFieldFile('bundles', bundle.id, entry.field.id, form)
+            await queryClient.invalidateQueries({ queryKey: ['bundle', bundle.slug] })
+          }}
+          onClearFile={async () => {
+            await api.clearCustomField('bundles', bundle.id, entry.field.id)
+            await queryClient.invalidateQueries({ queryKey: ['bundle', bundle.slug] })
+          }}
+        />
+      ))}
       <TextField
         label="Description (markdown)"
         value={description}

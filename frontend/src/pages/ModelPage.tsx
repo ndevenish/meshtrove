@@ -26,6 +26,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import DownloadIcon from '@mui/icons-material/Download'
 import { api, imageUrl, sourceOrigin } from '../api'
+import { CustomFieldReadout } from '../components/CustomFieldControl'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
 import { usePasteImage, useDropImage } from '../imageGestures'
@@ -428,6 +429,10 @@ export default function ModelPage() {
               Version: {model.model_version}
             </Typography>
           )}
+          {!editing &&
+            model.custom_fields.map((entry) => (
+              <CustomFieldReadout key={entry.field.id} entry={entry} />
+            ))}
           {model.bundles.length > 0 && (
             <Stack
               direction="row"

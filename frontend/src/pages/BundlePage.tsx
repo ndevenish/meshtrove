@@ -40,6 +40,7 @@ import { useSuppressGlobalDrop } from '../globalDrop'
 import { startImport } from '../upload'
 import Dropzone from '../components/Dropzone'
 import ModelCard from '../components/ModelCard'
+import { CustomFieldReadout } from '../components/CustomFieldControl'
 import BundleDetailsEditor from '../components/BundleDetailsEditor'
 import { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
 import BundleUnsortedSection from '../components/BundleUnsortedSection'
@@ -407,6 +408,10 @@ export default function BundlePage() {
               )}
             </Typography>
           )}
+          {!editing &&
+            bundle.custom_fields.map((entry) => (
+              <CustomFieldReadout key={entry.field.id} entry={entry} />
+            ))}
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
             {!editing && bundle.tags.map((tag) => <Chip key={tag} label={tag} size="small" />)}
           </Stack>
