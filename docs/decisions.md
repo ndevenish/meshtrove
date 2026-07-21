@@ -101,6 +101,21 @@ Implementation quirks worth knowing (found the hard way):
   Admin-only, unlike the rest of the import routes, because it reads the server's
   filesystem. Picking up never modifies the dropbox — the entry stays until the
   admin deletes it, so a failed import is always retryable.
+- **Job workers are concurrent and lane-split, not a separate process** (added
+  2026-07-21). `--job-workers` (default 2) and `--render-workers` (default 2)
+  spawn N worker tasks each; the claim query already used `FOR UPDATE SKIP
+  LOCKED`, so concurrency needed no locking work. The *lanes* are the point: a
+  render is short and the UI is waiting on it, so it must not queue behind a
+  40GB dropbox import that happens to have a lower id. `Lane::Render` claims an
+  allowlist of kinds and `Lane::General` claims its complement, so the two
+  always partition every kind — a kind added to `dispatch` and forgotten here
+  still runs rather than sitting queued forever with no worker willing to take
+  it. They stay *in* the server binary because `recover_stranded` requeues every
+  `running` row at startup, which is only safe while one process owns them all;
+  a second worker process would yank jobs out from under the first, and would
+  need leases/heartbeats first. Pool sizing moved with it — a worker holds its
+  connection for the whole job, so `max_connections` is now `10 + workers`
+  rather than a flat 10 shared with every browse query.
 
 ## File-first import + recategorisation (Phases 1–2 done, 3 remaining)
 

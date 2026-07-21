@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     routes::auth::ensure_startup_users(&state).await?;
     services::jobs::recover_stranded(&state.db).await?;
     services::importer::requeue_missed_archives(&state).await?;
-    tokio::spawn(services::jobs::worker(state.clone()));
+    spawn_workers(&state);
 
     let app = Router::new()
         .merge(routes::admin::router())
@@ -75,4 +75,20 @@ async fn main() -> Result<()> {
     tracing::info!("listening on http://{}", state.config.bind_addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Start the background workers, one task per configured slot in each lane.
+fn spawn_workers(state: &AppState) {
+    use services::jobs::Lane;
+    if state.config.job_workers == 0 {
+        tracing::warn!("--job-workers is 0: imports and exports will queue but never run");
+    }
+    for (lane, count) in [
+        (Lane::General, state.config.job_workers),
+        (Lane::Render, state.config.render_workers),
+    ] {
+        for _ in 0..count {
+            tokio::spawn(services::jobs::worker(state.clone(), lane));
+        }
+    }
 }

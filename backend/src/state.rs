@@ -18,8 +18,12 @@ impl AppState {
     pub async fn new() -> Result<AppState> {
         let config = Configuration::load()?;
         tracing::info!(?config, "loaded configuration");
+        // A worker holds its connection for the whole job, and a job can run for
+        // minutes, so workers get connections of their own on top of the pool
+        // the HTTP handlers share — otherwise a few concurrent imports starve
+        // every browse query behind them.
         let db = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(10 + config.job_workers + config.render_workers)
             .connect(&config.database_url)
             .await
             .context("connecting to Postgres")?;

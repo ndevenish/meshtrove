@@ -52,6 +52,17 @@ pub struct Arguments {
     /// Ensure an admin user exists at startup, format "username:password"
     #[arg(long, hide = true, env = "MESHTROVE_CREATE_ADMIN", hide_env = true)]
     create_admin: Option<String>,
+
+    /// Workers running imports, exports and dropbox scans (0 stops them running)
+    #[arg(long, env = "MESHTROVE_JOB_WORKERS", default_value = "2",
+          value_parser = clap::value_parser!(u32).range(0..=64))]
+    job_workers: u32,
+
+    /// Workers running preview renders, in their own lane so a long import
+    /// cannot queue in front of them (0 stops previews rendering)
+    #[arg(long, env = "MESHTROVE_RENDER_WORKERS", default_value = "2",
+          value_parser = clap::value_parser!(u32).range(0..=64))]
+    render_workers: u32,
 }
 
 impl Arguments {
@@ -102,6 +113,8 @@ pub struct Configuration {
     /// (username, password) of an admin to ensure exists at startup
     #[debug(skip)]
     pub create_admin: Option<(String, String)>,
+    pub job_workers: u32,
+    pub render_workers: u32,
 }
 
 impl Configuration {
@@ -148,6 +161,8 @@ impl Configuration {
             store_dir,
             cookie_key,
             create_admin,
+            job_workers: args.job_workers,
+            render_workers: args.render_workers,
         })
     }
 }
