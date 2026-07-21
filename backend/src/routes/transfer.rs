@@ -91,6 +91,10 @@ struct EntityRow {
     /// Member count, for bundles.
     #[serde(skip_serializing_if = "Option::is_none")]
     members: Option<usize>,
+    /// Custom field values the archive carries for this entity. A skipped entity
+    /// is left untouched, so these are values the restore will *not* write —
+    /// which the screen has to say out loud rather than silently drop.
+    custom_field_values: usize,
 }
 
 async fn restore_preview(
@@ -131,6 +135,7 @@ async fn restore_preview(
             slug: m.slug.clone(),
             exists: existing_models.contains(&m.slug),
             members: None,
+            custom_field_values: m.custom_fields.len(),
         })
         .collect();
     let bundles = manifest
@@ -142,6 +147,7 @@ async fn restore_preview(
             slug: b.slug.clone(),
             exists: existing_bundles.contains(&b.slug),
             members: Some(b.member_ids.len()),
+            custom_field_values: b.custom_fields.len(),
         })
         .collect();
 

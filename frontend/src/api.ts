@@ -961,6 +961,9 @@ export interface RestoreEntity {
   exists: boolean
   /** member count, for bundles */
   members?: number
+  /** custom field values the archive carries for it — not written if it is
+      skipped, since a skipped entity is left untouched */
+  custom_field_values: number
 }
 
 /// A custom field definition the archive carries. The vocabulary is an

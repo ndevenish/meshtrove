@@ -105,6 +105,19 @@ export default function ImportRestorePanel({
 
   const nothing = preview.models.length === 0 && preview.bundles.length === 0
 
+  // A skipped entity keeps everything it has, custom fields included — so any
+  // values the archive carries for it go nowhere. That is the intended
+  // behaviour, but it is invisible unless the screen says so. Fields the user
+  // has explicitly set to Skip are already a deliberate choice and don't count
+  // towards the warning.
+  const anyFieldKept = preview.custom_fields.some((f) => choiceFor(f) !== 'skip')
+  const skippedWithValues = anyFieldKept
+    ? [...preview.models, ...preview.bundles].filter(
+        (e) => e.exists && !fresh.has(e.id) && e.custom_field_values > 0,
+      )
+    : []
+  const droppedValues = skippedWithValues.reduce((n, e) => n + e.custom_field_values, 0)
+
   return (
     <Stack spacing={2}>
       {error && <Alert severity="error">{error}</Alert>}
@@ -139,6 +152,16 @@ export default function ImportRestorePanel({
           choice={choiceFor}
           onChange={(id, value) => setFieldChoice((prev) => ({ ...prev, [id]: value }))}
         />
+      )}
+
+      {droppedValues > 0 && (
+        <Alert severity="warning">
+          {skippedWithValues.length} of these are already here and will be skipped — a restore
+          brings entities in, it doesn't drop metadata onto ones you already have. The{' '}
+          <strong>{droppedValues} custom field value(s)</strong> the archive carries for them will
+          not be applied. Tick <em>fresh copy</em> on the ones you want brought in with their
+          values.
+        </Alert>
       )}
 
       <Box>
