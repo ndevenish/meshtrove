@@ -228,14 +228,17 @@ export default function ModelPage() {
                 sx={{ width: '100%', height: '100%', objectFit: 'contain' }}
               />
             ) : (
-              <Typography color="text.secondary" sx={{ textAlign: 'center', px: 2 }}>
-                No images yet
+              <Box sx={{ textAlign: 'center', px: 2 }}>
+                {/* A Box wrapping two Typographies, not a Typography wrapping
+                    one: both render a <p>, and a <p> inside a <p> is invalid
+                    HTML that React refuses to hydrate. */}
+                <Typography color="text.secondary">No images yet</Typography>
                 {canEdit && (
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                     Drop one on the page, or paste (⌘V)
                   </Typography>
                 )}
-              </Typography>
+              </Box>
             )}
           </Paper>
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}>
