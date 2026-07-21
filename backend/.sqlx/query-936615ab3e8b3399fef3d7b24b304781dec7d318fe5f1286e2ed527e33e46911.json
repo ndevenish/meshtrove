@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT v.id, v.model_id,\n                  coalesce(array_agg(vt.name::text) FILTER (WHERE vt.name IS NOT NULL), '{}')\n                      as \"tags!: Vec<String>\"\n           FROM model_variants v\n           LEFT JOIN variant_tag_assignments a ON a.variant_id = v.id\n           LEFT JOIN variant_tags vt ON vt.id = a.tag_id\n           WHERE v.model_id = ANY($1)\n           GROUP BY v.id",
+  "query": "SELECT v.id as \"id!\", v.model_id as \"model_id!\",\n                  coalesce(array_agg(vt.name::text) FILTER (WHERE vt.name IS NOT NULL), '{}')\n                      as \"tags!: Vec<String>\"\n           FROM model_variants v\n           LEFT JOIN variant_tag_assignments a ON a.variant_id = v.id\n           LEFT JOIN variant_tags vt ON vt.id = a.tag_id\n           WHERE v.model_id = ANY($1)\n           GROUP BY v.id",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "id!",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -16,7 +16,7 @@
       },
       {
         "ordinal": 1,
-        "name": "model_id",
+        "name": "model_id!",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -43,5 +43,5 @@
       null
     ]
   },
-  "hash": "0113d52fc06420f93e13aea237a4b0246cc217f05e91ac0ba108dfc08eecf816"
+  "hash": "936615ab3e8b3399fef3d7b24b304781dec7d318fe5f1286e2ed527e33e46911"
 }

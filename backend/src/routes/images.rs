@@ -287,7 +287,9 @@ async fn promote_to_model(
     // The image has to be this model's to promote: its own, or one of its
     // variants'. Anything else is a different model's picture.
     let image = sqlx::query!(
-        r#"SELECT i.blob_sha256, i.mime, i.kind::text as "kind!", i.source_file_id,
+        // `!`: NOT NULL on the preserved side of the LEFT JOIN (see exports.rs).
+        r#"SELECT i.blob_sha256 as "blob_sha256!", i.mime,
+                  i.kind::text as "kind!", i.source_file_id,
                   i.renderer, i.renderer_config, i.width, i.height,
                   (i.model_id = $2) as "own_already?"
            FROM images i

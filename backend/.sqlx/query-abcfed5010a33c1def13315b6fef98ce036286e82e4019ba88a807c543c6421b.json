@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.blob_sha256, i.mime, i.kind::text as \"kind!\", i.source_file_id,\n                  i.renderer, i.renderer_config, i.width, i.height,\n                  (i.model_id = $2) as \"own_already?\"\n           FROM images i\n           LEFT JOIN model_variants v ON v.id = i.variant_id\n           WHERE i.id = $1 AND (i.model_id = $2 OR v.model_id = $2)",
+  "query": "SELECT i.blob_sha256 as \"blob_sha256!\", i.mime,\n                  i.kind::text as \"kind!\", i.source_file_id,\n                  i.renderer, i.renderer_config, i.width, i.height,\n                  (i.model_id = $2) as \"own_already?\"\n           FROM images i\n           LEFT JOIN model_variants v ON v.id = i.variant_id\n           WHERE i.id = $1 AND (i.model_id = $2 OR v.model_id = $2)",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "blob_sha256",
+        "name": "blob_sha256!",
         "type_info": "Bpchar",
         "origin": {
           "Table": {
@@ -111,5 +111,5 @@
       null
     ]
   },
-  "hash": "74563ea469c521dfd764441f93024f6d80ec4b70ef10744555d7c5d1386973be"
+  "hash": "abcfed5010a33c1def13315b6fef98ce036286e82e4019ba88a807c543c6421b"
 }

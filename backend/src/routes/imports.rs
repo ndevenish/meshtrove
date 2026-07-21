@@ -1077,7 +1077,8 @@ async fn carve_variants(
         HashMap::new()
     } else {
         sqlx::query!(
-            r#"SELECT v.id,
+            // `!`: NOT NULL on the preserved side of the LEFT JOIN (see exports.rs).
+            r#"SELECT v.id as "id!",
                       coalesce(array_agg(a.tag_id) FILTER (WHERE a.tag_id IS NOT NULL), '{}')
                           AS "tags!: Vec<Uuid>"
                FROM model_variants v
@@ -1191,7 +1192,8 @@ async fn adopt_model_images(
     user_id: Uuid,
 ) -> Result<(), ApiError> {
     let images = sqlx::query!(
-        r#"SELECT f.id, f.blob_sha256, f.mime
+        // `!`: NOT NULL on the preserved side of the LEFT JOIN (see exports.rs).
+        r#"SELECT f.id as "id!", f.blob_sha256 as "blob_sha256!", f.mime
            FROM files f
            LEFT JOIN model_variants v ON v.id = f.variant_id
            WHERE (f.model_id = $1 OR v.model_id = $1)

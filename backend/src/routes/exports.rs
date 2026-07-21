@@ -188,7 +188,10 @@ async fn preview(
 
     // Every variant of every selected model, with its tag-set.
     let vrows = sqlx::query!(
-        r#"SELECT v.id, v.model_id,
+        // `!`: NOT NULL columns on the preserved side of the LEFT JOINs.
+        // sqlx reads nullability off the query plan, which moves with the
+        // table statistics, so leaving them bare makes the build data-dependent.
+        r#"SELECT v.id as "id!", v.model_id as "model_id!",
                   coalesce(array_agg(vt.name::text) FILTER (WHERE vt.name IS NOT NULL), '{}')
                       as "tags!: Vec<String>"
            FROM model_variants v

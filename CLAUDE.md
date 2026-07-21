@@ -53,6 +53,12 @@ every request a synthetic admin; unset it to exercise real auth
 
 - sqlx macros check queries against a live DB: postgres must be up (and
   migrated) to compile. `DATABASE_URL` comes from `.env`.
+- In a query with a `LEFT JOIN`, annotate every `NOT NULL` column selected from
+  the **preserved** side as `col as "col!"`. sqlx infers nullability from the
+  query plan, and the plan moves with the table statistics — leave them bare and
+  the build compiles against one database and fails against another, with the
+  committed `.sqlx` cache hiding it from the Docker build. `.github/workflows/check.yml`
+  compiles against a freshly migrated, empty DB to catch it.
 - Model/bundle files are immutable blobs in `store/ab/cd/<sha256>`; logical
   paths/filenames live only in the `files` table. Never write to `store/` directly
   — except `store/imports`, the **dropbox**: a plain folder an admin drops
