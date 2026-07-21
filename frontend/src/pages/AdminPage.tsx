@@ -13,6 +13,7 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api, formatBytes, type GcReport } from '../api'
 import { useAuth } from '../main'
+import CustomFieldsPanel from '../components/CustomFieldsPanel'
 import UsersPanel from '../components/UsersPanel'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
@@ -225,6 +226,8 @@ export default function AdminPage() {
           </Button>
         </Stack>
       </Paper>
+
+      <CustomFieldsPanel />
 
       <UsersPanel />
     </Container>

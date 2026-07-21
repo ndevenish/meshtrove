@@ -16,6 +16,39 @@ export interface UserAccount {
   created_at: string
 }
 
+/** What a custom field *is*: how its value is entered and rendered. */
+export type CustomFieldKind = 'text' | 'checkbox' | 'choice' | 'rating' | 'file'
+
+/** Who a custom field is shown to at all — its value and its existence. */
+export type CustomFieldVisibility = 'anonymous' | 'viewer' | 'editor' | 'admin'
+
+/** Kind-specific settings: `choices` for a choice field, `max` for a rating. */
+export interface CustomFieldOptions {
+  choices?: string[]
+  max?: number
+}
+
+/// An admin-defined extra metadata field, available meshtrove-wide on every
+/// model and/or bundle.
+export interface CustomFieldDef {
+  id: string
+  /** Stable slug; what scraped metadata keys are matched against. */
+  key: string
+  name: string
+  kind: CustomFieldKind
+  options: CustomFieldOptions
+  applies_to_models: boolean
+  applies_to_bundles: boolean
+  /** Writing this field on a bundle copies the value down to member models. */
+  bundle_persists_to_model: boolean
+  /** ...even if the member model already had a value of its own. */
+  bundle_persist_overwrites: boolean
+  visibility: CustomFieldVisibility
+  position: number
+}
+
+export type CustomFieldInput = Omit<CustomFieldDef, 'id'>
+
 export interface Creator {
   id: string
   name: string
@@ -563,6 +596,16 @@ export const api = {
   resetUserPassword: (id: string, new_password: string) =>
     request<void>(`/api/users/${id}/password`, json({ new_password })),
   deleteUser: (id: string) => request<void>(`/api/users/${id}`, { method: 'DELETE' }),
+
+  // Custom field definitions: readable by editors (they drive the edit forms),
+  // writable by admins only.
+  customFields: () => request<CustomFieldDef[]>('/api/custom-fields'),
+  createCustomField: (body: CustomFieldInput) =>
+    request<CustomFieldDef>('/api/custom-fields', json(body)),
+  updateCustomField: (id: string, body: CustomFieldInput) =>
+    request<CustomFieldDef>(`/api/custom-fields/${id}`, { ...json(body), method: 'PUT' }),
+  deleteCustomField: (id: string) =>
+    request<void>(`/api/custom-fields/${id}`, { method: 'DELETE' }),
 
   searchModels: (params: URLSearchParams) => request<SearchResults>(`/api/models?${params}`),
   model: (id: string) => request<ModelDetail>(`/api/models/${id}`),
