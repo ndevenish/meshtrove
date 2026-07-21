@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT b.id, b.name, b.slug, b.kind::text as \"kind!\", b.creator_id,\n                  c.name as \"creator_name?\", b.source_url, b.created_by, b.created_at, b.updated_at,\n                  (SELECT r.body_md FROM bundle_description_revisions r\n                    WHERE r.bundle_id = b.id ORDER BY r.created_at DESC LIMIT 1) as description_md,\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt\n                            JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') as \"tags!\"\n           FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id\n           WHERE b.id = $1",
+  "query": "SELECT b.id, b.name, b.slug, b.creator_id,\n                  c.name as \"creator_name?\", b.source_url, b.created_by, b.created_at, b.updated_at,\n                  (SELECT r.body_md FROM bundle_description_revisions r\n                    WHERE r.bundle_id = b.id ORDER BY r.created_at DESC LIMIT 1) as description_md,\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt\n                            JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') as \"tags!\"\n           FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id\n           WHERE b.id = $1",
   "describe": {
     "columns": [
       {
@@ -38,12 +38,6 @@
       },
       {
         "ordinal": 3,
-        "name": "kind!",
-        "type_info": "Text",
-        "origin": "Expression"
-      },
-      {
-        "ordinal": 4,
         "name": "creator_id",
         "type_info": "Uuid",
         "origin": {
@@ -54,7 +48,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 4,
         "name": "creator_name?",
         "type_info": "Text",
         "origin": {
@@ -65,7 +59,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 5,
         "name": "source_url",
         "type_info": "Text",
         "origin": {
@@ -76,7 +70,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 6,
         "name": "created_by",
         "type_info": "Uuid",
         "origin": {
@@ -87,7 +81,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -98,7 +92,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 8,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -109,13 +103,13 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "description_md",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 11,
+        "ordinal": 10,
         "name": "tags!",
         "type_info": "TextArray",
         "origin": "Expression"
@@ -130,7 +124,6 @@
       false,
       false,
       false,
-      null,
       true,
       true,
       true,
@@ -141,5 +134,5 @@
       null
     ]
   },
-  "hash": "29bc47fe512d85ed07b5299d63d18568e0b02c12d7c26863c0ceac370bec2d0d"
+  "hash": "0baea489a1f565cf5a0929d02e9ecc709508361b62ff56e9c1eea9a657129347"
 }

@@ -1,6 +1,6 @@
 //! Bundles: CRUD, full-text search, markdown description revisions, and member
 //! model management. Mirrors `models.rs` (bundles have no variants or purchase
-//! fields, but add a `kind` and a `bundle_models` membership m2m).
+//! fields, but add a `bundle_models` membership m2m).
 
 use std::collections::HashSet;
 
@@ -61,7 +61,6 @@ pub struct BundleSummary {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
-    pub kind: String,
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
     pub primary_image_id: Option<Uuid>,
@@ -95,7 +94,7 @@ pub fn push_bundle_filters(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str, tags:
 }
 
 /// The shared SELECT list producing a `BundleSummary` (alias `b` for bundles).
-const BUNDLE_SUMMARY_COLS: &str = r#"b.id, b.name, b.slug, b.kind::text AS kind, b.creator_id,
+const BUNDLE_SUMMARY_COLS: &str = r#"b.id, b.name, b.slug, b.creator_id,
     b.updated_at, c.name AS creator_name,
     bundle_preview_image(b.id) AS primary_image_id,
     (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS model_count,
@@ -107,7 +106,6 @@ fn bundle_summary_from_row(row: &sqlx::postgres::PgRow) -> Result<BundleSummary,
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
-        kind: row.try_get("kind")?,
         creator_id: row.try_get("creator_id")?,
         creator_name: row.try_get("creator_name")?,
         primary_image_id: row.try_get("primary_image_id")?,
@@ -178,8 +176,6 @@ pub struct BundleInput {
     pub name: String,
     pub creator_id: Option<Uuid>,
     pub source_url: Option<String>,
-    /// 'purchased' (a bought pack) or 'collection' (a personal grouping)
-    pub kind: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     /// Initial markdown description (creates revision 1)
@@ -194,7 +190,6 @@ pub struct BundleDetail {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
-    pub kind: String,
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
     pub source_url: Option<String>,
@@ -211,15 +206,6 @@ pub struct BundleDetail {
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-pub fn parse_kind(kind: Option<&str>) -> Result<&str, ApiError> {
-    match kind.unwrap_or("purchased") {
-        k @ ("purchased" | "collection") => Ok(k),
-        other => Err(ApiError::BadRequest(format!(
-            "unknown bundle kind {other:?}"
-        ))),
-    }
 }
 
 /// A slug for `name`: `slugify(name)` plus a random token (see
@@ -293,19 +279,17 @@ async fn create(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
     }
-    let kind = parse_kind(input.kind.as_deref())?;
     let slug = unique_slug(&state, &name, None, None).await?;
 
     let mut tx = state.db.begin().await?;
     let bundle_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO bundles (name, slug, creator_id, source_url, kind, created_by)
-           VALUES ($1, $2, $3, $4, $5::bundle_kind, $6)
+        r#"INSERT INTO bundles (name, slug, creator_id, source_url, created_by)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING id"#,
         name,
         slug,
         input.creator_id,
         input.source_url,
-        kind as _,
         user.id,
     )
     .fetch_one(&mut *tx)
@@ -376,7 +360,7 @@ async fn fetch_members(
 
 async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleDetail, ApiError> {
     let row = sqlx::query!(
-        r#"SELECT b.id, b.name, b.slug, b.kind::text as "kind!", b.creator_id,
+        r#"SELECT b.id, b.name, b.slug, b.creator_id,
                   c.name as "creator_name?", b.source_url, b.created_by, b.created_at, b.updated_at,
                   (SELECT r.body_md FROM bundle_description_revisions r
                     WHERE r.bundle_id = b.id ORDER BY r.created_at DESC LIMIT 1) as description_md,
@@ -414,7 +398,6 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
         id: row.id,
         name: row.name,
         slug: row.slug,
-        kind: row.kind,
         creator_id: row.creator_id,
         creator_name: row.creator_name,
         source_url: row.source_url,
@@ -470,7 +453,6 @@ async fn update(
     Json(input): Json<BundleInput>,
 ) -> Result<Json<BundleDetail>, ApiError> {
     user.require_can_edit(bundle_created_by(&state, id).await?)?;
-    let kind = parse_kind(input.kind.as_deref())?;
     // The slug follows the name, keeping its token across the rename (see
     // models::update).
     let name = input.name.trim();
@@ -484,14 +466,13 @@ async fn update(
     // An edit through the form is a person naming this bundle: from now on it is
     // user-owned, so a metadata import must not overwrite the name.
     sqlx::query!(
-        r#"UPDATE bundles SET name = $2, slug = $6, creator_id = $3, source_url = $4,
-               kind = $5::bundle_kind, name_autogenerated = false, updated_at = now()
+        r#"UPDATE bundles SET name = $2, slug = $5, creator_id = $3, source_url = $4,
+               name_autogenerated = false, updated_at = now()
            WHERE id = $1"#,
         id,
         name,
         input.creator_id,
         input.source_url,
-        kind as _,
         slug,
     )
     .execute(&mut *tx)

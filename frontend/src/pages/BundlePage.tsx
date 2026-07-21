@@ -286,7 +286,6 @@ export default function BundlePage() {
               <Typography variant="h4" sx={{ fontWeight: 700 }}>
                 {bundle.name}
               </Typography>
-              <Chip label={bundle.kind} size="small" color="primary" variant="outlined" />
             </Stack>
             {canEdit && !editing && (
               <>

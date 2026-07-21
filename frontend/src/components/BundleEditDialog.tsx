@@ -9,7 +9,6 @@ import {
   Stack,
   Autocomplete,
   Alert,
-  MenuItem,
 } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -18,7 +17,7 @@ import { api, type BundleDetail } from '../api'
 import { changeTags, pasteTags } from '../tags'
 
 /// Create (no `bundle`) or edit a bundle's metadata and tags. Trimmed clone of
-/// ModelEditDialog — bundles have a `kind` but no price/variant/archive fields.
+/// ModelEditDialog — bundles have no price/variant/archive fields.
 export default function BundleEditDialog({
   open,
   onClose,
@@ -32,7 +31,6 @@ export default function BundleEditDialog({
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [creatorName, setCreatorName] = useState('')
-  const [kind, setKind] = useState('purchased')
   const [sourceUrl, setSourceUrl] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [description, setDescription] = useState('')
@@ -46,7 +44,6 @@ export default function BundleEditDialog({
     if (open) {
       setName(bundle?.name ?? '')
       setCreatorName(bundle?.creator_name ?? '')
-      setKind(bundle?.kind ?? 'purchased')
       setSourceUrl(bundle?.source_url ?? '')
       setTags(bundle?.tags ?? [])
       setDescription(bundle?.description_md ?? '')
@@ -70,7 +67,6 @@ export default function BundleEditDialog({
       const body = {
         name,
         creator_id,
-        kind,
         source_url: sourceUrl || null,
         tags,
         description_md: bundle ? undefined : description || null,
@@ -107,10 +103,6 @@ export default function BundleEditDialog({
             autoFocus
             required
           />
-          <TextField select label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
-            <MenuItem value="purchased">Purchased (a bought pack)</MenuItem>
-            <MenuItem value="collection">Collection (a personal grouping)</MenuItem>
-          </TextField>
           <Autocomplete
             freeSolo
             options={(creators ?? []).map((c) => c.name)}

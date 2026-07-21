@@ -139,7 +139,6 @@ erDiagram
         uuid id PK
         text name
         uuid creator_id FK
-        bundle_kind kind "purchased | collection"
     }
     tags {
         uuid id PK
@@ -280,8 +279,8 @@ images           id, blob_sha256 FK,
                  -- (setting a new primary clears the old one in the same txn)
 
 -- bundles (purchasable packs AND personal uber-bundles)
-bundles          id, name, slug, creator_id FK NULL, source_url,
-                 kind bundle_kind ('purchased'|'collection'), created_by, timestamps
+bundles          id, name, slug, creator_id FK NULL, source_url, created_by,
+                 timestamps
                  -- description lives in bundle_description_revisions, same
                  -- pattern as models; images via images.bundle_id; migration
                  -- 0002 added a search tsvector (mirrors models) for /api/browse

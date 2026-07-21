@@ -1,6 +1,6 @@
 import { forwardRef, useImperativeHandle, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Alert, Autocomplete, MenuItem, Stack, TextField } from '@mui/material'
+import { Alert, Autocomplete, Stack, TextField } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type BundleDetail } from '../api'
@@ -10,7 +10,8 @@ import { CustomFieldControl, useCustomFieldDraft } from './CustomFieldControl'
 import type { DetailsEditorHandle } from './ModelDetailsEditor'
 
 /// The bundle's fields, edited in place. Mirrors ModelDetailsEditor — a bundle
-/// has a `kind` and no variants, and is otherwise the same handful of facts.
+/// has no variants or purchase details, and is otherwise the same handful of
+/// facts.
 const BundleDetailsEditor = forwardRef<
   DetailsEditorHandle,
   {
@@ -22,7 +23,6 @@ const BundleDetailsEditor = forwardRef<
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [name, setName] = useState(bundle.name)
-  const [kind, setKind] = useState(bundle.kind)
   const [creatorName, setCreatorName] = useState(bundle.creator_name ?? '')
   const [tags, setTags] = useState<string[]>(bundle.tags)
   const [sourceUrl, setSourceUrl] = useState(bundle.source_url ?? '')
@@ -54,7 +54,6 @@ const BundleDetailsEditor = forwardRef<
       const saved = await api.updateBundle(bundle.id, {
         name: name.trim(),
         creator_id,
-        kind,
         source_url: sourceUrl.trim() || null,
         tags,
         custom_fields: customFields.payload(),
@@ -91,10 +90,6 @@ const BundleDetailsEditor = forwardRef<
         autoFocus
         required
       />
-      <TextField select label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
-        <MenuItem value="purchased">Purchased (a bought pack)</MenuItem>
-        <MenuItem value="collection">Collection (models grouped by hand)</MenuItem>
-      </TextField>
       <Autocomplete
         freeSolo
         options={(creators ?? []).map((c) => c.name)}
