@@ -66,6 +66,10 @@ const ROLE_ORDER: GroupRole[] = [
   'variant_tag',
   'ignore',
 ]
+/// Roles a layout can only hand out once, across every rule (a model has one
+/// name, one creator, one version) — the server rejects a spec that hands one
+/// out twice.
+const SINGULAR_ROLES: GroupRole[] = ['model_name', 'creator_ref', 'model_version']
 
 /// What a rule is called in a message when the user hasn't named it.
 const ruleLabel = (rule: LayoutRule, index: number): string =>
@@ -193,6 +197,30 @@ export default memo(function ImportLayoutPanel({
   /// Patch one rule in place; every editor field goes through this.
   const updateRule = (index: number, patch: Partial<LayoutRule>) =>
     setRules((prev) => prev.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)))
+
+  /// Give one group a role, demoting whoever else held it when the role is one
+  /// of the singular ones. The server rejects a spec claiming two model names
+  /// (or creator ids, or versions), and a rejected plan greys out every group
+  /// row — including the stale one that caused it — so the panel would be stuck
+  /// with no way back short of deleting the rule. Handing the role over is what
+  /// the user meant anyway: this group is the model name *instead*.
+  const setGroupRole = (index: number, group: number, role: GroupRole) =>
+    setRules((prev) =>
+      prev.map((rule, i) => {
+        const demoted = SINGULAR_ROLES.includes(role)
+          ? Object.fromEntries(
+              Object.entries(rule.roles).map(([key, held]) =>
+                held === role ? [key, 'ignore' as GroupRole] : [key, held],
+              ),
+            )
+          : rule.roles
+        return i === index
+          ? { ...rule, roles: { ...demoted, [String(group)]: role } }
+          : demoted === rule.roles
+            ? rule
+            : { ...rule, roles: demoted }
+      }),
+    )
 
   // A rule with no pattern yet is inert server-side (it is not "matches
   // everything"), so an empty new block never floods the preview.
@@ -472,15 +500,14 @@ export default memo(function ImportLayoutPanel({
                 </Typography>
                 {/* A dropdown, not a radio row: the roles outgrew a line, and a
                     Loot-style layout stacks dozens of these. */}
+                {/* Editable even when the group is stale (the row only greys
+                    out): the assignment is still live in the spec — it's what
+                    a rejected plan is usually made of — so clearing it has to
+                    stay possible without deleting the whole rule. */}
                 <Select
                   size="small"
                   value={roleOf(group)}
-                  disabled={!info}
-                  onChange={(e) =>
-                    updateRule(index, {
-                      roles: { ...rule.roles, [String(group)]: e.target.value as GroupRole },
-                    })
-                  }
+                  onChange={(e) => setGroupRole(index, group, e.target.value as GroupRole)}
                   sx={{ minWidth: 150 }}
                 >
                   {ROLE_ORDER.map((role) => (
