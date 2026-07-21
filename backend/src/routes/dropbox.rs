@@ -185,9 +185,11 @@ async fn pick_up(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(&entry)
-        // A folder keeps its name; `Dragon Set.zip` imports as "Dragon Set".
-        .trim_end_matches(".zip")
         .to_string();
+    // A folder keeps its name; `Dragon Set.zip` imports as "Dragon Set", and so
+    // does `Dragon Set.rar` — the suffix table knows every extension we unpack,
+    // where a `.zip` literal only knew the one.
+    let name = crate::services::archive::stem_of(&name).to_string();
 
     // Scan before queueing anything. It costs a stat walk — nothing next to the
     // hashing the job itself does — and buys two things: an empty or unreadable

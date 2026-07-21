@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE files SET kind = 'archive' WHERE id = $1 AND kind = 'other'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "765d59eeb0f5f646950557e1e24f8b862c12c4ad5d9e149e8176bda16d3de10c"
+}

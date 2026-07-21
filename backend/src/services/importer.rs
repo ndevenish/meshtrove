@@ -187,6 +187,75 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Queue the unpacks that never happened, once, at startup.
+///
+/// Every archive staged before the format table grew is still sitting in its
+/// import untouched: a `.rar` or `.7z` that the old ingest gate declined to
+/// queue, or a `.tar.gz` that never even got labelled an archive. Widening the
+/// gate only helps the next drop — these are already staged, and nothing will
+/// look at them again.
+///
+/// Deliberately scoped to files still in an import. Those are unfinished work by
+/// definition, and unpacking one only adds to a staging bucket the admin has yet
+/// to commit. An archive that was committed onto a model or a variant is settled
+/// content; quietly spilling its contents into someone's model on a version
+/// upgrade is not a fix.
+///
+/// Exports are skipped: they are restored, not carved, and have no unpack job by
+/// design.
+pub async fn requeue_missed_archives(state: &AppState) -> Result<()> {
+    // The candidate set is "staged, never queued, not an export". Which of them
+    // is an archive is a question for the format table, not for SQL — and it
+    // can't be `kind = 'archive'` either, since the whole point is that
+    // `.tar.gz` was mislabelled `other` on the way in.
+    let candidates = sqlx::query!(
+        r#"SELECT f.id, f.filename, f.kind as "kind: crate::routes::files::FileKind"
+           FROM files f
+           JOIN imports i ON i.id = f.import_id
+           WHERE f.import_id IS NOT NULL
+             AND NOT i.is_export
+             AND NOT EXISTS (
+               SELECT 1 FROM jobs j
+               WHERE j.kind = 'import_archive'
+                 AND j.payload->>'archive_file_id' = f.id::text
+             )"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut queued = 0;
+    for file in candidates {
+        if archive::format_of(&file.filename).is_none() {
+            continue;
+        }
+        // Correct the label too, but only where it was ours to guess. An
+        // explicit kind set by an admin stays as they set it.
+        if matches!(file.kind, crate::routes::files::FileKind::Other) {
+            sqlx::query!(
+                "UPDATE files SET kind = 'archive' WHERE id = $1 AND kind = 'other'",
+                file.id,
+            )
+            .execute(&state.db)
+            .await?;
+        }
+        jobs::enqueue(
+            &state.db,
+            "import_archive",
+            json!({ "archive_file_id": file.id }),
+        )
+        .await?;
+        queued += 1;
+        tracing::info!(file = %file.id, filename = %file.filename, "queuing an unpack that was missed");
+    }
+    if queued > 0 {
+        tracing::info!(
+            queued,
+            "queued unpacks for archives staged before this version"
+        );
+    }
+    Ok(())
+}
+
 /// libarchive's CLI. Reads tar (and its compressed forms), 7z, rar and rar5
 /// from one binary, sniffing the format from the bytes — which is what we need,
 /// since a blob in the store has no extension to go on. Debian ships it as
@@ -295,6 +364,34 @@ async fn extract_libarchive(
     .context("walk task panicked")?
 }
 
+/// Take the permission bits we need to read an entry back.
+///
+/// bsdtar restores the modes the archive recorded, and an archive is free to
+/// record modes that lock us out of what we just unpacked — a rar written
+/// elsewhere can land as `---r-----`, a directory without `+x` can't be walked
+/// into, and either way the unpack fails with a bare "Permission denied".
+/// `--no-same-permissions` doesn't save us: it applies the umask, which only
+/// ever takes bits away.
+///
+/// We own these files and are about to hash their contents and delete them; the
+/// mode is not part of what an import carries.
+#[cfg(unix)]
+fn take_access(path: &std::path::Path, meta: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode();
+    let wanted = mode | if meta.is_dir() { 0o700 } else { 0o600 };
+    if wanted != mode {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted))
+            .with_context(|| format!("taking access to {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn take_access(_path: &std::path::Path, _meta: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
 /// Walk what bsdtar wrote, keeping regular files only. Symlinks are skipped
 /// rather than followed: an archive is free to carry one pointing anywhere on
 /// the host, and a model file it isn't.
@@ -308,6 +405,8 @@ fn collect_files(
         let path = entry.path();
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.is_dir() {
+            // Before descending, or read_dir on it is the thing that fails.
+            take_access(&path, &meta)?;
             collect_files(root, &path, out)?;
             continue;
         }
@@ -323,6 +422,7 @@ fn collect_files(
         if crate::routes::files::is_os_junk(&logical) {
             continue;
         }
+        take_access(&path, &meta)?;
         out.push((logical, path));
     }
     Ok(())
@@ -414,7 +514,7 @@ mod tests {
     /// through [`extract`], and return the logical paths it recovered.
     /// `None` when bsdtar is missing, so a machine without libarchive-tools
     /// skips rather than fails.
-    async fn round_trip(name: &str) -> Option<Vec<String>> {
+    async fn round_trip(name: &str, extra: &[&str]) -> Option<Vec<String>> {
         let root = std::env::temp_dir().join(format!("meshtrove-test-{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         std::fs::create_dir_all(src.join("parts")).unwrap();
@@ -431,6 +531,7 @@ mod tests {
             .arg(&archive)
             .arg("-C")
             .arg(&src)
+            .args(extra)
             .arg("readme.txt")
             .arg("parts")
             .status()
@@ -463,13 +564,51 @@ mod tests {
     async fn libarchive_formats_unpack_with_their_tree_intact() {
         // The reported bug: these staged as files and were never opened.
         for name in ["pack.tar.gz", "pack.7z", "pack.tar"] {
-            let Some(paths) = round_trip(name).await else {
+            let Some(paths) = round_trip(name, &[]).await else {
                 eprintln!("skipping {name}: {BSDTAR} not on PATH");
                 return;
             };
             // Folder structure preserved, OS junk dropped.
             assert_eq!(paths, vec!["parts/body.stl", "readme.txt"], "{name}");
         }
+    }
+
+    /// Modes come out of the archive, and an archive is free to record ones
+    /// that leave us unable to read the files back or descend into the folders.
+    /// A real rar unpacked as `---r-----` and failed the job with a bare
+    /// "Permission denied"; bsdtar has no way to *write* such an archive, so
+    /// the walk is pointed at a tree locked down by hand instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_locked_down_tree_is_still_walked_and_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("meshtrove-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("parts")).unwrap();
+        std::fs::write(root.join("parts/body.stl"), "solid body").unwrap();
+        std::fs::write(root.join("readme.txt"), "hi").unwrap();
+        // Group-read only: no owner bits at all, exactly as the rar recorded.
+        std::fs::set_permissions(
+            root.join("parts/body.stl"),
+            PermissionsExt::from_mode(0o040),
+        )
+        .unwrap();
+        std::fs::set_permissions(root.join("readme.txt"), PermissionsExt::from_mode(0o040))
+            .unwrap();
+        // The folder can't even be descended into.
+        std::fs::set_permissions(root.join("parts"), PermissionsExt::from_mode(0o040)).unwrap();
+
+        let mut found = Vec::new();
+        super::collect_files(&root, &root, &mut found).unwrap();
+        found.sort();
+        let paths: Vec<&str> = found.iter().map(|(logical, _)| logical.as_str()).collect();
+        assert_eq!(paths, vec!["parts/body.stl", "readme.txt"]);
+        // And the contents are actually reachable, which is the whole point:
+        // the next thing the import does is stream them into the blob store.
+        for (logical, on_disk) in &found {
+            std::fs::read(on_disk).unwrap_or_else(|e| panic!("reading {logical}: {e}"));
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

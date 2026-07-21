@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT f.id, f.filename, f.kind as \"kind: crate::routes::files::FileKind\"\n           FROM files f\n           JOIN imports i ON i.id = f.import_id\n           WHERE f.import_id IS NOT NULL\n             AND NOT i.is_export\n             AND NOT EXISTS (\n               SELECT 1 FROM jobs j\n               WHERE j.kind = 'import_archive'\n                 AND j.payload->>'archive_file_id' = f.id::text\n             )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "filename",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "filename"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind: crate::routes::files::FileKind",
+        "type_info": {
+          "Custom": {
+            "name": "file_kind",
+            "kind": {
+              "Enum": [
+                "model",
+                "document",
+                "archive",
+                "other",
+                "project",
+                "raw"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fe1a1934a9f3a949bdbfb16678fa49d30db8314a70c98f295ff12d39055639c3"
+}

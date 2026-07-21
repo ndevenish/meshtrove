@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
     sqlx::migrate!().run(&state.db).await?;
     routes::auth::ensure_startup_users(&state).await?;
     services::jobs::recover_stranded(&state.db).await?;
+    services::importer::requeue_missed_archives(&state).await?;
     tokio::spawn(services::jobs::worker(state.clone()));
 
     let app = Router::new()
