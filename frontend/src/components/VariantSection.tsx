@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useMemo, useState } from 'react'
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Typography,
@@ -24,6 +24,7 @@ import {
   FormControlLabel,
   Radio,
   RadioGroup,
+  Skeleton,
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import AddIcon from '@mui/icons-material/Add'
@@ -47,6 +48,7 @@ import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import ImageIcon from '@mui/icons-material/Image'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useVirtualizer } from '@tanstack/react-virtual'
 
 import {
   api,
@@ -374,6 +376,15 @@ function VariantRow({
   )
 }
 
+/// The tree flattened for virtualisation: a folder header, a file under one, or
+/// a file the tree has counted but not yet been handed (see `FileTree`'s
+/// `folders` prop). `depth` is how far the row is indented as drawn, which is
+/// not the same as how deep its path runs — see `placement`.
+type TreeRow =
+  | { kind: 'header'; dir: string; entries: FileRecord[]; depth: number; label: string }
+  | { kind: 'file'; dir: string; file: FileRecord; depth: number }
+  | { kind: 'pending'; dir: string; depth: number; nth: number }
+
 export const FILE_KINDS: FileRecord['kind'][] = [
   'model',
   'project',
@@ -389,8 +400,23 @@ export const FILE_KINDS: FileRecord['kind'][] = [
 /// Memoised: the import page mounts this with thousands of rows and re-renders
 /// on every form keystroke, while the file list itself only changes when a
 /// fetch lands.
+///
+/// The rows are virtualised — flattened to one list and drawn only where the
+/// viewport is (see `rows` below). A 42k-file import used to build a MUI row
+/// component for every one of them at once and lock the tab up for the best
+/// part of a minute; what is in the DOM is now a function of the window, not of
+/// the drop.
+///
+/// Pass `folders` to have the shape of the tree come from folder counts instead
+/// of from `files`, and `onNeedFolder` to be told which folders are actually
+/// being looked at. That pair is what lets the import page open one folder at a
+/// time: every row is laid out from the counts, so scrolling is exact and the
+/// scrollbar honest, and the files behind a row are fetched when it comes into
+/// view. `files` then holds whatever has arrived so far rather than everything.
 export const FileTree = memo(function FileTree({
   files,
+  folders,
+  onNeedFolder,
   selectable = false,
   selected,
   onToggle,
@@ -401,8 +427,21 @@ export const FileTree = memo(function FileTree({
   onFolderRename,
   onFolderDiscard,
   onFolderSplit,
+  maxHeight = '70vh',
 }: {
   files: FileRecord[]
+  /** How tall the list may grow before it scrolls within itself. Virtualising
+      needs a scroll container, and this is it: short lists sit at their own
+      height and look exactly as they did, long ones stop taking the page with
+      them. */
+  maxHeight?: number | string
+  /** Every folder and how many files it holds directly, when the caller is
+      loading them lazily. Without it the tree is built from `files` alone and
+      everything is assumed present. */
+  folders?: { path: string; files: number }[]
+  /** Called with the folders whose rows are on screen and whose files have not
+      arrived. Only meaningful alongside `folders`. */
+  onNeedFolder?: (paths: string[]) => void
   selectable?: boolean
   selected?: Set<string>
   onToggle?: (id: string) => void
@@ -511,11 +550,24 @@ export const FileTree = memo(function FileTree({
     }
   }
 
+  /// Every folder in the tree with the files that have arrived for it, and how
+  /// many it is *supposed* to hold. The two differ only in lazy mode, where a
+  /// folder is laid out from its count before its files have been asked for;
+  /// eagerly, what is here is all there is.
   const groups = useMemo(() => {
+    // A folder's key is its path, with the root's empty string spelled '/' so
+    // it can't collide with a real folder or be mistaken for one.
     const byDir = new Map<string, FileRecord[]>()
+    // Declared before the files land on them so an empty-so-far folder still
+    // gets a row: in lazy mode that is every folder on first paint.
+    for (const folder of folders ?? []) byDir.set(folder.path || '/', [])
     for (const file of files) {
       const dir = file.path || '/'
-      byDir.set(dir, [...(byDir.get(dir) ?? []), file])
+      const entries = byDir.get(dir)
+      // Push rather than rebuild: appending by copying the array made grouping
+      // quadratic in the size of a folder, which a 700-file one can feel.
+      if (entries) entries.push(file)
+      else byDir.set(dir, [file])
     }
     // A header row exists for every path a file sits directly at; the folders
     // in between get one too, empty. Two reasons they can't be left out: a
@@ -532,8 +584,18 @@ export const FileTree = memo(function FileTree({
         if (ancestor && !byDir.has(ancestor)) byDir.set(ancestor, [])
       }
     }
-    return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b))
-  }, [files])
+    const expected = new Map((folders ?? []).map((f) => [f.path || '/', f.files]))
+    return [...byDir.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([dir, entries]) => ({
+        dir,
+        entries,
+        // Without `folders` there is nothing outstanding by definition. With
+        // them, a folder synthesised as an in-between holds nothing directly,
+        // so it is complete at zero.
+        expected: folders ? (expected.get(dir) ?? 0) : entries.length,
+      }))
+  }, [files, folders])
 
   /// Where a folder sits in the tree *as drawn*: how many of its ancestors have
   /// rows of their own, and what is left of its path once the deepest of them is
@@ -543,9 +605,9 @@ export const FileTree = memo(function FileTree({
   /// under an `Instructions` it has nothing to do with, because that is simply
   /// the row above it.
   const placement = useMemo(() => {
-    const shown = new Set(groups.map(([dir]) => dir))
+    const shown = new Set(groups.map((g) => g.dir))
     const map = new Map<string, { depth: number; label: string }>()
-    for (const [dir] of groups) {
+    for (const { dir } of groups) {
       if (dir === '/') {
         map.set(dir, { depth: 0, label: dir })
         continue
@@ -571,27 +633,28 @@ export const FileTree = memo(function FileTree({
   /// folder that no longer exists — hence the choice offered when this is
   /// non-empty.
   const under = (dir: string) =>
-    groups.filter(([d]) => d.startsWith(`${dir}/`)).flatMap(([, entries]) => entries)
+    groups.filter((g) => g.dir.startsWith(`${dir}/`)).flatMap((g) => g.entries)
 
   /// Every folder in the tree, and how many files sit anywhere beneath it —
-  /// what a collapsed folder reports it is hiding. Counted by walking each
-  /// file's path once and crediting all of its ancestors, so the whole map
-  /// costs one pass rather than a scan per folder.
+  /// what a collapsed folder reports it is hiding. Counted off each folder's
+  /// own total once, crediting all of its ancestors, so the whole map costs one
+  /// pass rather than a scan per folder. Counted from `expected` rather than
+  /// from the files in hand, so a lazily-loaded tree still reports the truth
+  /// about a folder nobody has opened.
   const subtreeCounts = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const file of files) {
-      const dir = file.path || '/'
+    for (const { dir, expected } of groups) {
       if (dir === '/') continue
       const parts = dir.split('/')
       for (let i = 1; i <= parts.length; i++) {
         const ancestor = parts.slice(0, i).join('/')
-        counts.set(ancestor, (counts.get(ancestor) ?? 0) + 1)
+        counts.set(ancestor, (counts.get(ancestor) ?? 0) + expected)
       }
     }
     return counts
-  }, [files])
+  }, [groups])
 
-  const dirs = useMemo(() => groups.map(([dir]) => dir).filter((dir) => dir !== '/'), [groups])
+  const dirs = useMemo(() => groups.map((g) => g.dir).filter((dir) => dir !== '/'), [groups])
   /// What "Collapse all" folds. A drop that arrives wrapped in a single folder
   /// — one top-level row and nothing beside it, which is most of them — is the
   /// exception: folding that one shut leaves the whole panel showing one row
@@ -599,9 +662,9 @@ export const FileTree = memo(function FileTree({
   /// for. Its contents still fold; the wrapper stays open. Click it directly to
   /// shut it.
   const collapsible = useMemo(() => {
-    const tops = groups.filter(([dir]) => (placement.get(dir)?.depth ?? 0) === 0)
-    if (tops.length !== 1 || tops[0][0] === '/') return dirs
-    return dirs.filter((dir) => dir !== tops[0][0])
+    const tops = groups.filter((g) => (placement.get(g.dir)?.depth ?? 0) === 0)
+    if (tops.length !== 1 || tops[0].dir === '/') return dirs
+    return dirs.filter((dir) => dir !== tops[0].dir)
   }, [groups, placement, dirs])
   // A folder is folded away if any ancestor is collapsed. The root group is in
   // no folder, so nothing can fold it away.
@@ -636,7 +699,337 @@ export const FileTree = memo(function FileTree({
     [files],
   )
 
-  if (files.length === 0)
+  /// The tree flattened to exactly the rows that are on show, in order — a
+  /// folder header, then its files, then whatever comes next — with everything
+  /// under a collapsed folder left out. This is what gets virtualised, so it
+  /// has to be the whole truth about the list's length: a folder whose files
+  /// have not arrived still contributes its rows, as `pending`, or the
+  /// scrollbar would shrink and jump as fetches landed.
+  const rows = useMemo(() => {
+    const out: TreeRow[] = []
+    for (const { dir, entries, expected } of groups) {
+      if (hidden(dir)) continue
+      const { depth, label } = placement.get(dir) ?? { depth: 0, label: dir }
+      // The root has no header of its own unless there is a folder control to
+      // hang there — matching what the tree drew before it was flattened.
+      if (dir !== '/' || !!onFolderRename) out.push({ kind: 'header', dir, entries, depth, label })
+      if (collapsed.has(dir)) continue
+      for (const file of entries) out.push({ kind: 'file', dir, file, depth })
+      for (let nth = entries.length; nth < expected; nth++)
+        out.push({ kind: 'pending', dir, depth, nth })
+    }
+    return out
+    // `hidden` closes over `collapsed`, which is in the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups, placement, collapsed, onFolderRename])
+
+  /// The scroll container, and the window onto `rows` that is actually drawn.
+  /// Heights are measured rather than assumed: a row's name can wrap, and a
+  /// header carries a variable number of controls.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 30,
+    overscan: 16,
+    // Keyed by identity, not by index, so folding a folder open near the top
+    // doesn't recycle every row below it into the wrong measurement.
+    getItemKey: (index) => {
+      const row = rows[index]
+      return row.kind === 'file'
+        ? row.file.id
+        : row.kind === 'pending'
+          ? `${row.dir} ${row.nth}`
+          : ` header ${row.dir}`
+    },
+  })
+  const virtualRows = virtualizer.getVirtualItems()
+
+  /// Ask for the folders the viewport has reached. Driven off what is actually
+  /// drawn rather than off expanding a folder, so scrolling through a tree that
+  /// was expanded wholesale fetches as it goes instead of all at once.
+  useEffect(() => {
+    if (!onNeedFolder) return
+    const wanted = new Set<string>()
+    for (const item of virtualRows) {
+      const row = rows[item.index]
+      if (row?.kind === 'pending') wanted.add(row.dir === '/' ? '' : row.dir)
+    }
+    if (wanted.size) onNeedFolder([...wanted])
+  }, [virtualRows, rows, onNeedFolder])
+
+  /// One folder's header: its name, and the controls that act on the folder as
+  /// a whole. Drawn as a row of its own now that the tree is flat — it used to
+  /// wrap its files, and nesting is carried by the indent instead.
+  const renderHeader = (row: Extract<TreeRow, { kind: 'header' }>) => {
+    const { dir, entries, label } = row
+    const shut = collapsed.has(dir)
+    if (dir === '/' && !onFolderRename) return null
+    return (
+      <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}>
+        {dir !== '/' && (
+          <Tooltip
+            title={`${shut ? 'Expand' : 'Collapse'} folder — alt-click for everything below it`}
+          >
+            <IconButton
+              size="small"
+              aria-label={`${shut ? 'Expand' : 'Collapse'} ${dir}`}
+              aria-expanded={!shut}
+              sx={{ p: 0.25 }}
+              onClick={(e) => toggleDir(dir, e.altKey)}
+            >
+              {shut ? (
+                <FolderIcon sx={{ fontSize: 18, opacity: 0.6 }} />
+              ) : (
+                <FolderOpenIcon sx={{ fontSize: 18, opacity: 0.6 }} />
+              )}
+            </IconButton>
+          </Tooltip>
+        )}
+        {editingDir === dir ? (
+          <>
+            <TextField
+              size="small"
+              variant="standard"
+              autoFocus
+              value={draft}
+              disabled={savingDir}
+              placeholder="(no folder — leave empty for root)"
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void commitFolder(entries)
+                if (e.key === 'Escape') cancelFolder()
+              }}
+              sx={{ maxWidth: 340, flexGrow: 1 }}
+            />
+            <Tooltip title="Save">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={savingDir}
+                  onClick={() => void commitFolder(entries)}
+                >
+                  <CheckIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title="Cancel">
+              <span>
+                <IconButton size="small" disabled={savingDir} onClick={cancelFolder}>
+                  <CloseIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </>
+        ) : dir === '/' ? (
+          <Button
+            size="small"
+            startIcon={<CreateNewFolderIcon sx={{ fontSize: 18 }} />}
+            onClick={() => startFolder('/')}
+            sx={{ textTransform: 'none' }}
+          >
+            Add folder
+          </Button>
+        ) : (
+          <>
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 600, cursor: 'pointer' }}
+              onClick={(e) => toggleDir(dir, e.altKey)}
+            >
+              {label}
+            </Typography>
+            {/* What folding it away is hiding — the whole subtree, since
+                that is what went with it. */}
+            {shut && (
+              <Typography variant="caption" color="text.secondary">
+                {subtreeCounts.get(dir) ?? 0} file
+                {(subtreeCounts.get(dir) ?? 0) === 1 ? '' : 's'}
+              </Typography>
+            )}
+            {/* Rename and remove rewrite the paths of the files in the
+                group, so they have nothing to do on a folder that only
+                holds other folders. */}
+            {onFolderRename && entries.length > 0 && (
+              <>
+                <Tooltip title="Remove folder">
+                  <span>
+                    <IconButton
+                      size="small"
+                      disabled={savingDir}
+                      onClick={() => void removeFolder(entries)}
+                    >
+                      <CloseIcon sx={{ fontSize: 15 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Rename folder">
+                  <IconButton size="small" onClick={() => startFolder(dir)}>
+                    <EditIcon sx={{ fontSize: 15 }} />
+                  </IconButton>
+                </Tooltip>
+              </>
+            )}
+            {onFolderSplit && (
+              <Tooltip title="Split this folder and everything under it into a separate import">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      setSplitName(dir.split('/').pop() ?? dir)
+                      setConfirmSplit({
+                        dir,
+                        count: entries.length + under(dir).length,
+                      })
+                    }}
+                  >
+                    <CallSplitIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+            {onFolderDiscard && (
+              <Tooltip title="Discard folder — delete its files without importing them">
+                <span>
+                  <IconButton
+                    size="small"
+                    color="error"
+                    disabled={discardingDir === dir}
+                    onClick={() => {
+                      setDiscardTree(true)
+                      setConfirmDiscard({ dir, entries, nested: under(dir) })
+                    }}
+                  >
+                    <FolderDeleteIcon sx={{ fontSize: 17 }} />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+          </>
+        )}
+      </Stack>
+    )
+  }
+
+  /// One file. Nothing here knows it is virtualised: it is the same row it was,
+  /// drawn only when the window reaches it.
+  const renderFile = (file: FileRecord) => (
+    // The indent that used to live here is on the virtualiser's wrapper now,
+    // which is the element that knows the row's depth.
+    <Stack direction="row" spacing={1} sx={{ alignItems: 'center', py: 0.25 }}>
+      {selectable && (
+        <Checkbox
+          size="small"
+          sx={{ p: 0.25 }}
+          checked={selected?.has(file.id) ?? false}
+          onChange={() => onToggle?.(file.id)}
+        />
+      )}
+      <InsertDriveFileIcon sx={{ fontSize: 16, opacity: 0.5 }} />
+      <Typography variant="body2" sx={{ flexGrow: 1 }} noWrap>
+        {file.filename}
+      </Typography>
+      {onKindChange ? (
+        <Select
+          size="small"
+          variant="standard"
+          value={file.kind}
+          onChange={(e) => onKindChange(file.id, e.target.value as FileRecord['kind'])}
+          sx={{ minWidth: 96, fontSize: 13 }}
+        >
+          {FILE_KINDS.map((k) => (
+            <MenuItem key={k} value={k} sx={{ fontSize: 13 }}>
+              {k}
+            </MenuItem>
+          ))}
+        </Select>
+      ) : (
+        <Chip label={file.kind} size="small" variant="outlined" sx={{ height: 20 }} />
+      )}
+      <Typography variant="caption" color="text.secondary" sx={{ width: 64 }}>
+        {formatBytes(file.size)}
+      </Typography>
+      {/* STL is the one format we can render live in the browser
+        (three.js). Give it a viewer; other model formats fall back to
+        the server-rendered picture. Images that came in with the
+        fileset — renders, references — share the column: they were
+        never promoted into the gallery, so this is the only way to
+        look at one short of downloading it. The slot is held open for
+        rows that are neither, so the download/render icons line up
+        down the list. */}
+      {anyPreviewable && (
+        <Box sx={{ width: 30, flexShrink: 0 }}>
+          {file.filename.toLowerCase().endsWith('.stl') ? (
+            <Tooltip title="Preview 3D model">
+              <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                <ViewInArIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Tooltip>
+          ) : (
+            isImage(file.filename) && (
+              <Tooltip title="Preview image">
+                <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                  <ImageIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Tooltip>
+            )
+          )}
+        </Box>
+      )}
+      <Tooltip title="Download">
+        <IconButton size="small" component="a" href={downloadUrl(file.id)}>
+          <DownloadIcon sx={{ fontSize: 18 }} />
+        </IconButton>
+      </Tooltip>
+      {/* The carve renders one picture per variant and picks the file
+        itself. This is the override for when it picked the base plate:
+        render *this* one, and it joins the model's images. */}
+      {onRender && (file.kind === 'model' || file.kind === 'project') && (
+        <Tooltip title="Render a preview from this file">
+          <IconButton size="small" onClick={() => onRender(file.id)}>
+            <PhotoCameraIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        </Tooltip>
+      )}
+      {/* Say where the archive has got to, or it reads as one more thing
+        waiting to be dealt with. Once unpacked it is kept only as the
+        record of what was dropped, and is never carved. A `null`
+        unpack means no job ever ran for it: the chip says so rather
+        than passing it off as extracted. */}
+      {archivesExtracted && file.kind === 'archive' && (
+        <Tooltip title={UNPACK_CHIP[file.unpack ?? 'none'].title}>
+          <Chip
+            icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
+            label={UNPACK_CHIP[file.unpack ?? 'none'].label}
+            size="small"
+            variant="outlined"
+            color={UNPACK_CHIP[file.unpack ?? 'none'].color}
+            sx={{ height: 20, opacity: file.unpack === 'done' ? 0.7 : 1 }}
+          />
+        </Tooltip>
+      )}
+      {onDelete && (
+        <Tooltip title="Delete file">
+          <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>
+            <DeleteIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        </Tooltip>
+      )}
+    </Stack>
+  )
+
+  /// A row for a file the tree knows is there but has not been handed yet — a
+  /// folder in a lazily-loaded import that the viewport has only just reached.
+  /// It holds the same height a real row will, so the arrival of the fetch
+  /// changes what a row says and never where it sits.
+  const renderPending = () => (
+    <Stack direction="row" spacing={1} sx={{ alignItems: 'center', py: 0.25, opacity: 0.4 }}>
+      <InsertDriveFileIcon sx={{ fontSize: 16, opacity: 0.5 }} />
+      <Skeleton variant="text" width="40%" sx={{ fontSize: 14 }} />
+    </Stack>
+  )
+
+  if (files.length === 0 && !folders?.length)
     return (
       <Typography variant="body2" color="text.secondary">
         No files yet.
@@ -670,277 +1063,41 @@ export const FileTree = memo(function FileTree({
           </Button>
         </Stack>
       )}
-      {groups.map(([dir, entries]) => {
-        if (hidden(dir)) return null
-        // Nesting is shown by indent, so the header carries only what its
-        // indent doesn't already say: the folder's own name under a parent that
-        // has a row, the whole path when nothing above it does.
-        const { depth, label } = placement.get(dir) ?? { depth: 0, label: dir }
-        const shut = collapsed.has(dir)
-        return (
-          // Indent by depth, capped: past a few levels the rows would run out
-          // of width in the import page's side column and the file names, which
-          // are the point, would go first.
-          <Box key={dir} sx={{ mb: 1, ml: Math.min(depth, 6) * 2 }}>
-            {(dir !== '/' || !!onFolderRename) && (
-              <Stack
-                direction="row"
-                spacing={0.75}
-                sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}
+      <Box ref={scrollRef} sx={{ maxHeight, overflowY: 'auto', overscrollBehavior: 'contain' }}>
+        {/* Sized to the whole list, so the scrollbar describes the tree rather
+            than the handful of rows currently built. */}
+        <Box sx={{ position: 'relative', height: virtualizer.getTotalSize() }}>
+          {virtualRows.map((item) => {
+            const row = rows[item.index]
+            if (!row) return null
+            return (
+              <Box
+                key={item.key}
+                data-index={item.index}
+                ref={virtualizer.measureElement}
+                sx={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${item.start}px)`,
+                  // Indent by depth, capped: past a few levels the rows would run
+                  // out of width in the import page's side column and the file
+                  // names, which are the point, would go first.
+                  pl:
+                    Math.min(row.depth, 6) * 2 + (row.kind !== 'header' && row.dir !== '/' ? 3 : 0),
+                }}
               >
-                {dir !== '/' && (
-                  <Tooltip
-                    title={`${shut ? 'Expand' : 'Collapse'} folder — alt-click for everything below it`}
-                  >
-                    <IconButton
-                      size="small"
-                      aria-label={`${shut ? 'Expand' : 'Collapse'} ${dir}`}
-                      aria-expanded={!shut}
-                      sx={{ p: 0.25 }}
-                      onClick={(e) => toggleDir(dir, e.altKey)}
-                    >
-                      {shut ? (
-                        <FolderIcon sx={{ fontSize: 18, opacity: 0.6 }} />
-                      ) : (
-                        <FolderOpenIcon sx={{ fontSize: 18, opacity: 0.6 }} />
-                      )}
-                    </IconButton>
-                  </Tooltip>
-                )}
-                {editingDir === dir ? (
-                  <>
-                    <TextField
-                      size="small"
-                      variant="standard"
-                      autoFocus
-                      value={draft}
-                      disabled={savingDir}
-                      placeholder="(no folder — leave empty for root)"
-                      onChange={(e) => setDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void commitFolder(entries)
-                        if (e.key === 'Escape') cancelFolder()
-                      }}
-                      sx={{ maxWidth: 340, flexGrow: 1 }}
-                    />
-                    <Tooltip title="Save">
-                      <span>
-                        <IconButton
-                          size="small"
-                          disabled={savingDir}
-                          onClick={() => void commitFolder(entries)}
-                        >
-                          <CheckIcon sx={{ fontSize: 18 }} />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                    <Tooltip title="Cancel">
-                      <span>
-                        <IconButton size="small" disabled={savingDir} onClick={cancelFolder}>
-                          <CloseIcon sx={{ fontSize: 18 }} />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                  </>
-                ) : dir === '/' ? (
-                  <Button
-                    size="small"
-                    startIcon={<CreateNewFolderIcon sx={{ fontSize: 18 }} />}
-                    onClick={() => startFolder('/')}
-                    sx={{ textTransform: 'none' }}
-                  >
-                    Add folder
-                  </Button>
-                ) : (
-                  <>
-                    <Typography
-                      variant="body2"
-                      sx={{ fontWeight: 600, cursor: 'pointer' }}
-                      onClick={(e) => toggleDir(dir, e.altKey)}
-                    >
-                      {label}
-                    </Typography>
-                    {/* What folding it away is hiding — the whole subtree, since
-                      that is what went with it. */}
-                    {shut && (
-                      <Typography variant="caption" color="text.secondary">
-                        {subtreeCounts.get(dir) ?? 0} file
-                        {(subtreeCounts.get(dir) ?? 0) === 1 ? '' : 's'}
-                      </Typography>
-                    )}
-                    {/* Rename and remove rewrite the paths of the files in the
-                      group, so they have nothing to do on a folder that only
-                      holds other folders. */}
-                    {onFolderRename && entries.length > 0 && (
-                      <>
-                        <Tooltip title="Remove folder">
-                          <span>
-                            <IconButton
-                              size="small"
-                              disabled={savingDir}
-                              onClick={() => void removeFolder(entries)}
-                            >
-                              <CloseIcon sx={{ fontSize: 15 }} />
-                            </IconButton>
-                          </span>
-                        </Tooltip>
-                        <Tooltip title="Rename folder">
-                          <IconButton size="small" onClick={() => startFolder(dir)}>
-                            <EditIcon sx={{ fontSize: 15 }} />
-                          </IconButton>
-                        </Tooltip>
-                      </>
-                    )}
-                    {onFolderSplit && (
-                      <Tooltip title="Split this folder and everything under it into a separate import">
-                        <span>
-                          <IconButton
-                            size="small"
-                            onClick={() => {
-                              setSplitName(dir.split('/').pop() ?? dir)
-                              setConfirmSplit({
-                                dir,
-                                count: entries.length + under(dir).length,
-                              })
-                            }}
-                          >
-                            <CallSplitIcon sx={{ fontSize: 16 }} />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    )}
-                    {onFolderDiscard && (
-                      <Tooltip title="Discard folder — delete its files without importing them">
-                        <span>
-                          <IconButton
-                            size="small"
-                            color="error"
-                            disabled={discardingDir === dir}
-                            onClick={() => {
-                              setDiscardTree(true)
-                              setConfirmDiscard({ dir, entries, nested: under(dir) })
-                            }}
-                          >
-                            <FolderDeleteIcon sx={{ fontSize: 17 }} />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    )}
-                  </>
-                )}
-              </Stack>
-            )}
-            {!shut &&
-              entries.map((file) => (
-                <Stack
-                  key={file.id}
-                  direction="row"
-                  spacing={1}
-                  sx={{ alignItems: 'center', pl: dir !== '/' ? 3 : 0, py: 0.25 }}
-                >
-                  {selectable && (
-                    <Checkbox
-                      size="small"
-                      sx={{ p: 0.25 }}
-                      checked={selected?.has(file.id) ?? false}
-                      onChange={() => onToggle?.(file.id)}
-                    />
-                  )}
-                  <InsertDriveFileIcon sx={{ fontSize: 16, opacity: 0.5 }} />
-                  <Typography variant="body2" sx={{ flexGrow: 1 }} noWrap>
-                    {file.filename}
-                  </Typography>
-                  {onKindChange ? (
-                    <Select
-                      size="small"
-                      variant="standard"
-                      value={file.kind}
-                      onChange={(e) => onKindChange(file.id, e.target.value as FileRecord['kind'])}
-                      sx={{ minWidth: 96, fontSize: 13 }}
-                    >
-                      {FILE_KINDS.map((k) => (
-                        <MenuItem key={k} value={k} sx={{ fontSize: 13 }}>
-                          {k}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  ) : (
-                    <Chip label={file.kind} size="small" variant="outlined" sx={{ height: 20 }} />
-                  )}
-                  <Typography variant="caption" color="text.secondary" sx={{ width: 64 }}>
-                    {formatBytes(file.size)}
-                  </Typography>
-                  {/* STL is the one format we can render live in the browser
-                  (three.js). Give it a viewer; other model formats fall back to
-                  the server-rendered picture. Images that came in with the
-                  fileset — renders, references — share the column: they were
-                  never promoted into the gallery, so this is the only way to
-                  look at one short of downloading it. The slot is held open for
-                  rows that are neither, so the download/render icons line up
-                  down the list. */}
-                  {anyPreviewable && (
-                    <Box sx={{ width: 30, flexShrink: 0 }}>
-                      {file.filename.toLowerCase().endsWith('.stl') ? (
-                        <Tooltip title="Preview 3D model">
-                          <IconButton size="small" onClick={() => setPreviewFile(file)}>
-                            <ViewInArIcon sx={{ fontSize: 18 }} />
-                          </IconButton>
-                        </Tooltip>
-                      ) : (
-                        isImage(file.filename) && (
-                          <Tooltip title="Preview image">
-                            <IconButton size="small" onClick={() => setPreviewFile(file)}>
-                              <ImageIcon sx={{ fontSize: 18 }} />
-                            </IconButton>
-                          </Tooltip>
-                        )
-                      )}
-                    </Box>
-                  )}
-                  <Tooltip title="Download">
-                    <IconButton size="small" component="a" href={downloadUrl(file.id)}>
-                      <DownloadIcon sx={{ fontSize: 18 }} />
-                    </IconButton>
-                  </Tooltip>
-                  {/* The carve renders one picture per variant and picks the file
-                  itself. This is the override for when it picked the base plate:
-                  render *this* one, and it joins the model's images. */}
-                  {onRender && (file.kind === 'model' || file.kind === 'project') && (
-                    <Tooltip title="Render a preview from this file">
-                      <IconButton size="small" onClick={() => onRender(file.id)}>
-                        <PhotoCameraIcon sx={{ fontSize: 18 }} />
-                      </IconButton>
-                    </Tooltip>
-                  )}
-                  {/* Say where the archive has got to, or it reads as one more thing
-                  waiting to be dealt with. Once unpacked it is kept only as the
-                  record of what was dropped, and is never carved. A `null`
-                  unpack means no job ever ran for it: the chip says so rather
-                  than passing it off as extracted. */}
-                  {archivesExtracted && file.kind === 'archive' && (
-                    <Tooltip title={UNPACK_CHIP[file.unpack ?? 'none'].title}>
-                      <Chip
-                        icon={<UnarchiveIcon sx={{ fontSize: 14 }} />}
-                        label={UNPACK_CHIP[file.unpack ?? 'none'].label}
-                        size="small"
-                        variant="outlined"
-                        color={UNPACK_CHIP[file.unpack ?? 'none'].color}
-                        sx={{ height: 20, opacity: file.unpack === 'done' ? 0.7 : 1 }}
-                      />
-                    </Tooltip>
-                  )}
-                  {onDelete && (
-                    <Tooltip title="Delete file">
-                      <IconButton size="small" color="error" onClick={() => onDelete(file.id)}>
-                        <DeleteIcon sx={{ fontSize: 18 }} />
-                      </IconButton>
-                    </Tooltip>
-                  )}
-                </Stack>
-              ))}
-          </Box>
-        )
-      })}
+                {row.kind === 'header'
+                  ? renderHeader(row)
+                  : row.kind === 'file'
+                    ? renderFile(row.file)
+                    : renderPending()}
+              </Box>
+            )
+          })}
+        </Box>
+      </Box>
       {previewFile && (
         <Suspense fallback={null}>
           {isImage(previewFile.filename) ? (

@@ -8,7 +8,9 @@ mod util;
 
 use anyhow::{Context, Result};
 use axum::{Router, http::header, response::Response, routing::get};
-use tower_http::compression::{CompressionLayer, Predicate, predicate::SizeAbove};
+use tower_http::compression::{
+    CompressionLayer, CompressionLevel, Predicate, predicate::SizeAbove,
+};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
@@ -68,7 +70,14 @@ async fn main() -> Result<()> {
         )
         .fallback(routes::frontend::frontend_handler)
         .layer(TraceLayer::new_for_http())
-        .layer(CompressionLayer::new().compress_when(SizeAbove::new(1024).and(TextLike)))
+        // Fastest, not best: on a 16.5 MB listing the cheap setting gives 3.2 MB
+        // and the thorough one 2.8 MB, which is nothing across a link this is
+        // waiting on anyway — and the box serving it has better uses for the CPU.
+        .layer(
+            CompressionLayer::new()
+                .quality(CompressionLevel::Fastest)
+                .compress_when(SizeAbove::new(1024).and(TextLike)),
+        )
         // /health mounted after the trace layer so liveness probes don't spam logs
         .route("/health", get(|| async { "OK" }))
         .with_state(state.clone());
