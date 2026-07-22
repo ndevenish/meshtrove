@@ -766,10 +766,11 @@ export const api = {
   renameImport: (id: string, name: string) =>
     request<ImportSummary>(`/api/imports/${id}`, { ...json({ name }), method: 'PUT' }),
   deleteImport: (id: string) => request<void>(`/api/imports/${id}`, { method: 'DELETE' }),
-  /** lift a staged folder (and everything under it) out into an import of its
-      own; the folder becomes the new import's top directory */
-  splitImport: (id: string, folder: string, name?: string) =>
-    request<ImportSummary>(`/api/imports/${id}/split`, json({ folder, name })),
+  /** lift one or more staged folders (and everything under them) out into an
+      import of their own. A lone folder becomes the new import's top directory;
+      several keep their own names under the folder they all sat in. */
+  splitImport: (id: string, folders: string[], name?: string) =>
+    request<ImportSummary>(`/api/imports/${id}/split`, json({ folders, name })),
   /** drop a staged folder without importing it — one request, whether it holds
       eight files or eight thousand, and without needing their ids */
   discardImportFolder: (id: string, folder: string, tree: boolean) =>

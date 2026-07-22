@@ -436,6 +436,7 @@ export const FileTree = memo(function FileTree({
   onFolderRename,
   onFolderDiscard,
   onFolderSplit,
+  onFolderSplitMany,
   maxHeight = '70vh',
 }: {
   files: FileRecord[]
@@ -474,6 +475,11 @@ export const FileTree = memo(function FileTree({
       drop is often several things. Takes the folder's path and the name for the
       new import; the folder itself becomes its top directory. */
   onFolderSplit?: (dir: string, name: string) => void | Promise<void>
+  /** Lift several folders out into one new import in a single move. When set,
+      folder headers gain a select checkbox and a selection toolbar appears. Takes
+      the chosen folders and the name for the new import; they keep their own
+      names under whatever folder they all sat in. */
+  onFolderSplitMany?: (dirs: string[], name: string) => void | Promise<void>
 }) {
   const [editingDir, setEditingDir] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -494,6 +500,12 @@ export const FileTree = memo(function FileTree({
   const [confirmSplit, setConfirmSplit] = useState<{ dir: string; count: number } | null>(null)
   const [splitName, setSplitName] = useState('')
   const [splitting, setSplitting] = useState(false)
+  // Folders ticked for a gather-into-one-import move. Keyed on path, not on file
+  // ids: the import tree is loaded a folder at a time and doesn't hold them, and
+  // a folder stays selected while it is scrolled out of view or folded away.
+  const [selectedDirs, setSelectedDirs] = useState<Set<string>>(new Set())
+  const [confirmSplitMany, setConfirmSplitMany] = useState(false)
+  const [manyName, setManyName] = useState('')
   const [previewFile, setPreviewFile] = useState<FileRecord | null>(null)
   // Folders the user has folded shut. Collapsing a folder takes everything
   // under it with it, so this holds only the folders clicked, not their
@@ -558,6 +570,29 @@ export const FileTree = memo(function FileTree({
     try {
       await onFolderSplit(dir, splitName.trim() || dir.split('/').pop() || dir)
       setConfirmSplit(null)
+    } finally {
+      setSplitting(false)
+    }
+  }
+
+  const toggleSelected = (dir: string) =>
+    setSelectedDirs((prev) => {
+      const next = new Set(prev)
+      if (next.has(dir)) next.delete(dir)
+      else next.add(dir)
+      return next
+    })
+
+  // Gather the ticked folders into one new import. Sends only the outermost ones
+  // (see `selectedTops`); the name defaults to the folder they all sit under,
+  // which the backend works out for itself when none is given.
+  const splitMany = async (tops: string[]) => {
+    if (!onFolderSplitMany || tops.length === 0) return
+    setSplitting(true)
+    try {
+      await onFolderSplitMany(tops, manyName.trim())
+      setConfirmSplitMany(false)
+      setSelectedDirs(new Set())
     } finally {
       setSplitting(false)
     }
@@ -658,6 +693,19 @@ export const FileTree = memo(function FileTree({
     }
     return counts
   }, [groups])
+
+  // The selection's outermost folders — a ticked folder sitting inside another
+  // ticked one is already carried by it, and counting both would double its
+  // files. The backend collapses the selection the same way; this is so the
+  // toolbar's tally matches what the move will actually take.
+  const selectedTops = useMemo(() => {
+    const dirs = [...selectedDirs]
+    return dirs.filter((d) => !dirs.some((a) => d.startsWith(`${a}/`)))
+  }, [selectedDirs])
+  const selectedFileCount = useMemo(
+    () => selectedTops.reduce((n, dir) => n + (subtreeCounts.get(dir) ?? 0), 0),
+    [selectedTops, subtreeCounts],
+  )
 
   const dirs = useMemo(() => groups.map((g) => g.dir).filter((dir) => dir !== '/'), [groups])
   /// What "Collapse all" folds. A drop that arrives wrapped in a single folder
@@ -776,6 +824,15 @@ export const FileTree = memo(function FileTree({
     if (dir === '/' && !onFolderRename) return null
     return (
       <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}>
+        {onFolderSplitMany && dir !== '/' && editingDir !== dir && (
+          <Checkbox
+            size="small"
+            sx={{ p: 0.25 }}
+            checked={selectedDirs.has(dir)}
+            onChange={() => toggleSelected(dir)}
+            slotProps={{ input: { 'aria-label': `Select ${dir} to move` } }}
+          />
+        )}
         {dir !== '/' && (
           <Tooltip
             title={`${shut ? 'Expand' : 'Collapse'} folder — alt-click for everything below it`}
@@ -1044,30 +1101,74 @@ export const FileTree = memo(function FileTree({
 
   return (
     <Box>
-      {/* Only earns its space once there is a structure to navigate. */}
-      {dirs.length > 1 && (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', mb: 0.5 }}>
+      {/* Once folders are ticked, this replaces the fold controls: acting on the
+          selection is what the toolbar is for now. Sticks to the top of the panel
+          so it stays reachable however far the tree is scrolled. */}
+      {selectedTops.length > 0 ? (
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{
+            alignItems: 'center',
+            mb: 0.5,
+            py: 0.5,
+            position: 'sticky',
+            top: 0,
+            zIndex: 1,
+            bgcolor: 'background.paper',
+          }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {selectedTops.length} folder{selectedTops.length === 1 ? '' : 's'} selected
+            {selectedFileCount > 0 &&
+              ` — ${selectedFileCount} file${selectedFileCount === 1 ? '' : 's'}`}
+          </Typography>
           <Button
             size="small"
-            startIcon={<UnfoldMoreIcon sx={{ fontSize: 16 }} />}
-            onClick={() => setCollapsed(new Set())}
-            disabled={collapsed.size === 0}
+            variant="contained"
+            startIcon={<CallSplitIcon sx={{ fontSize: 16 }} />}
+            onClick={() => {
+              setManyName('')
+              setConfirmSplitMany(true)
+            }}
             sx={{ textTransform: 'none' }}
           >
-            Expand all
+            Move to a new import
           </Button>
           <Button
             size="small"
-            startIcon={<UnfoldLessIcon sx={{ fontSize: 16 }} />}
-            // Union rather than replace: a wrapper the user shut by hand is the
-            // one folder this doesn't fold, and it shouldn't spring open either.
-            onClick={() => setCollapsed((prev) => new Set([...collapsible, ...prev]))}
-            disabled={collapsible.every((dir) => collapsed.has(dir))}
+            onClick={() => setSelectedDirs(new Set())}
             sx={{ textTransform: 'none' }}
           >
-            Collapse all
+            Clear
           </Button>
         </Stack>
+      ) : (
+        /* Only earns its space once there is a structure to navigate. */
+        dirs.length > 1 && (
+          <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', mb: 0.5 }}>
+            <Button
+              size="small"
+              startIcon={<UnfoldMoreIcon sx={{ fontSize: 16 }} />}
+              onClick={() => setCollapsed(new Set())}
+              disabled={collapsed.size === 0}
+              sx={{ textTransform: 'none' }}
+            >
+              Expand all
+            </Button>
+            <Button
+              size="small"
+              startIcon={<UnfoldLessIcon sx={{ fontSize: 16 }} />}
+              // Union rather than replace: a wrapper the user shut by hand is the
+              // one folder this doesn't fold, and it shouldn't spring open either.
+              onClick={() => setCollapsed((prev) => new Set([...collapsible, ...prev]))}
+              disabled={collapsible.every((dir) => collapsed.has(dir))}
+              sx={{ textTransform: 'none' }}
+            >
+              Collapse all
+            </Button>
+          </Stack>
+        )
       )}
       <Box ref={scrollRef} sx={{ maxHeight, overflowY: 'auto', overscrollBehavior: 'contain' }}>
         {/* Sized to the whole list, so the scrollbar describes the tree rather
@@ -1242,6 +1343,55 @@ export const FileTree = memo(function FileTree({
             onClick={() => confirmSplit && void splitFolder(confirmSplit.dir)}
           >
             Split
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={confirmSplitMany}
+        fullWidth
+        maxWidth="xs"
+        onClose={() => !splitting && setConfirmSplitMany(false)}
+      >
+        <DialogTitle>Move to a new import?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1 }}>
+            Move {selectedTops.length} folder{selectedTops.length === 1 ? '' : 's'}
+            {selectedFileCount > 0 &&
+              ` — ${selectedFileCount} file${selectedFileCount === 1 ? '' : 's'}`}{' '}
+            to an import of their own. Nothing is deleted, and each keeps its own name.
+          </Typography>
+          <Box component="ul" sx={{ mt: 0, mb: 2, pl: 2.5 }}>
+            {selectedTops.map((dir) => (
+              <Typography key={dir} component="li" variant="caption" color="text.secondary" noWrap>
+                {dir}
+              </Typography>
+            ))}
+          </Box>
+          <TextField
+            fullWidth
+            size="small"
+            autoFocus
+            label="Name the new import (optional)"
+            placeholder="Defaults to the folder they sit under"
+            value={manyName}
+            disabled={splitting}
+            onChange={(e) => setManyName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void splitMany(selectedTops)
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={splitting} onClick={() => setConfirmSplitMany(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={splitting}
+            data-testid="confirm-split-many"
+            onClick={() => void splitMany(selectedTops)}
+          >
+            Move
           </Button>
         </DialogActions>
       </Dialog>

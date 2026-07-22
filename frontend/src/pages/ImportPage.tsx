@@ -370,7 +370,20 @@ function ImportWorkbench() {
   // is one link away on the toast.
   const splitFolder = async (dir: string, name: string) => {
     try {
-      const created = await api.splitImport(staged.id, dir, name)
+      const created = await api.splitImport(staged.id, [dir], name)
+      await refreshStagedFiles()
+      setSplitOff(created)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // Gather several selected folders into one new import in a single move — the
+  // multi-select counterpart to splitFolder. The backend drops the folder they
+  // all sit under, so each keeps its own name and they stay apart.
+  const splitFolders = async (dirs: string[], name: string) => {
+    try {
+      const created = await api.splitImport(staged.id, dirs, name)
       await refreshStagedFiles()
       setSplitOff(created)
     } catch (err) {
@@ -660,6 +673,7 @@ function ImportWorkbench() {
               archivesExtracted
               onFolderDiscard={discardFolder}
               onFolderSplit={splitFolder}
+              onFolderSplitMany={splitFolders}
               maxHeight="calc(100vh - 160px)"
             />
           ) : filesLoading ? (
@@ -684,6 +698,7 @@ function ImportWorkbench() {
               archivesExtracted
               onFolderDiscard={discardFolder}
               onFolderSplit={splitFolder}
+              onFolderSplitMany={splitFolders}
               maxHeight="calc(100vh - 160px)"
             />
           )}
