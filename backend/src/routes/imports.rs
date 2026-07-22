@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/imports", get(list).post(create))
         .route("/api/imports/{id}", get(detail).put(update).delete(remove))
         .route("/api/imports/{id}/split", post(split))
+        .route("/api/imports/{id}/discard", post(discard))
         .route("/api/imports/{id}/plan", post(plan))
         .route("/api/imports/{id}/commit", post(commit))
 }
@@ -345,6 +346,78 @@ async fn split(
         "split a folder out of an import"
     );
     Ok(Json(fetch_import(&state, new_id).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct DiscardInput {
+    /// The staged folder to drop, as it appears in the tree. Empty is the
+    /// import's root — the files sitting in no folder at all.
+    pub folder: String,
+    /// Take the folders under it too. False drops only what sits directly at
+    /// this path and leaves the subtree staged, which is the choice the tree
+    /// offers for a folder that has folders beneath it.
+    #[serde(default)]
+    pub tree: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DiscardResult {
+    pub deleted: i64,
+}
+
+/// Drop a staged folder without importing it — the chaff an archive arrives
+/// wrapped in, deleted before the carve rather than after.
+///
+/// One request, not one per file. The page used to delete a folder by sending a
+/// DELETE for every file in it, eight at a time; on the folders this is actually
+/// for — thousands of files — that is thousands of round trips, and it buried
+/// the server under work that is a single statement here. It is also the only
+/// form that still works once the page stopped holding every staged file: the
+/// tree knows a folder's *count* long before it knows its file ids, and it must
+/// be able to discard one it has never loaded.
+async fn discard(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<DiscardInput>,
+) -> Result<Json<DiscardResult>, ApiError> {
+    let import = fetch_import(&state, id).await?;
+    user.require_can_edit(import.created_by)?;
+    if import.unpacking {
+        return Err(ApiError::BadRequest(
+            "this import is still unpacking — wait for it to finish before discarding from it"
+                .into(),
+        ));
+    }
+    let folder = input.folder.trim().trim_matches('/').to_string();
+    // The root is a folder here, and its files can be dropped like any other's —
+    // but "the root and everything under it" is the whole import, which is
+    // `DELETE /api/imports/{id}` and should say so rather than arriving disguised
+    // as tidying up a folder.
+    if folder.is_empty() && input.tree {
+        return Err(ApiError::BadRequest(
+            "that would discard the entire import — delete the import instead".into(),
+        ));
+    }
+    // Same `left(path, n)` test as `split`, and for the same reason: a folder
+    // name may hold `%` or `_`, which LIKE would read as wildcards.
+    let deleted = sqlx::query_scalar!(
+        r#"WITH gone AS (
+             DELETE FROM files
+              WHERE import_id = $1
+                AND (path = $2 OR ($3 AND left(path, length($2) + 1) = $2 || '/'))
+              RETURNING 1
+           )
+           SELECT count(*) as "count!" FROM gone"#,
+        id,
+        folder,
+        input.tree,
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    tracing::info!(import = %id, %folder, tree = input.tree, files = deleted, "discarded a staged folder");
+    Ok(Json(DiscardResult { deleted }))
 }
 
 pub async fn import_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiError> {

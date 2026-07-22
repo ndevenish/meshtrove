@@ -770,6 +770,10 @@ export const api = {
       own; the folder becomes the new import's top directory */
   splitImport: (id: string, folder: string, name?: string) =>
     request<ImportSummary>(`/api/imports/${id}/split`, json({ folder, name })),
+  /** drop a staged folder without importing it — one request, whether it holds
+      eight files or eight thousand, and without needing their ids */
+  discardImportFolder: (id: string, folder: string, tree: boolean) =>
+    request<{ deleted: number }>(`/api/imports/${id}/discard`, json({ folder, tree })),
   /** every staged file, or — with `path` — just the one folder's worth. The
       import page opens folders against the narrow form; the whole listing is
       only worth asking for once a layout needs to annotate all of it. */

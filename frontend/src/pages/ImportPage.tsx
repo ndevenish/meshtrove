@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Alert,
@@ -18,7 +18,7 @@ import {
 import DeleteIcon from '@mui/icons-material/Delete'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
   api,
@@ -110,19 +110,30 @@ function ImportWorkbench() {
     // While the archive is unpacking, the file list is still growing.
     refetchInterval: (query) => (query.state.data?.unpacking ? 1500 : false),
   })
-  // While the import is still filling up, watch it by folder counts instead of
-  // by file. The full listing costs the server time proportional to the number
-  // of staged files and hands the browser every row to rebuild a tree from,
-  // which a multi-hour dropbox pickup of tens of thousands of files cannot
-  // afford to be asked for on a timer. Nothing is lost: committing is refused
-  // until the unpack clears, so there is nothing to do with an individual
-  // staged file yet.
+  // The shape of the drop: every folder and how many files it holds. One
+  // aggregate, and small — a few KB for an import whose full listing is
+  // megabytes — so it is both what the progress view watches while the archive
+  // is still unpacking and, once it has settled, the frame the file tree is
+  // drawn from before any file has been fetched.
   const { data: folders } = useQuery({
     queryKey: ['import-folders', id],
     queryFn: () => api.importFileSummary(id!),
-    enabled: !!id && !!staged?.unpacking,
-    refetchInterval: 1500,
+    enabled: !!id,
+    refetchInterval: staged?.unpacking ? 1500 : false,
   })
+
+  // Past this many staged files, pulling the whole listing to draw a tree stops
+  // being reasonable: it is seconds of server time and megabytes of wire to
+  // answer a question about the twenty rows on screen. Below it the single
+  // request is simpler and cheaper than a fetch per folder, so nothing changes
+  // for the ordinary drop — this is for the dropbox pickup of a back catalogue.
+  const LAZY_ABOVE = 2000
+  // A layout annotates every file by name, so it needs them all; the tree is the
+  // only view that can be drawn a folder at a time. Undecided until the import
+  // itself has loaded — guessing "not lazy" in the meantime would fire off the
+  // very request this exists to avoid, and it would already be in flight by the
+  // time the answer arrived.
+  const lazy = !!staged && !staged.unpacking && staged.file_count > LAZY_ABOVE && !layout
   // The real listing, once there is a settled import to list. Held in one
   // mounted query rather than keyed on `file_count`: keying it that way made
   // every tick a different query with an empty cache, so `files` blanked to
@@ -137,13 +148,39 @@ function ImportWorkbench() {
   const { data: files, isLoading: filesLoading } = useQuery({
     queryKey: ['import-files', id],
     queryFn: () => api.importFiles(id!),
-    enabled: !!id && !staged?.unpacking,
+    enabled: !!id && !!staged && !staged.unpacking && !lazy,
     refetchInterval: (query) => {
       if (!staged) return false
       const held = query.state.data?.length ?? 0
       return held === staged.file_count ? false : 1500
     },
   })
+
+  // The folders the tree has actually asked for, and their files. Held as one
+  // query each so react-query does the caching and de-duplication: a folder
+  // scrolled past, away from and back to is fetched once.
+  const [wanted, setWanted] = useState<string[]>([])
+  const needFolders = useCallback((paths: string[]) => {
+    setWanted((prev) => {
+      const next = prev.concat(paths.filter((p) => !prev.includes(p)))
+      return next.length === prev.length ? prev : next
+    })
+  }, [])
+  const folderFiles = useQueries({
+    queries: wanted.map((path) => ({
+      queryKey: ['import-folder-files', id, path],
+      queryFn: () => api.importFiles(id!, path),
+      staleTime: 5 * 60_000,
+    })),
+  })
+  // Flattened only when a fetch has actually landed — the array identity is what
+  // the memoised file tree re-renders on, so it must not change per render.
+  const loadedStamp = folderFiles.map((q) => q.dataUpdatedAt).join(',')
+  const lazyFiles = useMemo(
+    () => folderFiles.flatMap((q) => q.data ?? []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loadedStamp],
+  )
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
   // Every field either side of the commit could want, with whatever this import
@@ -161,7 +198,18 @@ function ImportWorkbench() {
     queryFn: () => api.searchBundles(new URLSearchParams({ per_page: '100' })),
   })
   const target: BundleSummary | null = bundles?.bundles.find((b) => b.id === targetId) ?? null
-  const fileList = files ?? NO_FILES
+  const fileList = lazy ? lazyFiles : (files ?? NO_FILES)
+
+  // Everything that changes when files leave the import: the summary the tree
+  // is framed on, the per-folder caches, the whole listing, and the counts on
+  // the import itself and on the Importing page.
+  const refreshStagedFiles = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['import', id] })
+    await queryClient.invalidateQueries({ queryKey: ['import-folders', id] })
+    await queryClient.invalidateQueries({ queryKey: ['import-folder-files', id] })
+    await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
+    await queryClient.invalidateQueries({ queryKey: ['imports'] })
+  }
 
   // Referentially stable so the memoised layout panel isn't re-rendered by
   // every keystroke in the form around it.
@@ -299,21 +347,15 @@ function ImportWorkbench() {
     navigate('/imports')
   }
 
-  // Drop a folder's staged files without importing them. There's no folder row
-  // to delete — a folder is just its files' shared `path` — so delete each file
-  // and refresh the list (and the summary's file_count) around them.
-  //
-  // A few at a time, not all at once: discarding a folder with its subfolders is
-  // routinely thousands of files, and firing that many requests in one breath
-  // buries the server under its own import.
-  const discardFolder = async (fileIds: string[]) => {
+  // Drop a folder's staged files without importing them. One request naming the
+  // folder: this used to delete file by file, eight at a time, which on the
+  // folders it is actually for — thousands of files — was thousands of round
+  // trips, and is not something the page can do at all now that it no longer
+  // holds every staged file's id.
+  const discardFolder = async (dir: string, tree: boolean) => {
     try {
-      for (let i = 0; i < fileIds.length; i += 8) {
-        await Promise.all(fileIds.slice(i, i + 8).map((fid) => api.deleteFile(fid)))
-      }
-      await queryClient.invalidateQueries({ queryKey: ['import', id] })
-      await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
-      await queryClient.invalidateQueries({ queryKey: ['imports'] })
+      await api.discardImportFolder(staged.id, dir === '/' ? '' : dir, tree)
+      await refreshStagedFiles()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -329,9 +371,7 @@ function ImportWorkbench() {
   const splitFolder = async (dir: string, name: string) => {
     try {
       const created = await api.splitImport(staged.id, dir, name)
-      await queryClient.invalidateQueries({ queryKey: ['import', id] })
-      await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
-      await queryClient.invalidateQueries({ queryKey: ['imports'] })
+      await refreshStagedFiles()
       setSplitOff(created)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -541,7 +581,13 @@ function ImportWorkbench() {
             </Typography>
             <ImportLayoutPanel
               importId={staged.id}
-              fileCount={fileList.filter((f) => f.kind !== 'archive').length}
+              // What a layout's coverage is measured against. Lazily, the files
+              // in hand are only the folders that have been looked at, which
+              // would make the denominator a fact about scrolling — so use the
+              // import's own count, archives and all.
+              fileCount={
+                lazy ? staged.file_count : fileList.filter((f) => f.kind !== 'archive').length
+              }
               unpacking={staged.unpacking}
               target={dest === 'new_model' ? 'model' : 'bundle'}
               bundleId={dest === 'bundle' ? target?.id : undefined}
@@ -604,6 +650,18 @@ function ImportWorkbench() {
           </Typography>
           {staged.unpacking ? (
             <ImportStagingProgress staged={staged} folders={folders ?? NO_FOLDERS} />
+          ) : lazy ? (
+            // Framed on the folder summary, with each folder's files fetched as
+            // the list reaches it. Nothing waits on a listing of the whole drop.
+            <FileTree
+              files={fileList}
+              folders={folders ?? NO_FOLDERS}
+              onNeedFolder={needFolders}
+              archivesExtracted
+              onFolderDiscard={discardFolder}
+              onFolderSplit={splitFolder}
+              maxHeight="calc(100vh - 160px)"
+            />
           ) : filesLoading ? (
             // Until the first fetch lands we hold an empty list, which the file
             // tree would report as "No files yet" — a verdict on an import we
@@ -626,6 +684,7 @@ function ImportWorkbench() {
               archivesExtracted
               onFolderDiscard={discardFolder}
               onFolderSplit={splitFolder}
+              maxHeight="calc(100vh - 160px)"
             />
           )}
         </Box>

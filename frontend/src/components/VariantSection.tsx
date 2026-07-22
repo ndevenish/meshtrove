@@ -381,7 +381,16 @@ function VariantRow({
 /// `folders` prop). `depth` is how far the row is indented as drawn, which is
 /// not the same as how deep its path runs — see `placement`.
 type TreeRow =
-  | { kind: 'header'; dir: string; entries: FileRecord[]; depth: number; label: string }
+  | {
+      kind: 'header'
+      dir: string
+      entries: FileRecord[]
+      /** How many files sit directly here — `entries.length` once they have all
+          arrived, and the truth about the folder before they have. */
+      expected: number
+      depth: number
+      label: string
+    }
   | { kind: 'file'; dir: string; file: FileRecord; depth: number }
   | { kind: 'pending'; dir: string; depth: number; nth: number }
 
@@ -460,7 +469,7 @@ export const FileTree = memo(function FileTree({
       `onFolderRename`'s empty-path "remove", which only flattens the folder away
       and keeps the files. Used on the import page to drop chaff before committing.
       When set, real folder headers gain a "Discard folder" control. */
-  onFolderDiscard?: (fileIds: string[]) => void | Promise<void>
+  onFolderDiscard?: (dir: string, tree: boolean) => void | Promise<void>
   /** Lift a folder and everything under it out into an import of its own — one
       drop is often several things. Takes the folder's path and the name for the
       new import; the folder itself becomes its top directory. */
@@ -470,11 +479,15 @@ export const FileTree = memo(function FileTree({
   const [draft, setDraft] = useState('')
   const [savingDir, setSavingDir] = useState(false)
   const [discardingDir, setDiscardingDir] = useState<string | null>(null)
+  // Counts, not the files themselves: a lazily-loaded tree knows how big a
+  // folder is long before it has been handed its contents, and a confirmation
+  // has to be able to tell the truth about a folder nobody has opened.
   const [confirmDiscard, setConfirmDiscard] = useState<{
     dir: string
-    entries: FileRecord[]
-    /** Files in folders *under* this one — empty for a leaf. */
-    nested: FileRecord[]
+    /** Files sitting directly in this folder. */
+    here: number
+    /** Files in folders *under* this one — zero for a leaf. */
+    below: number
   } | null>(null)
   // Which of the two a discard means, for a folder that has folders under it.
   const [discardTree, setDiscardTree] = useState(true)
@@ -526,11 +539,11 @@ export const FileTree = memo(function FileTree({
   }
   // Discard the folder: delete its files, not just its path. Unlike removeFolder,
   // nothing survives — the files never make it into the library.
-  const discardFolder = async (dir: string, entries: FileRecord[]) => {
+  const discardFolder = async (dir: string, tree: boolean) => {
     if (!onFolderDiscard) return
     setDiscardingDir(dir)
     try {
-      await onFolderDiscard(entries.map((f) => f.id))
+      await onFolderDiscard(dir, tree)
       setConfirmDiscard(null)
     } finally {
       setDiscardingDir(null)
@@ -627,14 +640,6 @@ export const FileTree = memo(function FileTree({
     return map
   }, [groups])
 
-  /// The files sitting in folders *under* `dir`. A folder here is a shared
-  /// `path` string and each group holds only what sits directly at that path, so
-  /// discarding `Pack` would leave `Pack/supported` behind, orphaned under a
-  /// folder that no longer exists — hence the choice offered when this is
-  /// non-empty.
-  const under = (dir: string) =>
-    groups.filter((g) => g.dir.startsWith(`${dir}/`)).flatMap((g) => g.entries)
-
   /// Every folder in the tree, and how many files sit anywhere beneath it —
   /// what a collapsed folder reports it is hiding. Counted off each folder's
   /// own total once, crediting all of its ancestors, so the whole map costs one
@@ -712,7 +717,8 @@ export const FileTree = memo(function FileTree({
       const { depth, label } = placement.get(dir) ?? { depth: 0, label: dir }
       // The root has no header of its own unless there is a folder control to
       // hang there — matching what the tree drew before it was flattened.
-      if (dir !== '/' || !!onFolderRename) out.push({ kind: 'header', dir, entries, depth, label })
+      if (dir !== '/' || !!onFolderRename)
+        out.push({ kind: 'header', dir, entries, expected, depth, label })
       if (collapsed.has(dir)) continue
       for (const file of entries) out.push({ kind: 'file', dir, file, depth })
       for (let nth = entries.length; nth < expected; nth++)
@@ -762,8 +768,11 @@ export const FileTree = memo(function FileTree({
   /// a whole. Drawn as a row of its own now that the tree is flat — it used to
   /// wrap its files, and nesting is carried by the indent instead.
   const renderHeader = (row: Extract<TreeRow, { kind: 'header' }>) => {
-    const { dir, entries, label } = row
+    const { dir, entries, expected, label } = row
     const shut = collapsed.has(dir)
+    // Everything at or beneath this folder, and how much of that is beneath it.
+    const inSubtree = subtreeCounts.get(dir) ?? expected
+    const below = inSubtree - expected
     if (dir === '/' && !onFolderRename) return null
     return (
       <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', mb: 0.25, minHeight: 30 }}>
@@ -877,10 +886,7 @@ export const FileTree = memo(function FileTree({
                     size="small"
                     onClick={() => {
                       setSplitName(dir.split('/').pop() ?? dir)
-                      setConfirmSplit({
-                        dir,
-                        count: entries.length + under(dir).length,
-                      })
+                      setConfirmSplit({ dir, count: inSubtree })
                     }}
                   >
                     <CallSplitIcon sx={{ fontSize: 16 }} />
@@ -897,7 +903,7 @@ export const FileTree = memo(function FileTree({
                     disabled={discardingDir === dir}
                     onClick={() => {
                       setDiscardTree(true)
-                      setConfirmDiscard({ dir, entries, nested: under(dir) })
+                      setConfirmDiscard({ dir, here: expected, below })
                     }}
                   >
                     <FolderDeleteIcon sx={{ fontSize: 17 }} />
@@ -1124,9 +1130,7 @@ export const FileTree = memo(function FileTree({
       >
         <DialogTitle>Discard folder?</DialogTitle>
         <DialogContent>
-          {confirmDiscard &&
-          confirmDiscard.nested.length > 0 &&
-          confirmDiscard.entries.length > 0 ? (
+          {confirmDiscard && confirmDiscard.below > 0 && confirmDiscard.here > 0 ? (
             // A folder with folders under it: "delete this folder" is two
             // different things, and which one was meant is not ours to guess.
             // The whole subtree goes by default — that is what deleting a folder
@@ -1147,7 +1151,7 @@ export const FileTree = memo(function FileTree({
                   label={
                     <Typography variant="body2">
                       This folder and everything under it —{' '}
-                      {confirmDiscard.entries.length + confirmDiscard.nested.length} files
+                      {confirmDiscard.here + confirmDiscard.below} files
                     </Typography>
                   }
                 />
@@ -1157,9 +1161,9 @@ export const FileTree = memo(function FileTree({
                   disabled={discardingDir !== null}
                   label={
                     <Typography variant="body2">
-                      This folder only — {confirmDiscard.entries.length}{' '}
-                      {confirmDiscard.entries.length === 1 ? 'file' : 'files'}, leaving the{' '}
-                      {confirmDiscard.nested.length} below it staged
+                      This folder only — {confirmDiscard.here}{' '}
+                      {confirmDiscard.here === 1 ? 'file' : 'files'}, leaving the{' '}
+                      {confirmDiscard.below} below it staged
                     </Typography>
                   }
                 />
@@ -1169,9 +1173,7 @@ export const FileTree = memo(function FileTree({
             // Either a leaf folder, or one that holds nothing but folders — in
             // both cases there is only one thing "delete this folder" can mean.
             (() => {
-              const count = confirmDiscard
-                ? confirmDiscard.entries.length + confirmDiscard.nested.length
-                : 0
+              const count = confirmDiscard ? confirmDiscard.here + confirmDiscard.below : 0
               return (
                 <Typography variant="body2">
                   Delete the {count} {count === 1 ? 'file' : 'files'} in{' '}
@@ -1193,12 +1195,9 @@ export const FileTree = memo(function FileTree({
             data-testid="confirm-discard"
             onClick={() =>
               confirmDiscard &&
-              void discardFolder(
-                confirmDiscard.dir,
-                discardTree || confirmDiscard.entries.length === 0
-                  ? [...confirmDiscard.entries, ...confirmDiscard.nested]
-                  : confirmDiscard.entries,
-              )
+              // A folder holding nothing but folders has only one possible
+              // meaning, and the radio group was never offered for it.
+              void discardFolder(confirmDiscard.dir, discardTree || confirmDiscard.here === 0)
             }
           >
             Discard
