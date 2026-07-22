@@ -592,6 +592,17 @@ export const FileTree = memo(function FileTree({
   }, [files])
 
   const dirs = useMemo(() => groups.map(([dir]) => dir).filter((dir) => dir !== '/'), [groups])
+  /// What "Collapse all" folds. A drop that arrives wrapped in a single folder
+  /// — one top-level row and nothing beside it, which is most of them — is the
+  /// exception: folding that one shut leaves the whole panel showing one row
+  /// and no way to read the layout, which is the opposite of what the button is
+  /// for. Its contents still fold; the wrapper stays open. Click it directly to
+  /// shut it.
+  const collapsible = useMemo(() => {
+    const tops = groups.filter(([dir]) => (placement.get(dir)?.depth ?? 0) === 0)
+    if (tops.length !== 1 || tops[0][0] === '/') return dirs
+    return dirs.filter((dir) => dir !== tops[0][0])
+  }, [groups, placement, dirs])
   // A folder is folded away if any ancestor is collapsed. The root group is in
   // no folder, so nothing can fold it away.
   const hidden = (dir: string) => {
@@ -649,8 +660,10 @@ export const FileTree = memo(function FileTree({
           <Button
             size="small"
             startIcon={<UnfoldLessIcon sx={{ fontSize: 16 }} />}
-            onClick={() => setCollapsed(new Set(dirs))}
-            disabled={collapsed.size === dirs.length}
+            // Union rather than replace: a wrapper the user shut by hand is the
+            // one folder this doesn't fold, and it shouldn't spring open either.
+            onClick={() => setCollapsed((prev) => new Set([...collapsible, ...prev]))}
+            disabled={collapsible.every((dir) => collapsed.has(dir))}
             sx={{ textTransform: 'none' }}
           >
             Collapse all
