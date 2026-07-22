@@ -225,28 +225,63 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether `folder` sits inside `ancestor` — the same folder, or nested under
+/// it. Segment-wise so `Loot/A` is not read as being under `Loot/AB`, which a
+/// plain `starts_with` would get wrong.
+fn is_under(folder: &str, ancestor: &str) -> bool {
+    folder == ancestor || folder.starts_with(&format!("{ancestor}/"))
+}
+
+/// The longest run of leading path segments every folder shares — the deepest
+/// directory they all sit under. Compared segment by segment for the same reason
+/// as `is_under`: a shared string prefix is not a shared folder.
+fn common_prefix(folders: &[String]) -> Vec<&str> {
+    let mut prefix: Vec<&str> = folders
+        .first()
+        .map(|f| f.split('/').collect())
+        .unwrap_or_default();
+    for folder in &folders[1..] {
+        let shared = folder
+            .split('/')
+            .zip(&prefix)
+            .take_while(|(seg, kept)| seg == *kept)
+            .count();
+        prefix.truncate(shared);
+    }
+    prefix
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct SplitInput {
-    /// The staged folder to lift out, as it appears in the tree — the files
-    /// directly in it and everything under it move together.
-    pub folder: String,
-    /// What to call the new import. Defaults to the folder's own name.
+    /// The staged folders to lift out, as they appear in the tree — the files
+    /// directly in each and everything under it move together. One is the common
+    /// case (carving a product off a back-catalogue drop); several at once is for
+    /// gathering scattered folders into one import in a single move.
+    pub folders: Vec<String>,
+    /// What to call the new import. Defaults to the folder's own name for a lone
+    /// folder, and to the name of the folder the selection sits under otherwise.
     #[serde(default)]
     pub name: Option<String>,
 }
 
-/// Lift a staged folder out into an import of its own.
+/// Lift one or more staged folders out into an import of their own.
 ///
 /// One drop is routinely several things — a dropbox pickup of a creator's whole
 /// back catalogue is a folder per product — and an import commits to exactly one
 /// destination. Splitting is how that drop becomes the several imports it always
 /// was, without a re-upload: the file rows change owner, the blobs never move.
 ///
-/// The folder becomes the new import's top directory and its ancestors are
+/// A single folder becomes the new import's top directory and its ancestors are
 /// dropped: `Loot/KingIn_Yellow/images/a.jpg` splits to `KingIn_Yellow/images/a.jpg`.
-/// The path that identified the *drop* has no meaning in an import that is now
-/// only this folder, but the folder's own name carries what it is — it is what
-/// a layout's model-name capture reads, and what the files sat under all along.
+/// With several folders selected at once, the deepest folder they *all* sit under
+/// is what gets dropped, so each keeps its own name at the top and they stay
+/// distinct: `Loot/A/x` and `Loot/B/y` split to `A/x` and `B/y`. Either way the
+/// path that identified the *drop* has no meaning in the smaller import, while the
+/// folder names that carry what each thing *is* — what a layout's model-name
+/// capture reads — are preserved.
+///
+/// Nested selections collapse to their outermost folder: picking `Loot` and
+/// `Loot/A` moves `Loot`, since `A` is already inside it.
 ///
 /// Refused while the source is still unpacking: half a folder is staged at that
 /// point, and the rest would land in the import this one just left.
@@ -269,22 +304,64 @@ async fn split(
         ));
     }
     // Trimmed the way a folder header shows it, and the way `path` is stored:
-    // no leading or trailing slashes.
-    let folder = input.folder.trim().trim_matches('/').to_string();
-    if folder.is_empty() {
+    // no leading or trailing slashes. Empty means the root, which is the whole
+    // import — not a folder to carve out.
+    let mut folders: Vec<String> = input
+        .folders
+        .iter()
+        .map(|f| f.trim().trim_matches('/').to_string())
+        .collect();
+    if folders.is_empty() || folders.iter().any(String::is_empty) {
         return Err(ApiError::BadRequest(
             "the whole import is not a folder to split out".into(),
         ));
     }
-    // What the folder is called, with its ancestors dropped: the new name, and
-    // the prefix every path loses.
-    let (prefix, leaf) = match folder.rsplit_once('/') {
-        Some((parent, leaf)) => (format!("{parent}/"), leaf),
-        None => (String::new(), folder.as_str()),
+    // Collapse the selection to its outermost folders: a folder listed alongside
+    // one of its own ancestors is already carried by that ancestor, and leaving
+    // it in would have its files matched (and their paths rewritten) twice.
+    folders.sort();
+    folders.dedup();
+    folders = folders
+        .iter()
+        .filter(|f| {
+            !folders
+                .iter()
+                .any(|a| a.as_str() != f.as_str() && is_under(f, a))
+        })
+        .cloned()
+        .collect();
+
+    // The prefix every moved path loses. For a lone folder that is its parent, so
+    // the folder itself stays as the top directory. For several it is the deepest
+    // directory they all share, so each keeps its own name and they stay apart.
+    let prefix_segs: Vec<&str> = if folders.len() == 1 {
+        let segs: Vec<&str> = folders[0].split('/').collect();
+        segs[..segs.len() - 1].to_vec()
+    } else {
+        common_prefix(&folders)
+    };
+    let prefix = if prefix_segs.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", prefix_segs.join("/"))
+    };
+    // The default name says what the new import holds: the lone folder's own name,
+    // or — for a gathered selection — the folder they were all sitting under.
+    let default_name = if folders.len() == 1 {
+        folders[0]
+            .rsplit('/')
+            .next()
+            .unwrap_or(&folders[0])
+            .to_string()
+    } else {
+        prefix_segs
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| source.name.clone())
     };
     let name = match input.name.as_deref().map(str::trim) {
         Some(name) if !name.is_empty() => name.to_string(),
-        _ => leaf.to_string(),
+        _ => default_name,
     };
 
     let mut tx = state.db.begin().await?;
@@ -300,20 +377,26 @@ async fn split(
     .fetch_one(&mut *tx)
     .await?;
     // `left(path, n) = folder || '/'` rather than LIKE: a folder name is free to
-    // contain `%` or `_`, and those are not wildcards here.
+    // contain `%` or `_`, and those are not wildcards here. Every selected folder
+    // is tested against each row through `unnest`, so one statement moves them all;
+    // the shared prefix they lose is a fixed width, so `substring` is the same cut
+    // for every match.
     let moved = sqlx::query_scalar!(
         r#"WITH moved AS (
              UPDATE files
                 SET import_id = $2,
                     path = substring(path from $4)
               WHERE import_id = $1
-                AND (path = $3 OR left(path, length($3) + 1) = $3 || '/')
+                AND EXISTS (
+                  SELECT 1 FROM unnest($3::text[]) AS f(folder)
+                   WHERE path = f.folder OR left(path, length(f.folder) + 1) = f.folder || '/'
+                )
               RETURNING 1
            )
            SELECT count(*) as "count!" FROM moved"#,
         id,
         new_id,
-        folder,
+        &folders,
         // 1-based, and in characters: `substring` counts characters, and a
         // folder name is free to hold anything a filesystem allows.
         (prefix.chars().count() + 1) as i32,
@@ -323,7 +406,8 @@ async fn split(
     if moved == 0 {
         tx.rollback().await?;
         return Err(ApiError::BadRequest(format!(
-            "nothing is staged under {folder}"
+            "nothing is staged under {}",
+            folders.join(", ")
         )));
     }
     // What was typed about the drop is true of both halves of it: the licence,
@@ -342,8 +426,8 @@ async fn split(
     tx.commit().await?;
 
     tracing::info!(
-        from = %id, to = %new_id, %folder, files = moved,
-        "split a folder out of an import"
+        from = %id, to = %new_id, folders = %folders.join(", "), files = moved,
+        "split folders out of an import"
     );
     Ok(Json(fetch_import(&state, new_id).await?))
 }
@@ -1927,5 +2011,34 @@ mod tests {
     fn a_different_name_does_not_match() {
         let members = [member(1, "Gold", &[], &["Golden"])];
         assert!(match_member(&members, &planned("Silver", &[])).is_none());
+    }
+
+    #[test]
+    fn under_is_by_segment_not_by_string() {
+        assert!(is_under("Loot", "Loot"));
+        assert!(is_under("Loot/A", "Loot"));
+        assert!(is_under("Loot/A/x", "Loot/A"));
+        // A shared string prefix that stops mid-segment is not containment.
+        assert!(!is_under("Loot/AB", "Loot/A"));
+        assert!(!is_under("Loot", "Loot/A"));
+    }
+
+    #[test]
+    fn common_prefix_stops_at_the_shared_folder() {
+        let f = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Siblings under one parent share it.
+        assert_eq!(common_prefix(&f(&["Loot/A", "Loot/B"])), vec!["Loot"]);
+        // Deeper agreement is kept.
+        assert_eq!(
+            common_prefix(&f(&["Loot/Set/A", "Loot/Set/B"])),
+            vec!["Loot", "Set"]
+        );
+        // No shared folder → empty prefix, so paths are moved whole.
+        assert_eq!(common_prefix(&f(&["A/x", "B/y"])), Vec::<&str>::new());
+        // A string prefix that isn't a folder prefix doesn't count.
+        assert_eq!(
+            common_prefix(&f(&["Loot/A", "Loota/B"])),
+            Vec::<&str>::new()
+        );
     }
 }

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH moved AS (\n             UPDATE files\n                SET import_id = $2,\n                    path = substring(path from $4)\n              WHERE import_id = $1\n                AND EXISTS (\n                  SELECT 1 FROM unnest($3::text[]) AS f(folder)\n                   WHERE path = f.folder OR left(path, length(f.folder) + 1) = f.folder || '/'\n                )\n              RETURNING 1\n           )\n           SELECT count(*) as \"count!\" FROM moved",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "TextArray",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4904fcd8ebd551dab023203ce96a566eafdac09b3645dc0e95db021e653c6add"
+}
