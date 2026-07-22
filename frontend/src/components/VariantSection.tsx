@@ -45,6 +45,7 @@ import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
+import ImageIcon from '@mui/icons-material/Image'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
@@ -61,6 +62,18 @@ import { changeTags, pasteTags } from '../tags'
 // three.js is heavy and only needed when a preview is actually opened, so split
 // it out of the main bundle.
 const StlPreviewDialog = lazy(() => import('./StlPreviewDialog'))
+// Cheap by comparison (an `<img>`), but it only ever opens on a click, so it
+// rides the same lazy split rather than sitting in the main bundle.
+const ImagePreviewDialog = lazy(() => import('./ImagePreviewDialog'))
+
+/// Raster formats a browser will draw in an `<img>`. SVG is in: an `<img>`
+/// renders it inert, so an embedded script never runs.
+const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'svg']
+
+const isImage = (filename: string) => {
+  const ext = filename.toLowerCase().split('.').pop() ?? ''
+  return IMAGE_EXTENSIONS.includes(ext)
+}
 
 /// What the archive chip says for each unpack state. `none` covers a staged
 /// archive with no unpack job behind it at all — which used to be shown as
@@ -604,11 +617,11 @@ export const FileTree = memo(function FileTree({
     })
   }
 
-  // Reserve the 3D-preview column on every row once any file can show it, so the
+  // Reserve the preview column on every row once any file can show it, so the
   // download/render icons stay in aligned columns next to files (projects,
-  // documents) that can't be previewed. No STL anywhere → no wasted column.
-  const anyStl = useMemo(
-    () => files.some((f) => f.filename.toLowerCase().endsWith('.stl')),
+  // documents) that can't be previewed. Nothing previewable → no wasted column.
+  const anyPreviewable = useMemo(
+    () => files.some((f) => f.filename.toLowerCase().endsWith('.stl') || isImage(f.filename)),
     [files],
   )
 
@@ -846,16 +859,28 @@ export const FileTree = memo(function FileTree({
                   </Typography>
                   {/* STL is the one format we can render live in the browser
                   (three.js). Give it a viewer; other model formats fall back to
-                  the server-rendered picture. The slot is held open for non-STL
-                  rows too so the download/render icons line up down the list. */}
-                  {anyStl && (
+                  the server-rendered picture. Images that came in with the
+                  fileset — renders, references — share the column: they were
+                  never promoted into the gallery, so this is the only way to
+                  look at one short of downloading it. The slot is held open for
+                  rows that are neither, so the download/render icons line up
+                  down the list. */}
+                  {anyPreviewable && (
                     <Box sx={{ width: 30, flexShrink: 0 }}>
-                      {file.filename.toLowerCase().endsWith('.stl') && (
+                      {file.filename.toLowerCase().endsWith('.stl') ? (
                         <Tooltip title="Preview 3D model">
                           <IconButton size="small" onClick={() => setPreviewFile(file)}>
                             <ViewInArIcon sx={{ fontSize: 18 }} />
                           </IconButton>
                         </Tooltip>
+                      ) : (
+                        isImage(file.filename) && (
+                          <Tooltip title="Preview image">
+                            <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                              <ImageIcon sx={{ fontSize: 18 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )
                       )}
                     </Box>
                   )}
@@ -905,13 +930,22 @@ export const FileTree = memo(function FileTree({
       })}
       {previewFile && (
         <Suspense fallback={null}>
-          <StlPreviewDialog
-            open
-            fileId={previewFile.id}
-            filename={previewFile.filename}
-            size={previewFile.size}
-            onClose={() => setPreviewFile(null)}
-          />
+          {isImage(previewFile.filename) ? (
+            <ImagePreviewDialog
+              open
+              fileId={previewFile.id}
+              filename={previewFile.filename}
+              onClose={() => setPreviewFile(null)}
+            />
+          ) : (
+            <StlPreviewDialog
+              open
+              fileId={previewFile.id}
+              filename={previewFile.filename}
+              size={previewFile.size}
+              onClose={() => setPreviewFile(null)}
+            />
+          )}
         </Suspense>
       )}
       <Dialog
