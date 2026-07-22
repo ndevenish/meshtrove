@@ -15,6 +15,7 @@
 //! Picking up never modifies the dropbox: the entry stays exactly where it was,
 //! for the admin to delete once they're satisfied with the import.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -269,6 +270,17 @@ mod tests {
     }
 }
 
+/// A file this import already holds, keyed by the logical path a re-walk of the
+/// entry would produce for it — enough to recognise it and, if it is an archive,
+/// to finish queueing its unpack.
+#[derive(Clone)]
+struct StagedFile {
+    id: Uuid,
+    filename: String,
+    sha256: String,
+    kind: files::FileKind,
+}
+
 #[derive(Deserialize)]
 struct PickupPayload {
     import_id: Uuid,
@@ -309,9 +321,51 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
     }
 
     let owner = Owner::Import(payload.import_id);
+
+    // What an earlier attempt of this job already staged. A retry re-walks the
+    // entry from the top, and nothing constrains owner+path+filename — nor
+    // should it, since an archive unpacking into the same import may
+    // legitimately land on a taken path, and that clash is settled at commit
+    // time (see services::transfer) — so without this, every file the last
+    // attempt got through is inserted a second time. Skipping them also spares
+    // the re-read and the re-hash, which for a multi-hour pickup is the whole
+    // cost: a retry resumes rather than starts over.
+    let staged: HashMap<(String, String), StagedFile> = sqlx::query!(
+        r#"SELECT id, path as "path!", filename as "filename!", blob_sha256 as "blob_sha256!",
+                  kind as "kind!: files::FileKind"
+           FROM files WHERE import_id = $1"#,
+        payload.import_id,
+    )
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|r| {
+        (
+            (r.path, r.filename.clone()),
+            StagedFile {
+                id: r.id,
+                filename: r.filename,
+                sha256: r.blob_sha256,
+                kind: r.kind,
+            },
+        )
+    })
+    .collect();
+
     let mut shas = Vec::with_capacity(entries.len());
     let mut archives: Vec<(Uuid, files::FileKind, String, String)> = Vec::new();
+    // Archives a previous attempt staged. Its unpacks are queued only once the
+    // whole entry is staged (below), so an attempt that died mid-walk left them
+    // with a file row and no job — and skipping them here would be the last
+    // chance anything had to notice.
+    let mut resumed: Vec<StagedFile> = Vec::new();
     for file in &entries {
+        if let Some(prior) = staged.get(&(file.dir.clone(), file.filename.clone())) {
+            if matches!(prior.kind, files::FileKind::Archive) {
+                resumed.push(prior.clone());
+            }
+            continue;
+        }
         // put_blocking: the source is a file on disk, i.e. a blocking reader, so
         // this hashes and writes in one pass instead of spilling to a temp file
         // and reading it back. sync=false — the batch is flushed once at the end
@@ -363,11 +417,40 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
             .await
             .map_err(anyhow::Error::new)?;
     }
+    // The ones carried over from a previous attempt, only where that attempt
+    // did not already queue them: `enqueue` is unconditional, so calling this
+    // for an archive that has a job would unpack the same archive twice into
+    // the same import.
+    for prior in &resumed {
+        let queued = sqlx::query_scalar!(
+            r#"SELECT EXISTS (
+                 SELECT 1 FROM jobs
+                 WHERE kind = 'import_archive' AND payload->>'archive_file_id' = $1
+               ) as "exists!""#,
+            prior.id.to_string(),
+        )
+        .fetch_one(&state.db)
+        .await?;
+        if queued {
+            continue;
+        }
+        files::on_archive_ingested(
+            state,
+            owner,
+            prior.id,
+            prior.kind,
+            &prior.filename,
+            &prior.sha256,
+        )
+        .await
+        .map_err(anyhow::Error::new)?;
+    }
 
     tracing::info!(
         import = %payload.import_id,
         entry = %payload.entry,
         files = entries.len(),
+        resumed = staged.len(),
         "dropbox entry picked up"
     );
     Ok(())
