@@ -444,6 +444,16 @@ pub struct PlanRequest {
     /// merge onto (`merge_target`) and the members available to retarget to.
     #[serde(default)]
     pub bundle_id: Option<Uuid>,
+    /// Answer with the tallies and the planned shape, but not the per-file
+    /// annotations — for a caller that only wants to know how much a layout
+    /// would match.
+    ///
+    /// The annotations are one entry per staged file and are essentially the
+    /// whole response: on a 42k-file import a plan is some 10 MB, and the
+    /// layout picker dry-runs *every saved layout* on page load to rank them by
+    /// coverage, reading a single integer from each. That is what this is for.
+    #[serde(default)]
+    pub counts_only: bool,
 }
 
 /// Everything the layout panel shows — coverage, the grouped tree, per-file
@@ -480,6 +490,18 @@ async fn plan(
                 tags: m.tags,
             })
             .collect();
+    }
+
+    // Dropped after the analysis, not skipped during it: these are how `analyze`
+    // reports what it did, and the tallies are counted off the same pass. Only
+    // the serialising of them is worth avoiding. Everything that grows with the
+    // size of the drop goes — the annotations per file, the planned models per
+    // captured name — leaving the tallies and the per-rule breakdown.
+    if request.counts_only {
+        plan.annotations = Vec::new();
+        plan.models = Vec::new();
+        plan.model_names = Vec::new();
+        plan.members = Vec::new();
     }
 
     Ok(Json(plan))

@@ -788,8 +788,20 @@ export const api = {
   importFileSummary: (id: string) => request<ImportFolder[]>(`/api/imports/${id}/files/summary`),
   commitImport: (id: string, target: CommitTarget) =>
     request<CommitResult>(`/api/imports/${id}/commit`, json(target)),
-  planImport: (id: string, spec: LayoutSpec, target: PlanTarget, bundleId?: string) =>
-    request<LayoutPlan>(`/api/imports/${id}/plan`, json({ ...spec, target, bundle_id: bundleId })),
+  /** Dry-run a layout. `countsOnly` asks for the tallies without the per-file
+      annotations, which are the bulk of the response — one entry per staged
+      file, ~10 MB on a 42k import. */
+  planImport: (
+    id: string,
+    spec: LayoutSpec,
+    target: PlanTarget,
+    bundleId?: string,
+    countsOnly?: boolean,
+  ) =>
+    request<LayoutPlan>(
+      `/api/imports/${id}/plan`,
+      json({ ...spec, target, bundle_id: bundleId, counts_only: countsOnly }),
+    ),
   /** contents of the server-side dropbox (admin only) */
   dropbox: () => request<DropboxListing>('/api/dropbox'),
   /** stage one dropbox entry as an import; the copy itself runs as a job */

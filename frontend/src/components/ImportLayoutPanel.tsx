@@ -173,7 +173,10 @@ export default memo(function ImportLayoutPanel({
       const entries = await Promise.all(
         layouts!.map(async (layout) => {
           try {
-            const p = await api.planImport(importId, layout, 'bundle')
+            // One integer per layout is all this reads, so don't ask for the
+            // per-file annotations: they are the whole weight of a plan, and
+            // this runs once per saved layout the moment the page opens.
+            const p = await api.planImport(importId, layout, 'bundle', undefined, true)
             return [layout.id, p.matched] as const
           } catch {
             return [layout.id, -1] as const
