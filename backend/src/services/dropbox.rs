@@ -183,6 +183,85 @@ fn collect(dir: &Path, rel: &str, depth: usize, out: &mut Vec<DropFile>) -> Resu
 mod tests {
     use super::*;
 
+    fn drop_file(dir: &str, filename: &str) -> DropFile {
+        DropFile {
+            dir: dir.to_string(),
+            filename: filename.to_string(),
+            size: 1,
+            source: PathBuf::from(filename),
+        }
+    }
+
+    fn staged_file(
+        dir: &str,
+        filename: &str,
+        kind: files::FileKind,
+    ) -> ((String, String), StagedFile) {
+        (
+            (dir.to_string(), filename.to_string()),
+            StagedFile {
+                id: Uuid::new_v4(),
+                filename: filename.to_string(),
+                sha256: "sha".to_string(),
+                kind,
+            },
+        )
+    }
+
+    /// The common case: nothing staged yet, so everything is fresh work.
+    #[test]
+    fn a_first_attempt_stages_the_whole_entry() {
+        let entries = vec![drop_file("Set", "a.stl"), drop_file("Set/stl", "b.stl")];
+        let resume = plan_resume(&entries, &HashMap::new());
+        assert_eq!(resume.fresh.len(), 2);
+        assert!(resume.archives.is_empty());
+    }
+
+    /// The bug this exists for: a retry re-walks the entry from the top, and
+    /// nothing in the schema stops it inserting the last attempt's work again.
+    #[test]
+    fn a_retry_skips_what_the_last_attempt_staged() {
+        let entries = vec![
+            drop_file("Set", "a.stl"),
+            drop_file("Set", "b.stl"),
+            drop_file("Set/stl", "c.stl"),
+        ];
+        let staged = HashMap::from([staged_file("Set", "a.stl", files::FileKind::Model)]);
+
+        let resume = plan_resume(&entries, &staged);
+        let left: Vec<&str> = resume.fresh.iter().map(|f| f.filename.as_str()).collect();
+        assert_eq!(left, vec!["b.stl", "c.stl"]);
+        // Same name, different folder: a distinct file, not a match.
+        assert!(resume.fresh.iter().any(|f| f.dir == "Set/stl"));
+    }
+
+    /// Folder is part of the identity — `Set/a.stl` staged does not excuse
+    /// `Set/stl/a.stl`, which is a different file that happens to share a name.
+    #[test]
+    fn matching_is_on_the_whole_logical_path() {
+        let entries = vec![drop_file("Set/stl", "a.stl")];
+        let staged = HashMap::from([staged_file("Set", "a.stl", files::FileKind::Model)]);
+        assert_eq!(plan_resume(&entries, &staged).fresh.len(), 1);
+    }
+
+    /// An attempt that died mid-walk staged its archives but never reached the
+    /// queueing at the end, so they carry a file row and no unpack job. Skipped
+    /// silently they would never be looked at again.
+    #[test]
+    fn a_carried_over_archive_is_offered_for_unpacking() {
+        let entries = vec![drop_file("Set", "pack.zip"), drop_file("Set", "a.stl")];
+        let staged = HashMap::from([
+            staged_file("Set", "pack.zip", files::FileKind::Archive),
+            staged_file("Set", "a.stl", files::FileKind::Model),
+        ]);
+
+        let resume = plan_resume(&entries, &staged);
+        assert!(resume.fresh.is_empty(), "both were already staged");
+        // Only the archive is carried; the stl has nothing left owing.
+        assert_eq!(resume.archives.len(), 1);
+        assert_eq!(resume.archives[0].filename, "pack.zip");
+    }
+
     /// A dropbox with `<entry>` in it, plus a sibling file outside it to escape to.
     fn temp_dropbox() -> PathBuf {
         let root = std::env::temp_dir().join(format!("meshtrove-dropbox-{}", Uuid::new_v4()));
@@ -281,6 +360,51 @@ struct StagedFile {
     kind: files::FileKind,
 }
 
+/// What a re-walk of a dropbox entry still has to do, given what the import
+/// already holds: the entries to ingest, and the archives a previous attempt
+/// staged whose unpack may never have been queued.
+struct Resume<'a> {
+    /// Entries with no row yet. On a first attempt this is everything.
+    fresh: Vec<&'a DropFile>,
+    /// Already staged, and an archive. Their unpacks are queued only once the
+    /// whole entry is staged, so an attempt that died mid-walk left these with
+    /// a file row and no job; a resume that merely skipped them would be the
+    /// last chance anything had to notice.
+    archives: Vec<StagedFile>,
+}
+
+/// Split a scanned entry against what the import already holds.
+///
+/// A retried pickup re-walks the entry from the top, and nothing constrains
+/// owner+path+filename — nor should it, since an archive unpacking into the
+/// same import may legitimately land on a taken path, and that clash is settled
+/// at commit time (see [`crate::services::transfer`]). So recognising the
+/// previous attempt's work is this function's job, and skipping it spares the
+/// re-read and the re-hash: on a multi-hour pickup that is the entire cost.
+///
+/// Matching is by logical path alone, not by content: hashing the source to
+/// tell whether it changed would cost exactly what the resume exists to save.
+/// A dropbox entry is not supposed to change under a pickup — the pickup never
+/// writes to it, and the admin deletes it only once satisfied with the import.
+fn plan_resume<'a>(
+    entries: &'a [DropFile],
+    staged: &HashMap<(String, String), StagedFile>,
+) -> Resume<'a> {
+    let mut fresh = Vec::new();
+    let mut archives = Vec::new();
+    for file in entries {
+        match staged.get(&(file.dir.clone(), file.filename.clone())) {
+            Some(prior) => {
+                if matches!(prior.kind, files::FileKind::Archive) {
+                    archives.push(prior.clone());
+                }
+            }
+            None => fresh.push(file),
+        }
+    }
+    Resume { fresh, archives }
+}
+
 #[derive(Deserialize)]
 struct PickupPayload {
     import_id: Uuid,
@@ -322,14 +446,8 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
 
     let owner = Owner::Import(payload.import_id);
 
-    // What an earlier attempt of this job already staged. A retry re-walks the
-    // entry from the top, and nothing constrains owner+path+filename — nor
-    // should it, since an archive unpacking into the same import may
-    // legitimately land on a taken path, and that clash is settled at commit
-    // time (see services::transfer) — so without this, every file the last
-    // attempt got through is inserted a second time. Skipping them also spares
-    // the re-read and the re-hash, which for a multi-hour pickup is the whole
-    // cost: a retry resumes rather than starts over.
+    // What an earlier attempt of this job already staged; see plan_resume for
+    // what is done with it. Empty on a first attempt, which is the common case.
     let staged: HashMap<(String, String), StagedFile> = sqlx::query!(
         r#"SELECT id, path as "path!", filename as "filename!", blob_sha256 as "blob_sha256!",
                   kind as "kind!: files::FileKind"
@@ -352,20 +470,11 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
     })
     .collect();
 
-    let mut shas = Vec::with_capacity(entries.len());
+    let resume = plan_resume(&entries, &staged);
+
+    let mut shas = Vec::with_capacity(resume.fresh.len());
     let mut archives: Vec<(Uuid, files::FileKind, String, String)> = Vec::new();
-    // Archives a previous attempt staged. Its unpacks are queued only once the
-    // whole entry is staged (below), so an attempt that died mid-walk left them
-    // with a file row and no job — and skipping them here would be the last
-    // chance anything had to notice.
-    let mut resumed: Vec<StagedFile> = Vec::new();
-    for file in &entries {
-        if let Some(prior) = staged.get(&(file.dir.clone(), file.filename.clone())) {
-            if matches!(prior.kind, files::FileKind::Archive) {
-                resumed.push(prior.clone());
-            }
-            continue;
-        }
+    for file in &resume.fresh {
         // put_blocking: the source is a file on disk, i.e. a blocking reader, so
         // this hashes and writes in one pass instead of spilling to a temp file
         // and reading it back. sync=false — the batch is flushed once at the end
@@ -421,7 +530,7 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
     // did not already queue them: `enqueue` is unconditional, so calling this
     // for an archive that has a job would unpack the same archive twice into
     // the same import.
-    for prior in &resumed {
+    for prior in &resume.archives {
         let queued = sqlx::query_scalar!(
             r#"SELECT EXISTS (
                  SELECT 1 FROM jobs
@@ -450,7 +559,7 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
         import = %payload.import_id,
         entry = %payload.entry,
         files = entries.len(),
-        resumed = staged.len(),
+        staged = resume.fresh.len(),
         "dropbox entry picked up"
     );
     Ok(())
