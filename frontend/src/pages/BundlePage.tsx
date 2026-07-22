@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Autocomplete,
@@ -547,8 +547,6 @@ export default function BundlePage() {
   )
 }
 
-/// A bundle's members. Deliberately *not* a place to add a model: membership is
-/// something a carve decides, on the way in from an import — picking an existing
 /// Return a copy of `arr` with the item at `from` moved to index `to`.
 function moveItem<T>(arr: T[], from: number, to: number): T[] {
   const next = [...arr]
@@ -557,9 +555,10 @@ function moveItem<T>(arr: T[], from: number, to: number): T[] {
   return next
 }
 
-/// model out of a search box and dropping it in a box set is how a model ends up
-/// in two collections it was never sold with. Removing one stays, because a bad
-/// carve has to be undoable.
+/// A bundle's members. A carve on the way in from an import is the usual way a
+/// model lands here, but not the only one: in edit mode a search box adds an
+/// existing model, so a bundle can be curated after the fact rather than only
+/// assembled from the archive it arrived in.
 function MembersSection({
   bundleId,
   bundleCreatorId,
@@ -605,6 +604,40 @@ function MembersSection({
   const refreshAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['bundle', bundleId] })
     onChange()
+  }
+
+  // The add-an-existing-model picker. `useDeferredValue` is the debounce: the
+  // input stays responsive while the search lags a keystroke behind it.
+  const [memberQuery, setMemberQuery] = useState('')
+  const [addingMember, setAddingMember] = useState(false)
+  const [addError, setAddError] = useState('')
+  const search = useDeferredValue(memberQuery.trim())
+  const { data: found, isFetching: searching } = useQuery({
+    queryKey: ['model-search', search],
+    enabled: canEdit && editing && search.length > 0,
+    queryFn: () =>
+      api.searchModels(new URLSearchParams({ q: search, per_page: '20' })).then((r) => r.models),
+  })
+  // Members can't be added twice — `ON CONFLICT DO NOTHING` would swallow it
+  // silently, which reads as the picker having done nothing.
+  const memberIds = useMemo(() => new Set(models.map((m) => m.id)), [models])
+  const candidates = useMemo(
+    () => (found ?? []).filter((m) => !memberIds.has(m.id)),
+    [found, memberIds],
+  )
+
+  const addMember = async (model: import('../api').ModelSummary) => {
+    setAddingMember(true)
+    setAddError('')
+    try {
+      await api.addModelToBundle(bundleId, model.id)
+      setMemberQuery('')
+      await refreshAll()
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAddingMember(false)
+    }
   }
 
   // Members carrying each tag — for per-category counts (and the add picker).
@@ -754,6 +787,38 @@ function MembersSection({
             ))}
           </Tabs>
         )
+      )}
+
+      {canEdit && editing && (
+        <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Add an existing model to this bundle
+          </Typography>
+          <Autocomplete
+            size="small"
+            options={candidates}
+            loading={searching}
+            value={null}
+            inputValue={memberQuery}
+            disabled={addingMember}
+            filterOptions={(x) => x}
+            getOptionLabel={(m) => m.name}
+            noOptionsText={memberQuery.trim() ? 'No matching models' : 'Type to search models'}
+            onInputChange={(_, v, reason) => {
+              if (reason !== 'reset') setMemberQuery(v)
+            }}
+            onChange={(_, model) => {
+              if (model) void addMember(model)
+            }}
+            renderInput={(props) => <TextField {...props} placeholder="Search models by name…" />}
+            sx={{ maxWidth: 340 }}
+          />
+          {addError && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {addError}
+            </Alert>
+          )}
+        </Paper>
       )}
 
       {models.length === 0 ? (
