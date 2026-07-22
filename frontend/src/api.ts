@@ -770,7 +770,15 @@ export const api = {
       own; the folder becomes the new import's top directory */
   splitImport: (id: string, folder: string, name?: string) =>
     request<ImportSummary>(`/api/imports/${id}/split`, json({ folder, name })),
-  importFiles: (id: string) => request<FileRecord[]>(`/api/imports/${id}/files`),
+  /** every staged file, or — with `path` — just the one folder's worth. The
+      import page opens folders against the narrow form; the whole listing is
+      only worth asking for once a layout needs to annotate all of it. */
+  importFiles: (id: string, path?: string) =>
+    request<FileRecord[]>(
+      path === undefined
+        ? `/api/imports/${id}/files`
+        : `/api/imports/${id}/files?${new URLSearchParams({ path })}`,
+    ),
   /** what is staged so far, counted by folder — cheap enough to poll while an
       import is still filling up, which the full listing is not */
   importFileSummary: (id: string) => request<ImportFolder[]>(`/api/imports/${id}/files/summary`),

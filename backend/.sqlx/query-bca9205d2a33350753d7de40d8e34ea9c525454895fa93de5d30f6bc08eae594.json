@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT f.id as \"id!\", f.blob_sha256 as \"blob_sha256!\", f.path as \"path!\",\n                  f.filename as \"filename!\", f.mime,\n                  f.kind as \"kind!: FileKind\", f.created_at as \"created_at!\", b.size as \"size!\",\n                  j.status::text as unpack_status\n           FROM files f\n           JOIN blobs b ON b.sha256 = f.blob_sha256\n           LEFT JOIN LATERAL (\n             SELECT j.status FROM jobs j\n             WHERE j.kind = 'import_archive'\n               AND j.payload->>'archive_file_id' = f.id::text\n             ORDER BY j.id DESC LIMIT 1\n           ) j ON true\n           WHERE f.import_id = $1\n           ORDER BY f.path, f.filename",
+  "query": "SELECT f.id as \"id!\", f.blob_sha256 as \"blob_sha256!\", f.path as \"path!\",\n                  f.filename as \"filename!\", f.mime,\n                  f.kind as \"kind!: FileKind\", f.created_at as \"created_at!\", b.size as \"size!\",\n                  j.status::text as unpack_status\n           FROM files f\n           JOIN blobs b ON b.sha256 = f.blob_sha256\n           LEFT JOIN LATERAL (\n             SELECT j.status FROM jobs j\n             WHERE j.kind = 'import_archive'\n               AND j.payload->>'archive_file_id' = f.id::text\n             ORDER BY j.id DESC LIMIT 1\n           ) j ON true\n           WHERE f.import_id = $1 AND ($2::text IS NULL OR f.path = $2)\n           ORDER BY f.path, f.filename",
   "describe": {
     "columns": [
       {
@@ -114,7 +114,8 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
@@ -129,5 +130,5 @@
       null
     ]
   },
-  "hash": "6fbbb5197f607b686957410263ff25f5cad41cd92513649a524d658259cc0cb6"
+  "hash": "bca9205d2a33350753d7de40d8e34ea9c525454895fa93de5d30f6bc08eae594"
 }

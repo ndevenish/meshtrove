@@ -7,7 +7,7 @@ use anyhow::anyhow;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
@@ -598,12 +598,30 @@ async fn list_bundle_files(
     ))
 }
 
+/// Which staged files to list: all of them, or one folder's worth.
+#[derive(Deserialize)]
+pub struct ListImportFiles {
+    /// One exact `files.path` — the folder the import page has just opened.
+    /// Absent lists the whole import; empty lists the files sitting at its root,
+    /// which is a folder like any other here and not the same as "all".
+    pub path: Option<String>,
+}
+
 /// The staging bucket of an import: everything unpacked from the dropped
 /// archive, shown on the import page before it is committed to a model/bundle.
+///
+/// `?path=` narrows it to a single folder. The import page opens folders one at
+/// a time against that, because the unnarrowed listing does not scale: a dropbox
+/// pickup of a creator's back catalogue runs to tens of thousands of files, and
+/// asking for all of them costs seconds of server time and megabytes of wire to
+/// answer a question about the twenty rows someone actually expanded. The shape
+/// of the tree comes from [`import_file_summary`] instead, which is one
+/// aggregate.
 async fn list_import_files(
     State(state): State<AppState>,
     user: User,
     Path(id): Path<Uuid>,
+    Query(params): Query<ListImportFiles>,
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
     // Staged files are part of an import, which is editor-and-above working state:
     // don't list them to a signed-out visitor (a guest viewer). The model/bundle
@@ -628,9 +646,10 @@ async fn list_import_files(
                AND j.payload->>'archive_file_id' = f.id::text
              ORDER BY j.id DESC LIMIT 1
            ) j ON true
-           WHERE f.import_id = $1
+           WHERE f.import_id = $1 AND ($2::text IS NULL OR f.path = $2)
            ORDER BY f.path, f.filename"#,
-        id
+        id,
+        params.path,
     )
     .fetch_all(&state.db)
     .await?;
