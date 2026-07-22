@@ -283,6 +283,13 @@ export interface BrowseResults {
   per_page: number
 }
 
+/// One staged folder of an import, counted rather than listed.
+export interface ImportFolder {
+  path: string
+  files: number
+  bytes: number
+}
+
 /// A dropped archive, staged. Neither a model nor a bundle: it stays out of
 /// browse until it is committed to one (see `commitImport`).
 export interface ImportSummary {
@@ -756,6 +763,9 @@ export const api = {
   splitImport: (id: string, folder: string, name?: string) =>
     request<ImportSummary>(`/api/imports/${id}/split`, json({ folder, name })),
   importFiles: (id: string) => request<FileRecord[]>(`/api/imports/${id}/files`),
+  /** what is staged so far, counted by folder — cheap enough to poll while an
+      import is still filling up, which the full listing is not */
+  importFileSummary: (id: string) => request<ImportFolder[]>(`/api/imports/${id}/files/summary`),
   commitImport: (id: string, target: CommitTarget) =>
     request<CommitResult>(`/api/imports/${id}/commit`, json(target)),
   planImport: (id: string, spec: LayoutSpec, target: PlanTarget, bundleId?: string) =>

@@ -26,6 +26,7 @@ import {
   type BundleSummary,
   type CommitTarget,
   type FileRecord,
+  type ImportFolder,
   type LayoutPlan,
   type LayoutSpec,
   type ImportSummary,
@@ -33,6 +34,7 @@ import {
 import { FileTree } from '../components/VariantSection'
 import ImportLayoutPanel, { AnnotatedFileList } from '../components/ImportLayoutPanel'
 import ImportRestorePanel from '../components/ImportRestorePanel'
+import ImportStagingProgress from '../components/ImportStagingProgress'
 import { useImportDraftState, clearImportDraft } from '../importDraft'
 import { changeTags, pasteTags } from '../tags'
 import { CustomFieldControl, type ScalarValue } from '../components/CustomFieldControl'
@@ -42,6 +44,7 @@ type Destination = 'new_model' | 'new_bundle' | 'bundle'
 // A stable stand-in while the files query is loading: `files ?? []` would mint
 // a fresh array every render and defeat the file list's memo.
 const NO_FILES: FileRecord[] = []
+const NO_FOLDERS: ImportFolder[] = []
 
 /// The one place the model-vs-bundle question gets asked — after the archive has
 /// unpacked and you can see what's actually in it. Committing moves every staged
@@ -108,31 +111,38 @@ function ImportWorkbench() {
     // While the archive is unpacking, the file list is still growing.
     refetchInterval: (query) => (query.state.data?.unpacking ? 1500 : false),
   })
-  // Poll the *same* query while the archive unpacks, so arriving files are added
-  // to a list that stays mounted. (Keying it on `file_count` made every tick a
-  // different query with an empty cache: `files` blanked to undefined and
-  // everything drawn from it tore down and rebuilt — a page-wide flicker.)
+  // While the import is still filling up, watch it by folder counts instead of
+  // by file. The full listing costs the server time proportional to the number
+  // of staged files and hands the browser every row to rebuild a tree from,
+  // which a multi-hour dropbox pickup of tens of thousands of files cannot
+  // afford to be asked for on a timer. Nothing is lost: committing is refused
+  // until the unpack clears, so there is nothing to do with an individual
+  // staged file yet.
+  const { data: folders } = useQuery({
+    queryKey: ['import-folders', id],
+    queryFn: () => api.importFileSummary(id!),
+    enabled: !!id && !!staged?.unpacking,
+    refetchInterval: 1500,
+  })
+  // The real listing, once there is a settled import to list. Held in one
+  // mounted query rather than keyed on `file_count`: keying it that way made
+  // every tick a different query with an empty cache, so `files` blanked to
+  // undefined and everything drawn from it tore down and rebuilt — a page-wide
+  // flicker.
   //
-  // Stop on what we're holding, not on the flag: the last files land *between*
-  // the final poll and `unpacking` going false, so a poll that stops when the
-  // flag clears stops one fetch too early and leaves the tail of the archive
-  // off the page until a reload. Keep going until the list matches the count the
-  // import reports.
+  // It still polls, and stops on what we're holding rather than on the flag:
+  // the last files land *between* the final poll and `unpacking` going false,
+  // so stopping when the flag clears stops one fetch too early and leaves the
+  // tail of the archive off the page until a reload. With the fetch gated on
+  // the flag this converges promptly — no new files are arriving by then.
   const { data: files, isLoading: filesLoading } = useQuery({
     queryKey: ['import-files', id],
     queryFn: () => api.importFiles(id!),
-    enabled: !!id,
+    enabled: !!id && !staged?.unpacking,
     refetchInterval: (query) => {
       if (!staged) return false
       const held = query.state.data?.length ?? 0
-      if (!staged.unpacking && held === staged.file_count) return false
-      // Back off with the size of the list. The listing costs the server time
-      // proportional to the number of staged files, so a fixed tick is a
-      // promise the server can only keep while the import is small: at 40k
-      // files the response outlasts the interval, the requests queue up back to
-      // back, and the import being reported on is what loses the CPU. Poll a
-      // 1.5k-file import every 1.5s and a 40k-file one every 30s.
-      return Math.min(30_000, Math.max(1500, held))
+      return held === staged.file_count ? false : 1500
     },
   })
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
@@ -588,7 +598,9 @@ function ImportWorkbench() {
           <Typography variant="h6" sx={{ mb: 1 }}>
             Contents
           </Typography>
-          {filesLoading ? (
+          {staged.unpacking ? (
+            <ImportStagingProgress folders={folders ?? NO_FOLDERS} />
+          ) : filesLoading ? (
             // Until the first fetch lands we hold an empty list, which the file
             // tree would report as "No files yet" — a verdict on an import we
             // haven't read yet. Say we're still reading instead.

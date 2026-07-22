@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT f.path as \"path!\", count(*) as \"files!\",\n                  coalesce(sum(b.size), 0)::bigint as \"bytes!\"\n           FROM files f\n           JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE f.import_id = $1\n           GROUP BY f.path\n           ORDER BY f.path",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "files!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "bytes!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "fa2e89976e5d304c69575c7362cc8293c58be3209f236d38ee18c65559aee529"
+}

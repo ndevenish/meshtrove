@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/models/{id}/files", get(list_model_files))
         .route("/api/bundles/{id}/files", get(list_bundle_files))
         .route("/api/imports/{id}/files", get(list_import_files))
+        .route("/api/imports/{id}/files/summary", get(import_file_summary))
         .route("/api/files/{id}", patch(update_file).delete(delete_file))
         .route("/api/files/{id}/download", get(download_file))
         .route("/api/files/{id}/render", post(render_file))
@@ -654,6 +655,58 @@ async fn list_import_files(
         .collect();
     adopt_volume_unpack(&mut records);
     Ok(Json(records))
+}
+
+/// One staged folder, for the progress view an import shows while it is still
+/// filling up.
+#[derive(Serialize, ToSchema)]
+pub struct ImportFolder {
+    /// The shared `files.path` — a folder here is nothing more than that.
+    pub path: String,
+    pub files: i64,
+    pub bytes: i64,
+}
+
+/// What is staged so far, counted by folder rather than listed file by file.
+///
+/// The full listing is the wrong thing to poll while an import is still
+/// staging: it costs the server time proportional to the number of files and
+/// hands the browser every row to rebuild a tree from, and a dropbox pickup can
+/// run for hours at tens of thousands of files. None of that detail is usable
+/// yet — committing is refused until the unpack clears, so nothing on the page
+/// can act on an individual staged file — and what an admin actually wants to
+/// see is that folders are arriving. So they get counts, off one aggregate, and
+/// the file-by-file listing waits until the import has settled.
+async fn import_file_summary(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<ImportFolder>>, ApiError> {
+    // Same reasoning as list_import_files: an import is editor-and-above
+    // working state, and a folder listing still describes it.
+    user.require_editor()?;
+    let rows = sqlx::query!(
+        // sum() over a bigint is numeric in Postgres, hence the cast back.
+        r#"SELECT f.path as "path!", count(*) as "files!",
+                  coalesce(sum(b.size), 0)::bigint as "bytes!"
+           FROM files f
+           JOIN blobs b ON b.sha256 = f.blob_sha256
+           WHERE f.import_id = $1
+           GROUP BY f.path
+           ORDER BY f.path"#,
+        id
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| ImportFolder {
+                path: r.path,
+                files: r.files,
+                bytes: r.bytes,
+            })
+            .collect(),
+    ))
 }
 
 /// Let the later volumes of a rar set report the set's unpack.
