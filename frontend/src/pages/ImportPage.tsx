@@ -125,7 +125,14 @@ function ImportWorkbench() {
     refetchInterval: (query) => {
       if (!staged) return false
       const held = query.state.data?.length ?? 0
-      return staged.unpacking || held !== staged.file_count ? 1500 : false
+      if (!staged.unpacking && held === staged.file_count) return false
+      // Back off with the size of the list. The listing costs the server time
+      // proportional to the number of staged files, so a fixed tick is a
+      // promise the server can only keep while the import is small: at 40k
+      // files the response outlasts the interval, the requests queue up back to
+      // back, and the import being reported on is what loses the CPU. Poll a
+      // 1.5k-file import every 1.5s and a 40k-file one every 30s.
+      return Math.min(30_000, Math.max(1500, held))
     },
   })
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
