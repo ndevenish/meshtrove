@@ -7,7 +7,6 @@ import {
   Button,
   CircularProgress,
   Container,
-  LinearProgress,
   Paper,
   Snackbar,
   Stack,
@@ -408,10 +407,15 @@ function ImportWorkbench() {
         }}
       >
         <Box sx={{ width: '100%', flex: '1 1 0', minWidth: 0 }}>
+          {/* One bar, in the Contents column beside the folders filling up —
+              this banner used to carry a second, indeterminate one, which said
+              less than the real progress a few inches to its right. */}
           {staged.unpacking && (
             <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-              <Typography sx={{ mb: 1 }}>Unpacking the archive…</Typography>
-              <LinearProgress />
+              <Typography variant="body2" color="text.secondary">
+                Still unpacking — the form can be filled in now, but importing waits for the last
+                file. Progress is beside the contents.
+              </Typography>
             </Paper>
           )}
 
@@ -599,7 +603,7 @@ function ImportWorkbench() {
             Contents
           </Typography>
           {staged.unpacking ? (
-            <ImportStagingProgress folders={folders ?? NO_FOLDERS} />
+            <ImportStagingProgress staged={staged} folders={folders ?? NO_FOLDERS} />
           ) : filesLoading ? (
             // Until the first fetch lands we hold an empty list, which the file
             // tree would report as "No files yet" — a verdict on an import we

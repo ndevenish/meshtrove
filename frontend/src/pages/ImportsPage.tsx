@@ -62,7 +62,17 @@ export default function ImportsPage() {
                 <Chip
                   size="small"
                   icon={<CircularProgress size={12} sx={{ ml: 1 }} />}
-                  label="Unpacking"
+                  // How far the running job has got, when it has said. The
+                  // percentage is of that one job, not of the import — see
+                  // ImportStagingProgress for why an import has no total.
+                  label={
+                    item.staging_total > 0
+                      ? `Unpacking ${Math.min(
+                          100,
+                          Math.round((item.staging_done / item.staging_total) * 100),
+                        )}%`
+                      : 'Unpacking'
+                  }
                 />
               ) : item.partial ? (
                 // A "keep unmatched files" carve already placed some of this

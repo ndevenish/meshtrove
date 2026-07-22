@@ -24,6 +24,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::routes::files::{self, Owner};
+use crate::services::jobs;
 use crate::state::AppState;
 
 /// Guard against a symlink loop the walk can't otherwise see the end of.
@@ -419,7 +420,10 @@ struct PickupPayload {
 /// content-addressed store, which is not something to hold an HTTP request open
 /// for. The import row exists from the moment the button is pressed, so the page
 /// has something to show while this runs.
-pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
+/// `job_id` is this pickup's own job, which it reports staging progress
+/// against — the entry was walked before a byte was copied, so this one knows
+/// its total up front.
+pub async fn dropbox_import(state: &AppState, job_id: i64, payload: &Value) -> Result<()> {
     let payload: PickupPayload =
         serde_json::from_value(payload.clone()).context("bad dropbox_import payload")?;
 
@@ -474,7 +478,13 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
 
     let mut shas = Vec::with_capacity(resume.fresh.len());
     let mut archives: Vec<(Uuid, files::FileKind, String, String)> = Vec::new();
-    for file in &resume.fresh {
+    // Here the count really is free ahead of the work: `scan` has walked the
+    // tree, and a walk only reads directory entries — the hashing below is what
+    // touches the bytes. A resumed pickup counts what is left to do, not what
+    // the whole entry holds, so the bar tracks this attempt.
+    let total = resume.fresh.len();
+    jobs::report_progress(&state.db, job_id, 0, Some(total)).await;
+    for (staged, file) in resume.fresh.iter().enumerate() {
         // put_blocking: the source is a file on disk, i.e. a blocking reader, so
         // this hashes and writes in one pass instead of spilling to a temp file
         // and reading it back. sync=false — the batch is flushed once at the end
@@ -512,6 +522,9 @@ pub async fn dropbox_import(state: &AppState, payload: &Value) -> Result<()> {
             archives.push((record.id, kind, file.filename.clone(), blob.sha256.clone()));
         }
         shas.push(blob.sha256);
+        if (staged + 1) % jobs::PROGRESS_EVERY == 0 {
+            jobs::report_progress(&state.db, job_id, staged + 1, Some(total)).await;
+        }
     }
 
     let store = state.store.clone();

@@ -35,7 +35,10 @@ struct ImportPayload {
 /// catches anything cleverer.
 const MAX_UNPACK_DEPTH: u32 = 8;
 
-pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
+/// `job_id` is this unpack's own job, which it reports progress against: the
+/// staging loop below is where the minutes go on a large archive, and its
+/// denominator is the one number in an import that is actually knowable.
+pub async fn import_archive(state: &AppState, job_id: i64, payload: &Value) -> Result<()> {
     let payload: ImportPayload =
         serde_json::from_value(payload.clone()).context("bad import_archive payload")?;
 
@@ -129,7 +132,12 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     // shares its folder at the moment its job runs (see `unpack_dest`), so a
     // child released early would look around a folder still filling up.
     let mut nested = Vec::new();
-    for (logical, tmp_file) in &entries {
+    // The count is exact and free from here: extraction has already walked the
+    // whole archive, whatever its format. Reading it *before* extracting is
+    // another matter — only a zip carries a central directory cheap enough to
+    // ask, and a tar.gz would have to be decompressed twice to answer.
+    jobs::report_progress(&state.db, job_id, 0, Some(entries.len())).await;
+    for (staged, (logical, tmp_file)) in entries.iter().enumerate() {
         let file = tokio::fs::File::open(tmp_file).await?;
         let stream = tokio_util::io::ReaderStream::new(file).map_err_into_anyhow();
         let blob = state.store.put(stream).await?;
@@ -184,6 +192,9 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         }
         if matches!(kind, crate::routes::files::FileKind::Archive) {
             nested.push((file_id, filename.to_string(), blob.sha256.clone()));
+        }
+        if (staged + 1) % jobs::PROGRESS_EVERY == 0 {
+            jobs::report_progress(&state.db, job_id, staged + 1, Some(entries.len())).await;
         }
     }
 

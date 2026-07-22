@@ -300,6 +300,14 @@ export interface ImportSummary {
   file_count: number
   /** its archive is still unpacking; committing is refused until this clears */
   unpacking: boolean
+  /** archives still to open. Goes *up* when one of them turns out to hold more
+      archives — a pack of packs has no knowable shape until it is opened */
+  archives_left: number
+  /** files staged by the jobs running right now, out of what those jobs have
+      left to do. Not the import's eventual total, which nothing can know until
+      the last archive is open. Both 0 when nothing has reported */
+  staging_done: number
+  staging_total: number
   /** the dropped archive is a MeshTrove export — restore it rather than carve it */
   is_export: boolean
   /** a "keep unmatched files" carve already placed some of this import; what's

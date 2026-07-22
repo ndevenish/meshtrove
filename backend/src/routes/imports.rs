@@ -56,6 +56,18 @@ pub struct ImportSummary {
     /// queued or running, or a dropbox pickup is still copying entries onto it.
     /// Either way the contents aren't final yet, so committing is refused.
     pub unpacking: bool,
+    /// Archives of this import still waiting to be opened, or being opened now.
+    /// Counts down as the unpack works through them — and *up* whenever one of
+    /// them turns out to hold more archives, which is honest: nobody can know
+    /// the shape of a pack of packs until it has been opened.
+    pub archives_left: i64,
+    /// Files staged by the jobs running on this import right now, out of what
+    /// those jobs have left to do. Not the import's total: an unpack knows its
+    /// own archive's file count once it has extracted it (see importer.rs), and
+    /// what the *next* archive holds is nobody's business yet. Both 0 when
+    /// nothing is running or nothing has reported.
+    pub staging_done: i64,
+    pub staging_total: i64,
     /// The dropped archive is a MeshTrove export: it is restored (recreating the
     /// models/bundles it holds), not carved. The Import page shows a restore
     /// panel rather than the layout UI.
@@ -75,29 +87,12 @@ async fn list(
     let rows = sqlx::query!(
         r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
-                  (EXISTS (
-                    -- Driven from jobs, not from files. Only a handful of jobs
-                    -- are ever queued or running, while an import can hold tens
-                    -- of thousands of files; joined the other way round the two
-                    -- have no predicate relating them but the payload match, so
-                    -- the pair is a cartesian product and concluding "nothing is
-                    -- unpacking" means walking the whole of it. That is what put
-                    -- this query — polled by the Importing list every 3s — into
-                    -- seconds on a large import. The payload is serialised from
-                    -- a Uuid (see importer.rs), so the cast is total, and it
-                    -- puts the lookup on the files primary key.
-                    SELECT 1 FROM jobs j
-                    JOIN files f ON f.id = (j.payload->>'archive_file_id')::uuid
-                    WHERE j.kind = 'import_archive'
-                      AND j.status IN ('queued', 'running')
-                      AND f.import_id = i.id
-                  ) OR EXISTS (
-                    SELECT 1 FROM jobs j
-                    WHERE j.kind = 'dropbox_import'
-                      AND j.status IN ('queued', 'running')
-                      AND j.payload->>'import_id' = i.id::text
-                  )) as "unpacking!"
+                  w.jobs_left > 0 as "unpacking!",
+                  w.archives_left as "archives_left!",
+                  w.staging_done as "staging_done!",
+                  w.staging_total as "staging_total!"
            FROM imports i
+           LEFT JOIN LATERAL (SELECT * FROM import_work(i.id)) w ON true
            ORDER BY i.created_at DESC"#,
     )
     .fetch_all(&state.db)
@@ -111,6 +106,9 @@ async fn list(
                 created_at: r.created_at,
                 file_count: r.file_count,
                 unpacking: r.unpacking,
+                archives_left: r.archives_left,
+                staging_done: r.staging_done,
+                staging_total: r.staging_total,
                 is_export: r.is_export,
                 partial: r.partial,
             })
@@ -122,29 +120,13 @@ pub async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, A
     let r = sqlx::query!(
         r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
-                  (EXISTS (
-                    -- Driven from jobs, not from files. Only a handful of jobs
-                    -- are ever queued or running, while an import can hold tens
-                    -- of thousands of files; joined the other way round the two
-                    -- have no predicate relating them but the payload match, so
-                    -- the pair is a cartesian product and concluding "nothing is
-                    -- unpacking" means walking the whole of it. That is what put
-                    -- this query — polled by the Importing list every 3s — into
-                    -- seconds on a large import. The payload is serialised from
-                    -- a Uuid (see importer.rs), so the cast is total, and it
-                    -- puts the lookup on the files primary key.
-                    SELECT 1 FROM jobs j
-                    JOIN files f ON f.id = (j.payload->>'archive_file_id')::uuid
-                    WHERE j.kind = 'import_archive'
-                      AND j.status IN ('queued', 'running')
-                      AND f.import_id = i.id
-                  ) OR EXISTS (
-                    SELECT 1 FROM jobs j
-                    WHERE j.kind = 'dropbox_import'
-                      AND j.status IN ('queued', 'running')
-                      AND j.payload->>'import_id' = i.id::text
-                  )) as "unpacking!"
-           FROM imports i WHERE i.id = $1"#,
+                  w.jobs_left > 0 as "unpacking!",
+                  w.archives_left as "archives_left!",
+                  w.staging_done as "staging_done!",
+                  w.staging_total as "staging_total!"
+           FROM imports i
+           LEFT JOIN LATERAL (SELECT * FROM import_work(i.id)) w ON true
+           WHERE i.id = $1"#,
         id,
     )
     .fetch_optional(&state.db)
@@ -157,6 +139,9 @@ pub async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, A
         created_at: r.created_at,
         file_count: r.file_count,
         unpacking: r.unpacking,
+        archives_left: r.archives_left,
+        staging_done: r.staging_done,
+        staging_total: r.staging_total,
         is_export: r.is_export,
         partial: r.partial,
     })

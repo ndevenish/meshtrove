@@ -91,7 +91,11 @@ async fn claim(db: &PgPool, lane: Lane) -> Result<Option<ClaimedJob>> {
     let wants_render = matches!(lane, Lane::Render);
     let job = sqlx::query_as!(
         ClaimedJob,
-        r#"UPDATE jobs SET status = 'running', started_at = now(), attempts = attempts + 1
+        // Progress is cleared on the way in: what a failed attempt got through
+        // says nothing about this one, and a retry that reports nothing should
+        // show no bar rather than the old attempt's.
+        r#"UPDATE jobs SET status = 'running', started_at = now(), attempts = attempts + 1,
+                  progress_done = NULL, progress_total = NULL
            WHERE id = (
                SELECT id FROM jobs
                WHERE status = 'queued' AND run_after <= now()
@@ -153,6 +157,33 @@ async fn finish(db: &PgPool, id: i64, result: Result<()>, attempts: i32, max_att
     }
 }
 
+/// Say how far along a running job is, in whatever unit it counts in (files,
+/// for the two that report at all). `total` is `None` while the end is not yet
+/// known — see the column comments in migration 0034.
+///
+/// Best-effort by design: this is watched, not acted on, and a job that can't
+/// write its progress should carry on doing the work rather than fail. A lost
+/// update just means the bar sits still until the next one.
+pub async fn report_progress(db: &PgPool, id: i64, done: usize, total: Option<usize>) {
+    let result = sqlx::query!(
+        "UPDATE jobs SET progress_done = $2, progress_total = $3 WHERE id = $1",
+        id,
+        i32::try_from(done).unwrap_or(i32::MAX),
+        total.map(|t| i32::try_from(t).unwrap_or(i32::MAX)),
+    )
+    .execute(db)
+    .await;
+    if let Err(error) = result {
+        tracing::debug!(job = id, %error, "could not record job progress");
+    }
+}
+
+/// How often the file loops call [`report_progress`]. One update per file would
+/// double the writes a staging loop makes for a number nobody reads that
+/// closely; the page polls every 1.5s, and at the rate files stage a batch of
+/// this size lands well inside that.
+pub const PROGRESS_EVERY: usize = 25;
+
 /// Requeue jobs stranded in 'running' by a crash/restart. Safe because this
 /// process is the only thing that runs jobs, and this is called at startup
 /// before any worker is spawned — so nothing it requeues is still running.
@@ -176,7 +207,7 @@ pub async fn worker(state: AppState, lane: Lane) {
         match claim(&state.db, lane).await {
             Ok(Some(job)) => {
                 tracing::info!(job = job.id, kind = %job.kind, attempt = job.attempts, "running job");
-                let result = dispatch(&state, &job.kind, &job.payload).await;
+                let result = dispatch(&state, job.id, &job.kind, &job.payload).await;
                 finish(&state.db, job.id, result, job.attempts, job.max_attempts).await;
             }
             Ok(None) => {
@@ -190,11 +221,13 @@ pub async fn worker(state: AppState, lane: Lane) {
     }
 }
 
-async fn dispatch(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
+/// `id` is passed so a job can report its own progress ([`report_progress`]);
+/// the kinds that finish in one step ignore it.
+async fn dispatch(state: &AppState, id: i64, kind: &str, payload: &Value) -> Result<()> {
     match kind {
-        "import_archive" => crate::services::importer::import_archive(state, payload).await,
+        "import_archive" => crate::services::importer::import_archive(state, id, payload).await,
         "export_archive" => crate::services::export_job::export_archive(state, payload).await,
-        "dropbox_import" => crate::services::dropbox::dropbox_import(state, payload).await,
+        "dropbox_import" => crate::services::dropbox::dropbox_import(state, id, payload).await,
         "render_preview" => crate::services::renderer::render_preview(state, payload).await,
         other => Err(anyhow!("unknown job kind {other:?}")),
     }
