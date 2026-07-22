@@ -1044,7 +1044,7 @@ pub async fn write_bundle_values(
 
 /// One value staged on an import, with enough of its definition to route it at
 /// commit without re-reading the vocabulary per destination.
-pub struct StagedValue {
+pub struct OwnedValue {
     pub value_id: Uuid,
     pub field_id: Uuid,
     pub kind: CustomFieldKind,
@@ -1053,27 +1053,34 @@ pub struct StagedValue {
     pub value: Option<serde_json::Value>,
 }
 
-/// Everything typed (or dropped) onto an import that is still waiting for a
-/// destination.
-pub async fn staged_values(
+/// Everything one owner holds — what an import staged while it waited for a
+/// destination, or what a bundle carries and a split or merge has to take with
+/// it. Only the fields that are *set*: this is for moving values around, not
+/// for showing the blanks (that is `fetch_values`).
+pub async fn values_of(
     db: &mut sqlx::PgConnection,
-    import_id: Uuid,
-) -> Result<Vec<StagedValue>, ApiError> {
+    owner: ValueOwner,
+) -> Result<Vec<OwnedValue>, ApiError> {
+    let (model_id, bundle_id, import_id) = owner.ids();
     let rows = sqlx::query!(
         r#"SELECT v.id, v.field_id, v.value,
                   cf.kind as "kind: CustomFieldKind",
                   cf.applies_to_models, cf.applies_to_bundles
            FROM custom_field_values v
            JOIN custom_fields cf ON cf.id = v.field_id
-           WHERE v.import_id = $1
+           WHERE v.model_id IS NOT DISTINCT FROM $1
+             AND v.bundle_id IS NOT DISTINCT FROM $2
+             AND v.import_id IS NOT DISTINCT FROM $3
            ORDER BY cf.position, cf.name"#,
+        model_id,
+        bundle_id,
         import_id,
     )
     .fetch_all(&mut *db)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|r| StagedValue {
+        .map(|r| OwnedValue {
             value_id: r.id,
             field_id: r.field_id,
             kind: r.kind,
@@ -1087,11 +1094,11 @@ pub async fn staged_values(
 /// Copy the staged values `keep` accepts onto one owner. Fields it rejects are
 /// skipped rather than refused, the same way `resolve_values` treats a field
 /// that belongs on the other side of a drop.
-pub async fn copy_staged_onto(
+pub async fn copy_values_onto(
     db: &mut sqlx::PgConnection,
-    staged: &[StagedValue],
+    staged: &[OwnedValue],
     owner: ValueOwner,
-    keep: impl Fn(&StagedValue) -> bool,
+    keep: impl Fn(&OwnedValue) -> bool,
     user: &User,
 ) -> Result<(), ApiError> {
     let editor = editor_id(user);

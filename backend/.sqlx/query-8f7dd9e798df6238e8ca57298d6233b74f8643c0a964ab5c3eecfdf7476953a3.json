@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE source_archives SET bundle_id = $1 WHERE bundle_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8f7dd9e798df6238e8ca57298d6233b74f8643c0a964ab5c3eecfdf7476953a3"
+}

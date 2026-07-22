@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT created_by, creator_id, source_url FROM bundles WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_by",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundles",
+            "name": "created_by"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "creator_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundles",
+            "name": "creator_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "source_url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "bundles",
+            "name": "source_url"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "f1ffb484ad4ba41d23fb17d34107c667b0cf57235849b966454a7655d74f48a3"
+}

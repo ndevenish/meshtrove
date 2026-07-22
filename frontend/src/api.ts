@@ -253,6 +253,11 @@ export interface BundleResults {
 /// ones not also in another bundle.
 export type BundleMemberDisposition = 'keep' | 'delete' | 'delete_exclusive'
 
+/// What becomes of the bundle merged *into* another: `keep` leaves it standing
+/// (its models simply belong to both), `delete` moves everything it has across
+/// and deletes it.
+export type OtherBundleDisposition = 'keep' | 'delete'
+
 /// One row in the unified browse (models + bundles mixed). `count` is
 /// variant_count for models, model_count for bundles.
 export interface BrowseItem {
@@ -716,6 +721,12 @@ export const api = {
     request<void>(`/api/bundles/${id}${members === 'keep' ? '' : `?members=${members}`}`, {
       method: 'DELETE',
     }),
+  /** Move some members out into a bundle of their own; returns the new bundle. */
+  splitBundle: (id: string, name: string, modelIds: string[]) =>
+    request<BundleDetail>(`/api/bundles/${id}/split`, json({ name, model_ids: modelIds })),
+  /** Absorb `from` into `id`; returns the bundle that did the absorbing. */
+  mergeBundle: (id: string, from: string, other: OtherBundleDisposition) =>
+    request<BundleDetail>(`/api/bundles/${id}/merge`, json({ from, other })),
   addModelToBundle: (bundleId: string, modelId: string) =>
     request<void>(`/api/bundles/${bundleId}/models`, json({ model_id: modelId })),
   removeModelFromBundle: (bundleId: string, modelId: string) =>

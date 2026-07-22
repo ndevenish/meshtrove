@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET is_primary = false\n             WHERE bundle_id = $2 AND is_primary\n               AND EXISTS (SELECT 1 FROM images o WHERE o.bundle_id = $1 AND o.is_primary)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b889cc81a5865aed47cc44ae2ef76038b22719517b564b3e2c5e1639df22e4bc"
+}

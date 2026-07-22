@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM bundle_models WHERE bundle_id = $1 AND model_id = ANY($2::uuid[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd91ae022f4915e6a7a4559cfd2ef39069dd3250e6c3ea13c56c1d39ed22f678"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT v.id, v.field_id, v.value,\n                  cf.kind as \"kind: CustomFieldKind\",\n                  cf.applies_to_models, cf.applies_to_bundles\n           FROM custom_field_values v\n           JOIN custom_fields cf ON cf.id = v.field_id\n           WHERE v.import_id = $1\n           ORDER BY cf.position, cf.name",
+  "query": "SELECT v.id, v.field_id, v.value,\n                  cf.kind as \"kind: CustomFieldKind\",\n                  cf.applies_to_models, cf.applies_to_bundles\n           FROM custom_field_values v\n           JOIN custom_fields cf ON cf.id = v.field_id\n           WHERE v.model_id IS NOT DISTINCT FROM $1\n             AND v.bundle_id IS NOT DISTINCT FROM $2\n             AND v.import_id IS NOT DISTINCT FROM $3\n           ORDER BY cf.position, cf.name",
   "describe": {
     "columns": [
       {
@@ -85,6 +85,8 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
+        "Uuid",
         "Uuid"
       ]
     },
@@ -97,5 +99,5 @@
       false
     ]
   },
-  "hash": "17865fe9507c4e1c24efecc92a8a7429bc1ccd21fb99621c57c229c8d25ee18e"
+  "hash": "6b4690a02b14f024632da2c6905d1a023da8c51018a2f50b1c39c292546abc85"
 }

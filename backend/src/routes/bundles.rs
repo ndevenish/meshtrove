@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::custom_fields::{
-    CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
+    self, CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
     persist_bundle_fields,
 };
 use crate::routes::models::{
@@ -45,6 +45,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/bundles/{id}/categories", put(set_categories))
         .route("/api/bundles/{id}/models/tags", post(retag_members))
+        .route("/api/bundles/{id}/split", post(split))
+        .route("/api/bundles/{id}/merge", post(merge))
         .route("/api/bundles/{id}/models", axum::routing::post(add_model))
         .route(
             "/api/bundles/{id}/models/{model_id}",
@@ -629,6 +631,302 @@ async fn remove_model(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// split & merge: a bundle is a grouping, and groupings turn out to be wrong
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, ToSchema)]
+pub struct SplitInput {
+    /// What the new bundle is called.
+    pub name: String,
+    /// The members to move into it. They leave this bundle.
+    pub model_ids: Vec<Uuid>,
+}
+
+/// Lift some of a bundle's members out into a bundle of their own.
+///
+/// One drop is routinely several products — a Patreon month is a dozen sets in
+/// one folder, and a carve that read it as one bundle got the grouping wrong,
+/// not the models. Splitting fixes the grouping without re-importing: the
+/// membership rows change bundle, the models themselves never move.
+///
+/// The new bundle inherits what described the *set* — creator, source, tags,
+/// custom field values — because the half being lifted out was bought under the
+/// same terms as the half staying behind. It does not inherit the description
+/// (that was written about the whole) or the pictures (they are of it). The
+/// categories come across, but only the ones the moved models actually carry.
+async fn split(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<SplitInput>,
+) -> Result<Json<BundleDetail>, ApiError> {
+    let source = sqlx::query!(
+        "SELECT created_by, creator_id, source_url FROM bundles WHERE id = $1",
+        id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    user.require_can_edit(source.created_by)?;
+
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+    if input.model_ids.is_empty() {
+        return Err(ApiError::BadRequest(
+            "pick at least one model to split out".into(),
+        ));
+    }
+    let slug = unique_slug(&state, &name, None, None).await?;
+
+    let mut tx = state.db.begin().await?;
+    // Every id must be a member here: a split moves *this* bundle's models, and
+    // silently ignoring a stray id would report a split that didn't happen.
+    let members: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT model_id FROM bundle_models
+         WHERE bundle_id = $1 AND model_id = ANY($2::uuid[])",
+        id,
+        &input.model_ids,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if members.len() != input.model_ids.len() {
+        return Err(ApiError::BadRequest(
+            "some of those models are not in this bundle".into(),
+        ));
+    }
+
+    // Owned by whoever owns the bundle it came out of, not by whoever pressed
+    // the button: it is the same library item, regrouped — an admin tidying
+    // someone else's shelf doesn't take it over.
+    let new_id: Uuid = sqlx::query_scalar!(
+        "INSERT INTO bundles (name, slug, creator_id, source_url, created_by)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        name,
+        slug,
+        source.creator_id,
+        source.source_url,
+        source.created_by,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query!(
+        "DELETE FROM bundle_models WHERE bundle_id = $1 AND model_id = ANY($2::uuid[])",
+        id,
+        &members,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO bundle_models (bundle_id, model_id)
+         SELECT $1, m FROM unnest($2::uuid[]) AS m",
+        new_id,
+        &members,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query!(
+        "INSERT INTO bundle_tags (bundle_id, tag_id)
+         SELECT $2, tag_id FROM bundle_tags WHERE bundle_id = $1",
+        id,
+        new_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Only the sections that mean something over there: a "Heroes" tab in a
+    // bundle whose heroes all stayed behind is an empty tab.
+    sqlx::query!(
+        "INSERT INTO bundle_categories (bundle_id, tag_id, position)
+         SELECT $2, tag_id, (row_number() OVER (ORDER BY position))::int - 1
+         FROM bundle_categories bc
+         WHERE bc.bundle_id = $1
+           AND EXISTS (SELECT 1 FROM model_tags mt
+                       WHERE mt.tag_id = bc.tag_id AND mt.model_id = ANY($3::uuid[]))",
+        id,
+        new_id,
+        &members,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let values = custom_fields::values_of(&mut tx, ValueOwner::Bundle(id)).await?;
+    custom_fields::copy_values_onto(
+        &mut tx,
+        &values,
+        ValueOwner::Bundle(new_id),
+        |_| true,
+        &user,
+    )
+    .await?;
+
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    tracing::info!(from = %id, to = %new_id, models = members.len(), "split a bundle");
+    fetch_detail(&state, new_id, &user).await.map(Json)
+}
+
+/// What happens to the bundle being merged *in*, once its models belong here too.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OtherBundle {
+    /// It stays exactly as it is — its models simply belong to both bundles now
+    /// (membership is many-to-many). Nothing else moves: its files, pictures and
+    /// description are still its own.
+    #[default]
+    Keep,
+    /// Everything it has comes across — loose files, pictures, provenance, tags,
+    /// categories, and any custom field this bundle hasn't answered for itself —
+    /// and the emptied bundle is deleted.
+    Delete,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct MergeInput {
+    /// The bundle being merged into this one.
+    pub from: Uuid,
+    #[serde(default)]
+    pub other: OtherBundle,
+}
+
+/// Absorb another bundle's members into this one.
+///
+/// The mirror of `split`, and the same premise: the models are right, the
+/// grouping isn't. What the caller has to say is what becomes of the other
+/// bundle — a set that was split off by mistake should disappear into this one,
+/// while a genuine collection whose models *also* belong here should stay
+/// standing.
+async fn merge(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<MergeInput>,
+) -> Result<Json<BundleDetail>, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    if input.from == id {
+        return Err(ApiError::BadRequest(
+            "a bundle can't be merged into itself".into(),
+        ));
+    }
+    // Taking another bundle's models — and, on `delete`, the bundle itself —
+    // needs the right to edit it, not just the right to edit this one.
+    user.require_can_edit(bundle_created_by(&state, input.from).await?)?;
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query!(
+        "INSERT INTO bundle_models (bundle_id, model_id)
+         SELECT $1, model_id FROM bundle_models WHERE bundle_id = $2
+         ON CONFLICT DO NOTHING",
+        id,
+        input.from,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    if input.other == OtherBundle::Delete {
+        // Loose files and provenance are the bundle's own; with the bundle going
+        // they would go with it, so they come here.
+        sqlx::query!(
+            "UPDATE files SET bundle_id = $1 WHERE bundle_id = $2",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "UPDATE source_archives SET bundle_id = $1 WHERE bundle_id = $2",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        // One primary per bundle (a unique index): this bundle already has a
+        // cover, so the incoming one arrives as an ordinary picture.
+        sqlx::query!(
+            "UPDATE images SET is_primary = false
+             WHERE bundle_id = $2 AND is_primary
+               AND EXISTS (SELECT 1 FROM images o WHERE o.bundle_id = $1 AND o.is_primary)",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "UPDATE images SET bundle_id = $1 WHERE bundle_id = $2",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO bundle_tags (bundle_id, tag_id)
+             SELECT $1, tag_id FROM bundle_tags WHERE bundle_id = $2
+             ON CONFLICT DO NOTHING",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        // Its sections join this bundle's, after them and without duplicates.
+        sqlx::query!(
+            "INSERT INTO bundle_categories (bundle_id, tag_id, position)
+             SELECT $1, bc.tag_id,
+                    (SELECT coalesce(max(position) + 1, 0) FROM bundle_categories
+                      WHERE bundle_id = $1)
+                    + (row_number() OVER (ORDER BY bc.position))::int - 1
+             FROM bundle_categories bc
+             WHERE bc.bundle_id = $2
+               AND NOT EXISTS (SELECT 1 FROM bundle_categories mine
+                               WHERE mine.bundle_id = $1 AND mine.tag_id = bc.tag_id)",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        // Someone's like is about the models in it, which are now in here.
+        sqlx::query!(
+            "INSERT INTO user_bundle_marks (user_id, bundle_id, mark)
+             SELECT user_id, $1, mark FROM user_bundle_marks WHERE bundle_id = $2
+             ON CONFLICT DO NOTHING",
+            id,
+            input.from,
+        )
+        .execute(&mut *tx)
+        .await?;
+        // Fill the blanks only: an answer this bundle already gave is the one
+        // that survives a merge into it.
+        let values = custom_fields::values_of(&mut tx, ValueOwner::Bundle(input.from)).await?;
+        let mine = custom_fields::values_of(&mut tx, ValueOwner::Bundle(id)).await?;
+        custom_fields::copy_values_onto(
+            &mut tx,
+            &values,
+            ValueOwner::Bundle(id),
+            |v| !mine.iter().any(|m| m.field_id == v.field_id),
+            &user,
+        )
+        .await?;
+
+        sqlx::query!("DELETE FROM bundles WHERE id = $1", input.from)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    tracing::info!(into = %id, from = %input.from, other = ?input.other, "merged a bundle");
+    fetch_detail(&state, id, &user).await.map(Json)
 }
 
 // ---------------------------------------------------------------------------

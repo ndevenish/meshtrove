@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT model_id FROM bundle_models\n         WHERE bundle_id = $1 AND model_id = ANY($2::uuid[])",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundle_models",
+            "name": "model_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62c7cc6e601dcceae888ecf3063e5da172594662f84ac5f452b86d40bf67953e"
+}

@@ -12,6 +12,7 @@ import {
   IconButton,
   TextField,
   Tooltip,
+  Checkbox,
   Divider,
   Tab,
   Tabs,
@@ -27,12 +28,14 @@ import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate'
 import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
 import DragHandleIcon from '@mui/icons-material/DragHandle'
 import CloseIcon from '@mui/icons-material/Close'
+import CallSplitIcon from '@mui/icons-material/CallSplit'
+import MergeIcon from '@mui/icons-material/Merge'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import DownloadIcon from '@mui/icons-material/Download'
 import SellIcon from '@mui/icons-material/Sell'
-import { api, imageUrl, sourceOrigin } from '../api'
+import { api, imageUrl, sourceOrigin, type BundleDetail } from '../api'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
 import { usePasteImage, useDropImage } from '../imageGestures'
@@ -49,6 +52,8 @@ import ImportErrorDialog from '../components/ImportErrorDialog'
 import BundlePatchDialog from '../components/BundlePatchDialog'
 import BundleRetagDialog from '../components/BundleRetagDialog'
 import BundleDeleteDialog from '../components/BundleDeleteDialog'
+import BundleSplitDialog from '../components/BundleSplitDialog'
+import BundleMergeDialog from '../components/BundleMergeDialog'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -66,6 +71,7 @@ export default function BundlePage() {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [patchOpen, setPatchOpen] = useState(false)
   const [retagOpen, setRetagOpen] = useState(false)
+  const [mergeOpen, setMergeOpen] = useState(false)
   // The zip dropped on the inline importer box, handed to the dialog to preview.
   const [patchFile, setPatchFile] = useState<File | null>(null)
   // A patch was applied and its post-apply reload is owed. We hold it until the
@@ -99,6 +105,12 @@ export default function BundlePage() {
       navigate(`/bundles/${bundle.slug}`, { replace: true })
     }
   }, [bundle, id, navigate, queryClient])
+
+  // One BundlePage serves every bundle, so a navigation between two of them
+  // keeps this component (and its state) mounted. Edit mode is about the bundle
+  // you were editing — landing on a different one still in it, as a split does
+  // when it jumps to the bundle it just made, is a mode nobody asked for.
+  useEffect(() => setEditing(false), [bundle?.id])
 
   const canEditBundle =
     !!bundle &&
@@ -315,6 +327,14 @@ export default function BundlePage() {
                   Delete bundle
                 </Button>
                 <Button
+                  startIcon={<MergeIcon />}
+                  disabled={saving}
+                  onClick={() => setMergeOpen(true)}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Merge in…
+                </Button>
+                <Button
                   startIcon={<SellIcon />}
                   disabled={saving || bundle.models.length === 0}
                   onClick={() => setRetagOpen(true)}
@@ -457,15 +477,7 @@ export default function BundlePage() {
       {/* Members run the full width beneath the gallery/details block, so the
           grid gets every column it can and its category tabs have room. */}
       <Divider sx={{ my: 3 }} />
-      <MembersSection
-        bundleId={bundle.id}
-        bundleCreatorId={bundle.creator_id}
-        models={bundle.models}
-        categories={bundle.categories}
-        canEdit={!!canEdit}
-        editing={editing}
-        onChange={refresh}
-      />
+      <MembersSection bundle={bundle} canEdit={!!canEdit} editing={editing} onChange={refresh} />
 
       <DescriptionHistoryDialog
         open={historyOpen}
@@ -484,6 +496,21 @@ export default function BundlePage() {
           setDeleteOpen(false)
           await queryClient.invalidateQueries()
           navigate('/')
+        }}
+      />
+
+      <BundleMergeDialog
+        open={mergeOpen}
+        onClose={() => setMergeOpen(false)}
+        bundle={bundle}
+        onMerged={async (_merged, from, other) => {
+          setMergeOpen(false)
+          await queryClient.invalidateQueries()
+          setToast(
+            other === 'delete'
+              ? `Merged “${from.name}” in and deleted it`
+              : `Merged “${from.name}” in — it still stands on its own`,
+          )
         }}
       />
 
@@ -560,27 +587,26 @@ function moveItem<T>(arr: T[], from: number, to: number): T[] {
 /// existing model, so a bundle can be curated after the fact rather than only
 /// assembled from the archive it arrived in.
 function MembersSection({
-  bundleId,
-  bundleCreatorId,
-  models,
-  categories,
+  bundle,
   canEdit,
   editing,
   onChange,
 }: {
-  bundleId: string
-  /** The bundle's creator: a member sharing it doesn't repeat it on its card. */
-  bundleCreatorId: string | null
-  models: import('../api').ModelSummary[]
-  /** The bundle's defined categories (import sections), in tab order. */
-  categories: string[]
+  bundle: BundleDetail
   canEdit: boolean
-  /** Edit mode: only here can a model be pulled out of the bundle, or its
-      categories curated. */
+  /** Edit mode: only here can a model be pulled out of the bundle, its
+      categories curated, or a group of members split off. */
   editing: boolean
   onChange: () => void
 }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const bundleId = bundle.id
+  // The bundle's creator: a member sharing it doesn't repeat it on its card.
+  const bundleCreatorId = bundle.creator_id
+  const models = bundle.models
+  // The bundle's defined categories (import sections), in tab order.
+  const categories = bundle.categories
   // Which category tab is active; null = "All Models". Held in the URL rather
   // than component state so opening a member and coming back restores the tab
   // you were on. `replace` keeps re-tabbing on the same page to one history
@@ -596,6 +622,20 @@ function MembersSection({
   }
   const [addValue, setAddValue] = useState('')
   const [savingCats, setSavingCats] = useState(false)
+  // Which members are picked out for a split. Edit-mode only, and dropped on the
+  // way out of it: a stale selection would arm the next split with models
+  // someone chose for a different reason.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [splitOpen, setSplitOpen] = useState(false)
+  // The last card clicked, so shift-click can select the run between them —
+  // picking twelve of twenty knights one checkbox at a time is not picking.
+  const anchor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!editing) {
+      setSelected(new Set())
+      anchor.current = null
+    }
+  }, [editing])
   // Drag-to-reorder the category rows: the row being dragged, and the row the
   // pointer is currently over (for the drop-line cue).
   const [dragIndex, setDragIndex] = useState<number | null>(null)
@@ -669,6 +709,27 @@ function MembersSection({
   }, [tabList, category])
 
   const shown = category ? models.filter((m) => m.tags.includes(category)) : models
+  const picked = models.filter((m) => selected.has(m.id))
+
+  /// Tick one card. Shift extends from the last one ticked, so a run of members
+  /// is two clicks rather than twelve.
+  const toggle = (index: number, extend: boolean) => {
+    const from = extend ? shown.findIndex((m) => m.id === anchor.current) : -1
+    const run =
+      from < 0 ? [shown[index]] : shown.slice(Math.min(from, index), Math.max(from, index) + 1)
+    // A shift-click paints the run with the state the *clicked* card is taking,
+    // so dragging back over a run you just selected clears it.
+    const on = !selected.has(shown[index].id)
+    const next = new Set(selected)
+    for (const model of run) {
+      if (on) next.add(model.id)
+      else next.delete(model.id)
+    }
+    anchor.current = shown[index].id
+    setSelected(next)
+  }
+  const selectAlso = (more: import('../api').ModelSummary[]) =>
+    setSelected(new Set([...selected, ...more.map((m) => m.id)]))
 
   const saveCategories = async (next: string[]) => {
     setSavingCats(true)
@@ -821,6 +882,69 @@ function MembersSection({
         </Paper>
       )}
 
+      {/* Group-select and split. A carve that read one Patreon month as a single
+          bundle got the grouping wrong, not the models — so the fix is to pick
+          the ones that belong together and lift them out, not to re-import. */}
+      {canEdit && editing && models.length > 0 && (
+        <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}
+          >
+            <Typography variant="subtitle2" sx={{ mr: 0.5 }}>
+              {selected.size
+                ? `${selected.size} model${selected.size === 1 ? '' : 's'} selected`
+                : 'Select models to split out'}
+            </Typography>
+            <Button size="small" onClick={() => selectAlso(shown)}>
+              All
+            </Button>
+            <Button size="small" disabled={!selected.size} onClick={() => setSelected(new Set())}>
+              None
+            </Button>
+            {/* One click per section: the categories are already how this bundle
+                thinks about its members. */}
+            {tabList.map((tag) => (
+              <Chip
+                key={tag}
+                size="small"
+                variant="outlined"
+                clickable
+                label={`${tag} (${tagCounts.get(tag) ?? 0})`}
+                onClick={() => selectAlso(models.filter((m) => m.tags.includes(tag)))}
+              />
+            ))}
+            <Box sx={{ flexGrow: 1 }} />
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<CallSplitIcon />}
+              disabled={!selected.size}
+              onClick={() => setSplitOpen(true)}
+            >
+              Split into a new bundle
+            </Button>
+          </Stack>
+          <Typography variant="caption" color="text.secondary">
+            Shift-click a card to select the run from the last one.
+          </Typography>
+        </Paper>
+      )}
+
+      <BundleSplitDialog
+        open={splitOpen}
+        onClose={() => setSplitOpen(false)}
+        bundle={bundle}
+        models={picked}
+        onSplit={async (created) => {
+          setSplitOpen(false)
+          setSelected(new Set())
+          await queryClient.invalidateQueries()
+          navigate(`/bundles/${created.slug}`)
+        }}
+      />
+
       {models.length === 0 ? (
         <Typography color="text.secondary" variant="body2">
           No models in this bundle yet
@@ -834,9 +958,37 @@ function MembersSection({
             gap: 2,
           }}
         >
-          {shown.map((model) => (
+          {shown.map((model, index) => (
             <Box key={model.id} sx={{ position: 'relative' }}>
               <ModelCard model={model} hideCreator={model.creator_id === bundleCreatorId} />
+              {canEdit && editing && (
+                <Checkbox
+                  size="small"
+                  checked={selected.has(model.id)}
+                  // onClick, not onChange: the shift key is what makes this a
+                  // range, and only a mouse event carries it. Deliberately no
+                  // preventDefault — cancelling a checkbox's own activation
+                  // leaves React's value tracker believing the DOM already
+                  // holds the new state, and the tick then never renders. The
+                  // clicked box always lands on the state the browser just
+                  // flipped it to, so letting the flip stand is also correct.
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    toggle(index, e.shiftKey)
+                  }}
+                  sx={{
+                    position: 'absolute',
+                    top: 4,
+                    left: 4,
+                    // Above the card's own click targets (ModelCard lifts its
+                    // action area to 2), or the card swallows the tick and
+                    // opens the model instead.
+                    zIndex: 3,
+                    bgcolor: 'background.paper',
+                    p: 0.25,
+                  }}
+                />
+              )}
               {canEdit && editing && (
                 <Tooltip title="Remove from bundle">
                   <IconButton
@@ -846,7 +998,9 @@ function MembersSection({
                       top: 4,
                       right: 4,
                       bgcolor: 'background.paper',
-                      zIndex: 1,
+                      // Same reason as the tick opposite: below 3 the card's
+                      // action area covers this and the click opens the model.
+                      zIndex: 3,
                     }}
                     onClick={async () => {
                       await api.removeModelFromBundle(bundleId, model.id)

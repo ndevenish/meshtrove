@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bundle_categories (bundle_id, tag_id, position)\n         SELECT $2, tag_id, (row_number() OVER (ORDER BY position))::int - 1\n         FROM bundle_categories bc\n         WHERE bc.bundle_id = $1\n           AND EXISTS (SELECT 1 FROM model_tags mt\n                       WHERE mt.tag_id = bc.tag_id AND mt.model_id = ANY($3::uuid[]))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e47cf6ccac5c3c061bf0c533721c2c371eea7ee1747a8c3a98ab2c0b0c9daf59"
+}

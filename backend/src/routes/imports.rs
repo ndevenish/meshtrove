@@ -322,8 +322,8 @@ async fn split(
     // the invoice PDF, the creator's terms. The source keeps its values (it is
     // still an import to be committed) and the new one starts with a copy —
     // a file-kind value's blob is shared, so the copy is a row, not bytes.
-    let staged = custom_fields::staged_values(&mut tx, id).await?;
-    custom_fields::copy_staged_onto(
+    let staged = custom_fields::values_of(&mut tx, custom_fields::ValueOwner::Import(id)).await?;
+    custom_fields::copy_values_onto(
         &mut tx,
         &staged,
         custom_fields::ValueOwner::Import(new_id),
@@ -560,7 +560,7 @@ async fn apply_custom_fields(
     model_ids: &[Uuid],
     user: &User,
 ) -> Result<(), ApiError> {
-    let staged = custom_fields::staged_values(tx, import_id).await?;
+    let staged = custom_fields::values_of(tx, custom_fields::ValueOwner::Import(import_id)).await?;
     if meta.custom_fields.is_empty() && staged.is_empty() {
         return Ok(());
     }
@@ -570,7 +570,7 @@ async fn apply_custom_fields(
                 custom_fields::resolve_values(tx, &meta.custom_fields, |f| f.applies_to_bundles)
                     .await?;
             custom_fields::write_bundle_values(tx, bundle_id, &on_bundle, user).await?;
-            custom_fields::copy_staged_onto(
+            custom_fields::copy_values_onto(
                 tx,
                 &staged,
                 custom_fields::ValueOwner::Bundle(bundle_id),
@@ -590,7 +590,7 @@ async fn apply_custom_fields(
             .await?;
             custom_fields::write_model_values_bulk(tx, model_ids, &on_members, user).await?;
             for &model_id in model_ids {
-                custom_fields::copy_staged_onto(
+                custom_fields::copy_values_onto(
                     tx,
                     &staged,
                     custom_fields::ValueOwner::Model(model_id),
@@ -606,7 +606,7 @@ async fn apply_custom_fields(
                     .await?;
             custom_fields::write_model_values_bulk(tx, model_ids, &on_models, user).await?;
             for &model_id in model_ids {
-                custom_fields::copy_staged_onto(
+                custom_fields::copy_values_onto(
                     tx,
                     &staged,
                     custom_fields::ValueOwner::Model(model_id),

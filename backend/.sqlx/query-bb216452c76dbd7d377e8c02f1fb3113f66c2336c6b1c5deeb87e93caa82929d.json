@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE files SET bundle_id = $1 WHERE bundle_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bb216452c76dbd7d377e8c02f1fb3113f66c2336c6b1c5deeb87e93caa82929d"
+}
