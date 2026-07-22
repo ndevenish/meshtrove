@@ -20,7 +20,20 @@ use crate::state::AppState;
 struct ImportPayload {
     /// The files.id of the uploaded archive (kind='archive')
     archive_file_id: Uuid,
+    /// How many archives deep this one was found. 0 for one that was dropped or
+    /// uploaded; each nested unpack queues its children at one more (see
+    /// [`queue_nested`]). Absent on jobs queued before nesting existed.
+    #[serde(default)]
+    depth: u32,
 }
+
+/// How far down a nest of archives we follow. A pack of packs is two or three
+/// deep in practice, so this is slack rather than a limit anyone meets — it is
+/// here because a zip *can* contain itself (a zip quine is a real thing), and
+/// following that forever would fill the store with a job queue that never
+/// empties. The sha guard in [`queue_nested`] catches the exact-copy case; this
+/// catches anything cleverer.
+const MAX_UNPACK_DEPTH: u32 = 8;
 
 pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     let payload: ImportPayload =
@@ -111,6 +124,11 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
     }
 
     let mut model_file_ids = Vec::new();
+    // Archives found inside this one, queued once the whole of this unpack is
+    // staged — never as we go. Where an entry lands is judged from what else
+    // shares its folder at the moment its job runs (see `unpack_dest`), so a
+    // child released early would look around a folder still filling up.
+    let mut nested = Vec::new();
     for (logical, tmp_file) in &entries {
         let file = tokio::fs::File::open(tmp_file).await?;
         let stream = tokio_util::io::ReaderStream::new(file).map_err_into_anyhow();
@@ -164,9 +182,14 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         {
             model_file_ids.push(file_id);
         }
+        if matches!(kind, crate::routes::files::FileKind::Archive) {
+            nested.push((file_id, filename.to_string(), blob.sha256.clone()));
+        }
     }
 
     let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+    let nested = queue_nested(state, payload.depth, &archive.blob_sha256, nested).await?;
 
     // Queue a preview render for the owner's first STL if it has no image yet.
     // The renderer stamps the image onto whichever owner the source file
@@ -204,9 +227,86 @@ pub async fn import_archive(state: &AppState, payload: &Value) -> Result<()> {
         bundle = ?bundle_id,
         files = entries.len(),
         renders_queued = i32::from(!model_file_ids.is_empty()),
+        nested,
+        depth = payload.depth,
         "archive imported"
     );
     Ok(())
+}
+
+/// Unpack what was inside the unpack: queue a job for every archive this one
+/// just staged, and say how many.
+///
+/// A pack of packs is how model archives actually arrive — a `Tribe.zip` of
+/// twelve `Hero.zip`s, a `.rar` set holding one zip per unit — and stopping at
+/// the outer layer stages a dozen files that are each still an archive. Nothing
+/// downstream opens them: the carve reads folder names, the renderer wants an
+/// STL, and committing would move an unopened zip onto a model. So an extracted
+/// archive is treated exactly like one that was dropped, and unpacks in its
+/// turn. Depth is carried on the payload so the nest terminates
+/// ([`MAX_UNPACK_DEPTH`]).
+///
+/// Unlike the ingest hook (`routes::files::on_archive_ingested`) this doesn't
+/// peek for a MeshTrove export. An export is restored as a whole import, which
+/// is a thing only a *drop* can be; one found inside another archive is just an
+/// archive, and unpacks like one.
+///
+/// `found` is `(file id, filename, blob)` for each archive staged by the caller.
+async fn queue_nested(
+    state: &AppState,
+    depth: u32,
+    parent_sha256: &str,
+    found: Vec<(Uuid, String, String)>,
+) -> Result<usize> {
+    let wanted = nested_unpacks(depth, parent_sha256, &found);
+    for file_id in &wanted {
+        jobs::enqueue(
+            &state.db,
+            "import_archive",
+            json!({ "archive_file_id": file_id, "depth": depth + 1 }),
+        )
+        .await?;
+    }
+    Ok(wanted.len())
+}
+
+/// The decision half of [`queue_nested`]: which of the archives just staged get
+/// an unpack job of their own.
+fn nested_unpacks(depth: u32, parent_sha256: &str, found: &[(Uuid, String, String)]) -> Vec<Uuid> {
+    if found.is_empty() {
+        return Vec::new();
+    }
+    if depth >= MAX_UNPACK_DEPTH {
+        tracing::warn!(
+            depth,
+            archives = found.len(),
+            "stopping at the nesting limit — archives inside this one are left staged as they are"
+        );
+        return Vec::new();
+    }
+    found
+        .iter()
+        .filter(|(_, filename, sha256)| {
+            // A set unpacks from volume 1 with the rest opened alongside it, so
+            // the later volumes get no job of their own — same rule as the
+            // ingest hook.
+            if !archive::is_first_volume(filename) {
+                return false;
+            }
+            // An archive that contains a copy of itself: unpacking it again gets
+            // the same blob back, forever. Cheap to spot, since the blob is what
+            // we just hashed.
+            if sha256 == parent_sha256 {
+                tracing::warn!(
+                    filename,
+                    "an archive containing itself — not unpacking it again"
+                );
+                return false;
+            }
+            true
+        })
+        .map(|(file_id, _, _)| *file_id)
+        .collect()
 }
 
 /// Queue the unpacks that never happened, once, at startup.
@@ -705,8 +805,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{BSDTAR, dest_for, extract};
+    use super::{BSDTAR, MAX_UNPACK_DEPTH, dest_for, extract, nested_unpacks};
     use crate::services::archive::Format;
+    use uuid::Uuid;
 
     /// Build `name` from a fixed little tree via bsdtar, extract it back
     /// through [`extract`], and return the logical paths it recovered.
@@ -902,5 +1003,50 @@ mod tests {
         // Not `dragon.tar`: the suffix is one extension in two pieces.
         assert_eq!(dest_for("", "dragon.tar.gz", true), "dragon");
         assert_eq!(dest_for("Pack", "supported.rar", true), "Pack/supported");
+    }
+
+    /// `(id, filename, blob)` as the unpack loop collects them. The ids are
+    /// positional — `staged(…)[1].0` is the second entry's — so a test can say
+    /// which entry it expected back.
+    fn staged(names: &[(&str, &str)]) -> Vec<(Uuid, String, String)> {
+        names
+            .iter()
+            .map(|(name, sha)| (Uuid::new_v4(), (*name).to_string(), (*sha).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_pack_of_packs_queues_every_archive_inside_it() {
+        let found = staged(&[("hero.zip", "aa"), ("villain.tar.gz", "bb")]);
+        assert_eq!(
+            nested_unpacks(0, "parent", &found),
+            vec![found[0].0, found[1].0],
+        );
+    }
+
+    #[test]
+    fn a_nested_volume_set_is_queued_once_from_volume_one() {
+        let found = staged(&[
+            ("dragon.part1.rar", "aa"),
+            ("dragon.part2.rar", "bb"),
+            ("dragon.part3.rar", "cc"),
+        ]);
+        assert_eq!(nested_unpacks(0, "parent", &found), vec![found[0].0]);
+    }
+
+    #[test]
+    fn an_archive_holding_a_copy_of_itself_is_not_followed() {
+        let found = staged(&[("quine.zip", "same"), ("hero.zip", "aa")]);
+        assert_eq!(nested_unpacks(0, "same", &found), vec![found[1].0]);
+    }
+
+    #[test]
+    fn the_nest_stops_at_the_depth_limit() {
+        let found = staged(&[("hero.zip", "aa")]);
+        assert_eq!(
+            nested_unpacks(MAX_UNPACK_DEPTH - 1, "parent", &found).len(),
+            1,
+        );
+        assert!(nested_unpacks(MAX_UNPACK_DEPTH, "parent", &found).is_empty());
     }
 }
