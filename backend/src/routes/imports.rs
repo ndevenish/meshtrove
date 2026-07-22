@@ -76,10 +76,21 @@ async fn list(
         r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
                   (EXISTS (
-                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
+                    -- Driven from jobs, not from files. Only a handful of jobs
+                    -- are ever queued or running, while an import can hold tens
+                    -- of thousands of files; joined the other way round the two
+                    -- have no predicate relating them but the payload match, so
+                    -- the pair is a cartesian product and concluding "nothing is
+                    -- unpacking" means walking the whole of it. That is what put
+                    -- this query — polled by the Importing list every 3s — into
+                    -- seconds on a large import. The payload is serialised from
+                    -- a Uuid (see importer.rs), so the cast is total, and it
+                    -- puts the lookup on the files primary key.
+                    SELECT 1 FROM jobs j
+                    JOIN files f ON f.id = (j.payload->>'archive_file_id')::uuid
                     WHERE j.kind = 'import_archive'
                       AND j.status IN ('queued', 'running')
-                      AND j.payload->>'archive_file_id' = f.id::text
+                      AND f.import_id = i.id
                   ) OR EXISTS (
                     SELECT 1 FROM jobs j
                     WHERE j.kind = 'dropbox_import'
@@ -112,10 +123,21 @@ pub async fn fetch_import(state: &AppState, id: Uuid) -> Result<ImportSummary, A
         r#"SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,
                   (SELECT count(*) FROM files f WHERE f.import_id = i.id) as "file_count!",
                   (EXISTS (
-                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id
+                    -- Driven from jobs, not from files. Only a handful of jobs
+                    -- are ever queued or running, while an import can hold tens
+                    -- of thousands of files; joined the other way round the two
+                    -- have no predicate relating them but the payload match, so
+                    -- the pair is a cartesian product and concluding "nothing is
+                    -- unpacking" means walking the whole of it. That is what put
+                    -- this query — polled by the Importing list every 3s — into
+                    -- seconds on a large import. The payload is serialised from
+                    -- a Uuid (see importer.rs), so the cast is total, and it
+                    -- puts the lookup on the files primary key.
+                    SELECT 1 FROM jobs j
+                    JOIN files f ON f.id = (j.payload->>'archive_file_id')::uuid
                     WHERE j.kind = 'import_archive'
                       AND j.status IN ('queued', 'running')
-                      AND j.payload->>'archive_file_id' = f.id::text
+                      AND f.import_id = i.id
                   ) OR EXISTS (
                     SELECT 1 FROM jobs j
                     WHERE j.kind = 'dropbox_import'

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,\n                  (SELECT count(*) FROM files f WHERE f.import_id = i.id) as \"file_count!\",\n                  (EXISTS (\n                    SELECT 1 FROM jobs j JOIN files f ON f.import_id = i.id\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'archive_file_id' = f.id::text\n                  ) OR EXISTS (\n                    SELECT 1 FROM jobs j\n                    WHERE j.kind = 'dropbox_import'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'import_id' = i.id::text\n                  )) as \"unpacking!\"\n           FROM imports i WHERE i.id = $1",
+  "query": "SELECT i.id, i.name, i.created_by, i.created_at, i.is_export, i.partial,\n                  (SELECT count(*) FROM files f WHERE f.import_id = i.id) as \"file_count!\",\n                  (EXISTS (\n                    -- Driven from jobs, not from files. Only a handful of jobs\n                    -- are ever queued or running, while an import can hold tens\n                    -- of thousands of files; joined the other way round the two\n                    -- have no predicate relating them but the payload match, so\n                    -- the pair is a cartesian product and concluding \"nothing is\n                    -- unpacking\" means walking the whole of it. That is what put\n                    -- this query — polled by the Importing list every 3s — into\n                    -- seconds on a large import. The payload is serialised from\n                    -- a Uuid (see importer.rs), so the cast is total, and it\n                    -- puts the lookup on the files primary key.\n                    SELECT 1 FROM jobs j\n                    JOIN files f ON f.id = (j.payload->>'archive_file_id')::uuid\n                    WHERE j.kind = 'import_archive'\n                      AND j.status IN ('queued', 'running')\n                      AND f.import_id = i.id\n                  ) OR EXISTS (\n                    SELECT 1 FROM jobs j\n                    WHERE j.kind = 'dropbox_import'\n                      AND j.status IN ('queued', 'running')\n                      AND j.payload->>'import_id' = i.id::text\n                  )) as \"unpacking!\"\n           FROM imports i WHERE i.id = $1",
   "describe": {
     "columns": [
       {
@@ -98,5 +98,5 @@
       null
     ]
   },
-  "hash": "1cdcb0b726b18a22d6acdc3d395ec4a283772fbce1422998b98008c99ff029af"
+  "hash": "250219d01c11a533f7bd58a69f4c1c80cda211e191821b901f4ee4e63aa60fa1"
 }
