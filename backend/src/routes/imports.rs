@@ -318,6 +318,19 @@ async fn split(
             "nothing is staged under {folder}"
         )));
     }
+    // What was typed about the drop is true of both halves of it: the licence,
+    // the invoice PDF, the creator's terms. The source keeps its values (it is
+    // still an import to be committed) and the new one starts with a copy —
+    // a file-kind value's blob is shared, so the copy is a row, not bytes.
+    let staged = custom_fields::staged_values(&mut tx, id).await?;
+    custom_fields::copy_staged_onto(
+        &mut tx,
+        &staged,
+        custom_fields::ValueOwner::Import(new_id),
+        |_| true,
+        &user,
+    )
+    .await?;
     tx.commit().await?;
 
     tracing::info!(
@@ -526,7 +539,12 @@ pub struct ImportMeta {
     pub custom_fields: Vec<CustomFieldValueInput>,
 }
 
-/// Route the import page's custom field values by each field's own settings.
+/// Route the import's custom field values by each field's own settings.
+///
+/// Two sources, one routing rule. The scalars arrive in the commit body, typed
+/// on the page moments ago; a file field's bytes could not wait for a
+/// destination and were staged on the import when they were dropped, so they
+/// are read back off it here. Both then go the same way.
 ///
 /// A model target is simple: everything that applies to models lands on it. A
 /// bundle target has two halves — a field that applies to bundles is the box
@@ -536,12 +554,14 @@ pub struct ImportMeta {
 /// same way the typed tags are.
 async fn apply_custom_fields(
     tx: &mut sqlx::PgConnection,
+    import_id: Uuid,
     meta: &ImportMeta,
     bundle_id: Option<Uuid>,
     model_ids: &[Uuid],
     user: &User,
 ) -> Result<(), ApiError> {
-    if meta.custom_fields.is_empty() {
+    let staged = custom_fields::staged_values(tx, import_id).await?;
+    if meta.custom_fields.is_empty() && staged.is_empty() {
         return Ok(());
     }
     match bundle_id {
@@ -550,6 +570,16 @@ async fn apply_custom_fields(
                 custom_fields::resolve_values(tx, &meta.custom_fields, |f| f.applies_to_bundles)
                     .await?;
             custom_fields::write_bundle_values(tx, bundle_id, &on_bundle, user).await?;
+            custom_fields::copy_staged_onto(
+                tx,
+                &staged,
+                custom_fields::ValueOwner::Bundle(bundle_id),
+                |v| v.applies_to_bundles,
+                user,
+            )
+            .await?;
+            // After both, so a staged file reaches the members the same way a
+            // typed value does.
             custom_fields::persist_bundle_fields(tx, bundle_id, user).await?;
             // Only the fields the bundle couldn't hold: a field that lives at
             // both ends already reached the members through persistence (or was
@@ -559,12 +589,32 @@ async fn apply_custom_fields(
             })
             .await?;
             custom_fields::write_model_values_bulk(tx, model_ids, &on_members, user).await?;
+            for &model_id in model_ids {
+                custom_fields::copy_staged_onto(
+                    tx,
+                    &staged,
+                    custom_fields::ValueOwner::Model(model_id),
+                    |v| v.applies_to_models && !v.applies_to_bundles,
+                    user,
+                )
+                .await?;
+            }
         }
         None => {
             let on_models =
                 custom_fields::resolve_values(tx, &meta.custom_fields, |f| f.applies_to_models)
                     .await?;
             custom_fields::write_model_values_bulk(tx, model_ids, &on_models, user).await?;
+            for &model_id in model_ids {
+                custom_fields::copy_staged_onto(
+                    tx,
+                    &staged,
+                    custom_fields::ValueOwner::Model(model_id),
+                    |v| v.applies_to_models,
+                    user,
+                )
+                .await?;
+            }
         }
     }
     Ok(())
@@ -790,7 +840,7 @@ async fn commit(
             .fetch_one(&mut *tx)
             .await?;
             apply_meta_bulk(&mut tx, &[model_id], meta, user.id, &tags.model, true).await?;
-            apply_custom_fields(&mut tx, meta, None, &[model_id], &user).await?;
+            apply_custom_fields(&mut tx, id, meta, None, &[model_id], &user).await?;
             if let Some(plan) = &carve
                 && let Some(planned) = plan.models.first()
             {
@@ -860,7 +910,7 @@ async fn commit(
                 members.extend(created.iter().copied());
                 render_models.extend(created);
             }
-            apply_custom_fields(&mut tx, meta, Some(bundle_id), &members, &user).await?;
+            apply_custom_fields(&mut tx, id, meta, Some(bundle_id), &members, &user).await?;
             apply_bundle_description(&mut tx, bundle_id, meta, user.id).await?;
             claim_files(&mut tx, id, None, Some(bundle_id), claimed.as_deref()).await?;
             CommitResult {
@@ -902,7 +952,7 @@ async fn commit(
                 members.extend(created.iter().copied());
                 render_models.extend(created);
             }
-            apply_custom_fields(&mut tx, meta, Some(*bundle_id), &members, &user).await?;
+            apply_custom_fields(&mut tx, id, meta, Some(*bundle_id), &members, &user).await?;
             apply_bundle_description(&mut tx, *bundle_id, meta, user.id).await?;
             claim_files(&mut tx, id, None, Some(*bundle_id), claimed.as_deref()).await?;
             sqlx::query!(

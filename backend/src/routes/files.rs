@@ -190,10 +190,11 @@ async fn check_upload_permission(
         // Editing a custom field's file is editing the thing it hangs off.
         Owner::CustomFieldValue(id) => {
             sqlx::query_scalar!(
-                r#"SELECT coalesce(m.created_by, b.created_by) as "created_by!"
+                r#"SELECT coalesce(m.created_by, b.created_by, i.created_by) as "created_by!"
                    FROM custom_field_values v
                    LEFT JOIN models m ON m.id = v.model_id
                    LEFT JOIN bundles b ON b.id = v.bundle_id
+                   LEFT JOIN imports i ON i.id = v.import_id
                    WHERE v.id = $1"#,
                 id
             )
@@ -1049,7 +1050,7 @@ async fn download_file(
         // table statistics — without these the build breaks on some databases
         // and not others.
         r#"SELECT f.blob_sha256 as "blob_sha256!", f.filename as "filename!",
-                  f.mime, f.import_id,
+                  f.mime, f.import_id, v.import_id as "staged_import_id?",
                   cf.visibility as "visibility?: CustomFieldVisibility"
            FROM files f
            LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id
@@ -1063,8 +1064,10 @@ async fn download_file(
 
     // Downloads of committed model/bundle files are public (browse is open), but a
     // file still owned by an import is unreviewed staging content — gate it to
-    // editor+ so a signed-out visitor can't pull staged bytes by file id.
-    if row.import_id.is_some() {
+    // editor+ so a signed-out visitor can't pull staged bytes by file id. A
+    // file-kind custom field value staged on an import is the same thing at one
+    // remove: the import owns the value, the value owns the file.
+    if row.import_id.is_some() || row.staged_import_id.is_some() {
         user.require_editor()?;
     }
     // A file-kind custom field value is only as visible as its field: an

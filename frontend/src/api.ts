@@ -73,8 +73,9 @@ export interface CustomFieldValueInput {
   value: string | boolean | number | null
 }
 
-/** Which side of the model/bundle divide a custom field value hangs off. */
-export type CustomFieldOwner = 'models' | 'bundles'
+/** What a custom field value hangs off. An import stages one until the commit
+    knows whether it is a model's or a bundle's. */
+export type CustomFieldOwner = 'models' | 'bundles' | 'imports'
 
 export interface Creator {
   id: string
@@ -664,6 +665,11 @@ export const api = {
     request<CustomFieldDef>(`/api/custom-fields/${id}`, { ...json(body), method: 'PUT' }),
   deleteCustomField: (id: string) =>
     request<void>(`/api/custom-fields/${id}`, { method: 'DELETE' }),
+
+  /** What an import is holding: every field either side of a commit could
+      want, with whatever has been staged against it. */
+  importCustomFields: (id: string) =>
+    request<CustomFieldValue[]>(`/api/imports/${id}/custom-fields`),
 
   /** Replace a file-kind value's file. The form carries one `file` part. */
   uploadCustomFieldFile: (owner: CustomFieldOwner, id: string, fieldId: string, form: FormData) =>

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT f.blob_sha256 as \"blob_sha256!\", f.filename as \"filename!\",\n                  f.mime, f.import_id,\n                  cf.visibility as \"visibility?: CustomFieldVisibility\"\n           FROM files f\n           LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id\n           LEFT JOIN custom_fields cf ON cf.id = v.field_id\n           WHERE f.id = $1",
+  "query": "SELECT f.blob_sha256 as \"blob_sha256!\", f.filename as \"filename!\",\n                  f.mime, f.import_id, v.import_id as \"staged_import_id?\",\n                  cf.visibility as \"visibility?: CustomFieldVisibility\"\n           FROM files f\n           LEFT JOIN custom_field_values v ON v.id = f.custom_field_value_id\n           LEFT JOIN custom_fields cf ON cf.id = v.field_id\n           WHERE f.id = $1",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "staged_import_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "custom_field_values",
+            "name": "import_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "visibility?: CustomFieldVisibility",
         "type_info": {
           "Custom": {
@@ -77,12 +88,13 @@
       ]
     },
     "nullable": [
-      true,
+      false,
+      false,
       true,
       true,
       true,
       true
     ]
   },
-  "hash": "2d0ddde6006acbb5a218a359e6ad8c2c6e7316482b9608e86280f207b83aa0ae"
+  "hash": "a4e954489f2701089b5f17cdb3b9b59cdd28e9235e72ab3eb17dc79422d26006"
 }

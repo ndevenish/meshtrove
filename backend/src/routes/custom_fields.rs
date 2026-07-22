@@ -41,6 +41,13 @@ pub fn router() -> Router<AppState> {
             "/api/bundles/{id}/custom-fields/{field_id}/file",
             post(upload_bundle_file),
         )
+        // An import stages a file field before the thing it describes exists,
+        // so it lists its own values as well as taking them.
+        .route("/api/imports/{id}/custom-fields", get(list_import_values))
+        .route(
+            "/api/imports/{id}/custom-fields/{field_id}/file",
+            post(upload_import_file),
+        )
         .route(
             "/api/models/{id}/custom-fields/{field_id}",
             axum::routing::delete(clear_model_value),
@@ -48,6 +55,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/bundles/{id}/custom-fields/{field_id}",
             axum::routing::delete(clear_bundle_value),
+        )
+        .route(
+            "/api/imports/{id}/custom-fields/{field_id}",
+            axum::routing::delete(clear_import_value),
         )
         // The store streams to disk; a reference document has no business being
         // capped at axum's default 2MB either.
@@ -360,20 +371,24 @@ async fn remove(
 // values
 // ---------------------------------------------------------------------------
 
-/// Which side of the model/bundle divide a value hangs off. A value has exactly
-/// one owner, the same way a file does.
+/// What a value hangs off. Exactly one, the same way a file has exactly one
+/// owner — and for the same reason the third one exists: an import stages what
+/// was typed about a drop until the commit knows what to put it on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueOwner {
     Model(Uuid),
     Bundle(Uuid),
+    Import(Uuid),
 }
 
 impl ValueOwner {
-    /// The pair of nullable owner columns, in `(model_id, bundle_id)` order.
-    fn ids(self) -> (Option<Uuid>, Option<Uuid>) {
+    /// The three nullable owner columns, in `(model_id, bundle_id, import_id)`
+    /// order.
+    fn ids(self) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
         match self {
-            ValueOwner::Model(id) => (Some(id), None),
-            ValueOwner::Bundle(id) => (None, Some(id)),
+            ValueOwner::Model(id) => (Some(id), None, None),
+            ValueOwner::Bundle(id) => (None, Some(id), None),
+            ValueOwner::Import(id) => (None, None, Some(id)),
         }
     }
 
@@ -381,6 +396,16 @@ impl ValueOwner {
         match self {
             ValueOwner::Model(id) => crate::routes::models::model_created_by(state, id).await,
             ValueOwner::Bundle(id) => crate::routes::bundles::bundle_created_by(state, id).await,
+            ValueOwner::Import(id) => crate::routes::imports::import_created_by(state, id).await,
+        }
+    }
+
+    /// What this owner is, for a message about a field that doesn't apply to it.
+    fn noun(self) -> &'static str {
+        match self {
+            ValueOwner::Model(_) => "models",
+            ValueOwner::Bundle(_) => "bundles",
+            ValueOwner::Import(_) => "imports",
         }
     }
 }
@@ -423,10 +448,10 @@ pub async fn fetch_values(
     owner: ValueOwner,
     user: &User,
 ) -> Result<Vec<CustomFieldValueDetail>, ApiError> {
-    let (model_id, bundle_id) = owner.ids();
-    // `IS NOT DISTINCT FROM` on both owner columns picks exactly this owner's
-    // value with one query for either side: the null column matches the null
-    // stored in the row that isn't the owner.
+    let (model_id, bundle_id, import_id) = owner.ids();
+    // `IS NOT DISTINCT FROM` on every owner column picks exactly this owner's
+    // value with one query for any side: the null columns match the nulls
+    // stored in the row for the owners it isn't.
     let rows = sqlx::query!(
         // Every `cf.` column is annotated non-null: they are NOT NULL on the
         // preserved side of the LEFT JOINs, but sqlx reads nullability off the
@@ -447,12 +472,21 @@ pub async fn fetch_values(
            LEFT JOIN custom_field_values v ON v.field_id = cf.id
                 AND v.model_id IS NOT DISTINCT FROM $1
                 AND v.bundle_id IS NOT DISTINCT FROM $2
+                AND v.import_id IS NOT DISTINCT FROM $3
            LEFT JOIN files f ON f.custom_field_value_id = v.id
            LEFT JOIN blobs b ON b.sha256 = f.blob_sha256
-           WHERE CASE WHEN $1::uuid IS NULL THEN cf.applies_to_bundles ELSE cf.applies_to_models END
+           -- An import may become either a model or a bundle, so it offers
+           -- both sides' fields; the commit routes each value by its own
+           -- definition once the destination is known.
+           WHERE CASE
+                   WHEN $3::uuid IS NOT NULL THEN true
+                   WHEN $1::uuid IS NULL THEN cf.applies_to_bundles
+                   ELSE cf.applies_to_models
+                 END
            ORDER BY cf.position, cf.name"#,
         model_id,
         bundle_id,
+        import_id,
     )
     .fetch_all(&state.db)
     .await?;
@@ -556,6 +590,16 @@ pub(crate) fn validate_value(
     }
 }
 
+/// Whether a field can be stored on this kind of owner. An import takes
+/// anything either side takes: it doesn't know yet which it will become.
+fn applies_to(field: &CustomField, owner: ValueOwner) -> bool {
+    match owner {
+        ValueOwner::Model(_) => field.applies_to_models,
+        ValueOwner::Bundle(_) => field.applies_to_bundles,
+        ValueOwner::Import(_) => field.applies_to_models || field.applies_to_bundles,
+    }
+}
+
 /// Load one definition, insisting it exists and applies to this kind of owner.
 async fn field_for(
     db: &mut sqlx::PgConnection,
@@ -576,18 +620,11 @@ async fn field_for(
     .await?
     .ok_or(ApiError::NotFound)?;
 
-    let applies = match owner {
-        ValueOwner::Model(_) => field.applies_to_models,
-        ValueOwner::Bundle(_) => field.applies_to_bundles,
-    };
-    if !applies {
+    if !applies_to(&field, owner) {
         return Err(ApiError::BadRequest(format!(
             "{} doesn't apply to {}",
             field.name,
-            match owner {
-                ValueOwner::Model(_) => "models",
-                ValueOwner::Bundle(_) => "bundles",
-            }
+            owner.noun()
         )));
     }
     Ok(field)
@@ -602,7 +639,7 @@ pub(crate) async fn write_value(
     value: Option<&serde_json::Value>,
     editor: Option<Uuid>,
 ) -> Result<Option<Uuid>, ApiError> {
-    let (model_id, bundle_id) = owner.ids();
+    let (model_id, bundle_id, import_id) = owner.ids();
     let Some(value) = value else {
         // Clearing takes the row with it, and the row takes any file-kind blob's
         // `files` row with it in turn (ON DELETE CASCADE).
@@ -610,10 +647,12 @@ pub(crate) async fn write_value(
             "DELETE FROM custom_field_values
              WHERE field_id = $1
                AND model_id IS NOT DISTINCT FROM $2
-               AND bundle_id IS NOT DISTINCT FROM $3",
+               AND bundle_id IS NOT DISTINCT FROM $3
+               AND import_id IS NOT DISTINCT FROM $4",
             field_id,
             model_id,
             bundle_id,
+            import_id,
         )
         .execute(&mut *db)
         .await?;
@@ -652,8 +691,62 @@ pub(crate) async fn write_value(
             .fetch_one(&mut *db)
             .await?
         }
+        ValueOwner::Import(import_id) => {
+            sqlx::query_scalar!(
+                "INSERT INTO custom_field_values (field_id, import_id, value, updated_by)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (field_id, import_id) WHERE import_id IS NOT NULL
+                 DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by,
+                               updated_at = now()
+                 RETURNING id",
+                field_id,
+                import_id,
+                value,
+                editor,
+            )
+            .fetch_one(&mut *db)
+            .await?
+        }
     };
     Ok(Some(id))
+}
+
+/// Write one stored value onto another owner, blob and all.
+///
+/// A file-kind value carries no JSON: its row exists to own a `files` row, so
+/// the copy is a second `files` row pointing at bytes that are already on disk
+/// (blobs are content-addressed — nothing is duplicated but the row). Used
+/// wherever a value is *moved along* rather than typed: bundle→member
+/// persistence, and an import's staged values onto what it carves out.
+pub(crate) async fn copy_value(
+    db: &mut sqlx::PgConnection,
+    source_value_id: Uuid,
+    kind: CustomFieldKind,
+    value: Option<&serde_json::Value>,
+    owner: ValueOwner,
+    field_id: Uuid,
+    editor: Option<Uuid>,
+) -> Result<(), ApiError> {
+    let stored = value.cloned().unwrap_or(serde_json::Value::Null);
+    let target = write_value(&mut *db, owner, field_id, Some(&stored), editor)
+        .await?
+        .expect("a written value has a row");
+    if !matches!(kind, CustomFieldKind::File) {
+        return Ok(());
+    }
+    sqlx::query!("DELETE FROM files WHERE custom_field_value_id = $1", target)
+        .execute(&mut *db)
+        .await?;
+    sqlx::query!(
+        "INSERT INTO files (blob_sha256, custom_field_value_id, path, filename, mime, kind)
+         SELECT f.blob_sha256, $2, f.path, f.filename, f.mime, f.kind
+         FROM files f WHERE f.custom_field_value_id = $1",
+        source_value_id,
+        target,
+    )
+    .execute(&mut *db)
+    .await?;
+    Ok(())
 }
 
 /// The `updated_by` to record: the synthetic `--anonymous` admin has the nil id
@@ -735,19 +828,8 @@ pub fn resolve_patch_value(
     let Some(field) = fields.get(&key.trim().to_lowercase()) else {
         return Resolved::Warning(format!("no custom field is defined with the key {key:?}"));
     };
-    let applies = match owner {
-        ValueOwner::Model(_) => field.applies_to_models,
-        ValueOwner::Bundle(_) => field.applies_to_bundles,
-    };
-    if !applies {
-        return Resolved::Warning(format!(
-            "{} doesn't apply to {}",
-            field.name,
-            match owner {
-                ValueOwner::Model(_) => "models",
-                ValueOwner::Bundle(_) => "bundles",
-            }
-        ));
+    if !applies_to(field, owner) {
+        return Resolved::Warning(format!("{} doesn't apply to {}", field.name, owner.noun()));
     }
     // A patch is JSON; a file field's payload is bytes it cannot carry.
     if matches!(field.kind, CustomFieldKind::File) {
@@ -837,33 +919,16 @@ pub async fn persist_bundle_fields(
             if occupied && !field.bundle_persist_overwrites {
                 continue;
             }
-            // A file-kind value carries no JSON; its row exists to own the file.
-            let value = field.value.clone().unwrap_or(serde_json::Value::Null);
-            let target = write_value(
+            copy_value(
                 &mut *db,
+                field.value_id,
+                field.kind,
+                field.value.as_ref(),
                 ValueOwner::Model(model_id),
                 field.field_id,
-                Some(&value),
                 editor,
             )
-            .await?
-            .expect("a written value has a row");
-            if matches!(field.kind, CustomFieldKind::File) {
-                // Blobs are content-addressed, so "copying" the file is a row
-                // insert pointing at bytes that are already on disk.
-                sqlx::query!("DELETE FROM files WHERE custom_field_value_id = $1", target)
-                    .execute(&mut *db)
-                    .await?;
-                sqlx::query!(
-                    "INSERT INTO files (blob_sha256, custom_field_value_id, path, filename, mime, kind)
-                     SELECT f.blob_sha256, $2, f.path, f.filename, f.mime, f.kind
-                     FROM files f WHERE f.custom_field_value_id = $1",
-                    field.value_id,
-                    target,
-                )
-                .execute(&mut *db)
-                .await?;
-            }
+            .await?;
         }
     }
     Ok(())
@@ -977,6 +1042,74 @@ pub async fn write_bundle_values(
     Ok(())
 }
 
+/// One value staged on an import, with enough of its definition to route it at
+/// commit without re-reading the vocabulary per destination.
+pub struct StagedValue {
+    pub value_id: Uuid,
+    pub field_id: Uuid,
+    pub kind: CustomFieldKind,
+    pub applies_to_models: bool,
+    pub applies_to_bundles: bool,
+    pub value: Option<serde_json::Value>,
+}
+
+/// Everything typed (or dropped) onto an import that is still waiting for a
+/// destination.
+pub async fn staged_values(
+    db: &mut sqlx::PgConnection,
+    import_id: Uuid,
+) -> Result<Vec<StagedValue>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT v.id, v.field_id, v.value,
+                  cf.kind as "kind: CustomFieldKind",
+                  cf.applies_to_models, cf.applies_to_bundles
+           FROM custom_field_values v
+           JOIN custom_fields cf ON cf.id = v.field_id
+           WHERE v.import_id = $1
+           ORDER BY cf.position, cf.name"#,
+        import_id,
+    )
+    .fetch_all(&mut *db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| StagedValue {
+            value_id: r.id,
+            field_id: r.field_id,
+            kind: r.kind,
+            applies_to_models: r.applies_to_models,
+            applies_to_bundles: r.applies_to_bundles,
+            value: r.value,
+        })
+        .collect())
+}
+
+/// Copy the staged values `keep` accepts onto one owner. Fields it rejects are
+/// skipped rather than refused, the same way `resolve_values` treats a field
+/// that belongs on the other side of a drop.
+pub async fn copy_staged_onto(
+    db: &mut sqlx::PgConnection,
+    staged: &[StagedValue],
+    owner: ValueOwner,
+    keep: impl Fn(&StagedValue) -> bool,
+    user: &User,
+) -> Result<(), ApiError> {
+    let editor = editor_id(user);
+    for value in staged.iter().filter(|v| keep(v)) {
+        copy_value(
+            &mut *db,
+            value.value_id,
+            value.kind,
+            value.value.as_ref(),
+            owner,
+            value.field_id,
+            editor,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn upload_model_file(
     State(state): State<AppState>,
     user: User,
@@ -993,6 +1126,31 @@ async fn upload_bundle_file(
     multipart: Multipart,
 ) -> Result<Json<CustomFieldValueDetail>, ApiError> {
     upload_file(state, user, ValueOwner::Bundle(id), field_id, multipart).await
+}
+
+async fn upload_import_file(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, field_id)): Path<(Uuid, Uuid)>,
+    multipart: Multipart,
+) -> Result<Json<CustomFieldValueDetail>, ApiError> {
+    upload_file(state, user, ValueOwner::Import(id), field_id, multipart).await
+}
+
+/// What an import is holding: every field either side of a commit could want,
+/// with whatever has been staged against it. The import page uses it for the
+/// file-kind fields — the scalars it keeps in its draft and sends with the
+/// commit — but the endpoint answers for all of them, because an import can
+/// legitimately hold any of them.
+async fn list_import_values(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<CustomFieldValueDetail>>, ApiError> {
+    user.require_can_edit(crate::routes::imports::import_created_by(&state, id).await?)?;
+    Ok(Json(
+        fetch_values(&state, ValueOwner::Import(id), &user).await?,
+    ))
 }
 
 /// Replace a file-kind value's file. One `file` part; anything else is ignored.
@@ -1103,6 +1261,14 @@ async fn clear_bundle_value(
     Path((id, field_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     clear_value(state, user, ValueOwner::Bundle(id), field_id).await
+}
+
+async fn clear_import_value(
+    State(state): State<AppState>,
+    user: User,
+    Path((id, field_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    clear_value(state, user, ValueOwner::Import(id), field_id).await
 }
 
 /// Unset one field on one owner. Any file-kind blob's `files` row goes with the
@@ -1320,6 +1486,24 @@ mod tests {
                 "{key} {value}"
             );
         }
+    }
+
+    /// An import is a destination that hasn't been decided yet, so it accepts
+    /// whatever either side would: the commit routes each value once it knows
+    /// whether the drop became a model or a bundle.
+    #[test]
+    fn an_import_takes_either_sides_fields() {
+        let mut models_only = field(CustomFieldKind::File, json!({}));
+        models_only.applies_to_bundles = false;
+        let mut bundles_only = field(CustomFieldKind::File, json!({}));
+        bundles_only.applies_to_models = false;
+        bundles_only.applies_to_bundles = true;
+
+        let import = ValueOwner::Import(Uuid::nil());
+        assert!(applies_to(&models_only, import));
+        assert!(applies_to(&bundles_only, import));
+        assert!(!applies_to(&bundles_only, ValueOwner::Model(Uuid::nil())));
+        assert!(!applies_to(&models_only, ValueOwner::Bundle(Uuid::nil())));
     }
 
     #[test]

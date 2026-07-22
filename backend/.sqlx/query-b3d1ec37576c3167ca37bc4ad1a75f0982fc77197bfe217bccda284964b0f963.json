@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT coalesce(m.created_by, b.created_by, i.created_by) as \"created_by!\"\n                   FROM custom_field_values v\n                   LEFT JOIN models m ON m.id = v.model_id\n                   LEFT JOIN bundles b ON b.id = v.bundle_id\n                   LEFT JOIN imports i ON i.id = v.import_id\n                   WHERE v.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_by!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b3d1ec37576c3167ca37bc4ad1a75f0982fc77197bfe217bccda284964b0f963"
+}

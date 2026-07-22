@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT cf.id as \"id!\", cf.key as \"key!: String\", cf.name as \"name!\",\n                  cf.kind as \"kind!: CustomFieldKind\", cf.options as \"options!\",\n                  cf.applies_to_models as \"applies_to_models!\",\n                  cf.applies_to_bundles as \"applies_to_bundles!\",\n                  cf.bundle_persists_to_model as \"bundle_persists_to_model!\",\n                  cf.bundle_persist_overwrites as \"bundle_persist_overwrites!\",\n                  cf.visibility as \"visibility!: CustomFieldVisibility\",\n                  cf.position as \"position!\",\n                  v.value,\n                  f.id as \"file_id?\", f.filename as \"filename?\", f.mime as \"mime?\",\n                  b.size as \"size?\"\n           FROM custom_fields cf\n           LEFT JOIN custom_field_values v ON v.field_id = cf.id\n                AND v.model_id IS NOT DISTINCT FROM $1\n                AND v.bundle_id IS NOT DISTINCT FROM $2\n           LEFT JOIN files f ON f.custom_field_value_id = v.id\n           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE CASE WHEN $1::uuid IS NULL THEN cf.applies_to_bundles ELSE cf.applies_to_models END\n           ORDER BY cf.position, cf.name",
+  "query": "SELECT cf.id as \"id!\", cf.key as \"key!: String\", cf.name as \"name!\",\n                  cf.kind as \"kind!: CustomFieldKind\", cf.options as \"options!\",\n                  cf.applies_to_models as \"applies_to_models!\",\n                  cf.applies_to_bundles as \"applies_to_bundles!\",\n                  cf.bundle_persists_to_model as \"bundle_persists_to_model!\",\n                  cf.bundle_persist_overwrites as \"bundle_persist_overwrites!\",\n                  cf.visibility as \"visibility!: CustomFieldVisibility\",\n                  cf.position as \"position!\",\n                  v.value,\n                  f.id as \"file_id?\", f.filename as \"filename?\", f.mime as \"mime?\",\n                  b.size as \"size?\"\n           FROM custom_fields cf\n           LEFT JOIN custom_field_values v ON v.field_id = cf.id\n                AND v.model_id IS NOT DISTINCT FROM $1\n                AND v.bundle_id IS NOT DISTINCT FROM $2\n                AND v.import_id IS NOT DISTINCT FROM $3\n           LEFT JOIN files f ON f.custom_field_value_id = v.id\n           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256\n           -- An import may become either a model or a bundle, so it offers\n           -- both sides' fields; the commit routes each value by its own\n           -- definition once the destination is known.\n           WHERE CASE\n                   WHEN $3::uuid IS NOT NULL THEN true\n                   WHEN $1::uuid IS NULL THEN cf.applies_to_bundles\n                   ELSE cf.applies_to_models\n                 END\n           ORDER BY cf.position, cf.name",
   "describe": {
     "columns": [
       {
@@ -213,6 +213,7 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Uuid",
         "Uuid"
       ]
     },
@@ -235,5 +236,5 @@
       false
     ]
   },
-  "hash": "b1413f79824c672d8da958dc2cdcee3f77e86868b2600f20f7fae250c567b19f"
+  "hash": "4a556a9f06061b484a5e8d103b23fb94edfad297bc1438678d7d8abee610d0ae"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT v.field_id, v.value,\n                  cf.visibility as \"visibility: crate::routes::custom_fields::CustomFieldVisibility\",\n                  f.id as \"file_id?\", f.blob_sha256 as \"blob_sha256?\", f.path as \"path?\",\n                  f.filename as \"filename?\", f.mime as \"mime?\", f.kind::text as \"file_kind?\",\n                  f.created_at as \"file_created_at?\", b.size as \"size?\"\n           FROM custom_field_values v\n           JOIN custom_fields cf ON cf.id = v.field_id\n           LEFT JOIN files f ON f.custom_field_value_id = v.id\n           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE v.model_id IS NOT DISTINCT FROM $1\n             AND v.bundle_id IS NOT DISTINCT FROM $2\n           ORDER BY v.field_id",
+  "query": "SELECT v.field_id, v.value,\n                  cf.visibility as \"visibility: crate::routes::custom_fields::CustomFieldVisibility\",\n                  f.id as \"file_id?\", f.blob_sha256 as \"blob_sha256?\", f.path as \"path?\",\n                  f.filename as \"filename?\", f.mime as \"mime?\", f.kind::text as \"file_kind?\",\n                  f.created_at as \"file_created_at?\", b.size as \"size?\"\n           FROM custom_field_values v\n           JOIN custom_fields cf ON cf.id = v.field_id\n           LEFT JOIN files f ON f.custom_field_value_id = v.id\n           LEFT JOIN blobs b ON b.sha256 = f.blob_sha256\n           WHERE v.model_id IS NOT DISTINCT FROM $1\n             AND v.bundle_id IS NOT DISTINCT FROM $2\n             AND v.import_id IS NULL\n           ORDER BY v.field_id",
   "describe": {
     "columns": [
       {
@@ -152,5 +152,5 @@
       false
     ]
   },
-  "hash": "57307e12d61dafa6e3818d1450bec0f4df3d1867f007696c11eae8533761baa8"
+  "hash": "70a541db4d4abce20a45325fbe336d614c53d885587bd97200eb1736cce2d3ef"
 }

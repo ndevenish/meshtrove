@@ -97,9 +97,8 @@ export function CustomFieldControl({
   entry: CustomFieldValue
   value: ScalarValue
   onChange: (value: ScalarValue) => void
-  /** Omitted where there is nothing to upload *to* yet — the import page types
-      its metadata before the model it belongs to exists — and the file kind
-      then renders nothing at all. */
+  /** Omitted where there is nothing to upload *to*, and the file kind then
+      renders nothing at all. */
   onUploadFile?: (file: File) => Promise<void>
   onClearFile?: () => Promise<void>
 }) {
@@ -180,7 +179,7 @@ export function CustomFieldControl({
           )}
           <Dropzone
             label={busy ? 'Uploading…' : file ? `Replace ${field.name}` : field.name}
-            hint="One file · dropped here it stays out of the model’s file list"
+            hint="One file · dropped here it stays out of the file list"
             busy={busy}
             onDrop={(drop) => {
               const dropped = drop.files[0]?.file

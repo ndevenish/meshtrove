@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO files (blob_sha256, custom_field_value_id, path, filename, mime, kind)\n         SELECT f.blob_sha256, $2, f.path, f.filename, f.mime, f.kind\n         FROM files f WHERE f.custom_field_value_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d7c341de86d4f76a1e1af3243b32a13cb22c80e4df0179d62991a237e51b9a7d"
+}

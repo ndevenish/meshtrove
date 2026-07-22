@@ -130,9 +130,15 @@ function ImportWorkbench() {
   })
   const { data: creators } = useQuery({ queryKey: ['creators'], queryFn: () => api.creators() })
   const { data: allTags } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
-  const { data: allCustomFields } = useQuery({
-    queryKey: ['custom-fields'],
-    queryFn: () => api.customFields(),
+  // Every field either side of the commit could want, with whatever this import
+  // is already holding. A scalar waits in the draft above and is written when
+  // the commit produces an owner; a file-kind one can't wait — its payload is
+  // bytes — so it is uploaded onto the *import* and copied onto whatever the
+  // commit carves out. Hence the values live here, not in the draft.
+  const { data: stagedFields } = useQuery({
+    queryKey: ['import-custom-fields', id],
+    queryFn: () => api.importCustomFields(id!),
+    enabled: !!id,
   })
   const { data: bundles } = useQuery({
     queryKey: ['bundles-all'],
@@ -172,13 +178,13 @@ function ImportWorkbench() {
 
   // Which fields this drop can carry. A model target takes the models-only ones;
   // a bundle target takes both, because a models-only field still reaches every
-  // member the carve creates. A file field is left out either way — there is
-  // nothing to upload it against until the commit has produced an owner.
-  const applicableFields = (allCustomFields ?? []).filter(
-    (f) =>
-      f.kind !== 'file' &&
-      (dest === 'new_model' ? f.applies_to_models : f.applies_to_bundles || f.applies_to_models),
+  // member the carve creates.
+  const applicableFields = (stagedFields ?? []).filter(({ field: f }) =>
+    dest === 'new_model' ? f.applies_to_models : f.applies_to_bundles || f.applies_to_models,
   )
+  // Only the scalars ride along with the commit; a file was already stored on
+  // the import when it was dropped.
+  const scalarFields = applicableFields.filter((e) => e.field.kind !== 'file')
 
   if (isLoading || !staged) return null
 
@@ -202,9 +208,9 @@ function ImportWorkbench() {
         tags,
         source_url: sourceUrl.trim() || null,
         description_md: description.trim() || null,
-        custom_fields: applicableFields.map((f) => ({
-          field_id: f.id,
-          value: customValues[f.id] ?? null,
+        custom_fields: scalarFields.map((e) => ({
+          field_id: e.field.id,
+          value: customValues[e.field.id] ?? null,
         })),
       }
       const spec = layout?.spec
@@ -242,6 +248,31 @@ function ImportWorkbench() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setCommitting(false)
+    }
+  }
+
+  // A file-kind field is stored the moment it is dropped, on the import itself:
+  // there is no owner to hang it off until the commit runs, and the bytes can't
+  // sit in a draft. It rides through to whatever the commit creates — and
+  // through a split, into the import a folder is lifted into.
+  const refreshFields = () =>
+    queryClient.invalidateQueries({ queryKey: ['import-custom-fields', id] })
+  const uploadFieldFile = (fieldId: string) => async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    try {
+      await api.uploadCustomFieldFile('imports', staged.id, fieldId, form)
+      await refreshFields()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+  const clearFieldFile = (fieldId: string) => async () => {
+    try {
+      await api.clearCustomField('imports', staged.id, fieldId)
+      await refreshFields()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -455,12 +486,16 @@ function ImportWorkbench() {
                 value={sourceUrl}
                 onChange={(e) => setSourceUrl(e.target.value)}
               />
-              {applicableFields.map((f) => (
+              {applicableFields.map((entry) => (
                 <CustomFieldControl
-                  key={f.id}
-                  entry={{ field: f, value: null, file: null }}
-                  value={customValues[f.id] ?? null}
-                  onChange={(value) => setCustomValues({ ...customValues, [f.id]: value })}
+                  key={entry.field.id}
+                  entry={entry}
+                  value={customValues[entry.field.id] ?? null}
+                  onChange={(value) =>
+                    setCustomValues({ ...customValues, [entry.field.id]: value })
+                  }
+                  onUploadFile={uploadFieldFile(entry.field.id)}
+                  onClearFile={clearFieldFile(entry.field.id)}
                 />
               ))}
               <TextField

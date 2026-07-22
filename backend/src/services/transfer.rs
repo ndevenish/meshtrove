@@ -1145,9 +1145,13 @@ async fn gather_custom_fields(
     assigner: &mut PathAssigner,
     blobs: &mut HashMap<String, i64>,
 ) -> Result<Vec<CustomFieldValue>, ApiError> {
+    // An export holds committed models and bundles; nothing here ever asks for
+    // an import's staged values, and the `import_id IS NULL` below makes sure a
+    // caller that did would get nothing rather than everyone's staging.
     let (model_id, bundle_id) = match owner {
         crate::routes::custom_fields::ValueOwner::Model(id) => (Some(id), None),
         crate::routes::custom_fields::ValueOwner::Bundle(id) => (None, Some(id)),
+        crate::routes::custom_fields::ValueOwner::Import(_) => (None, None),
     };
     let rows = sqlx::query!(
         r#"SELECT v.field_id, v.value,
@@ -1161,6 +1165,7 @@ async fn gather_custom_fields(
            LEFT JOIN blobs b ON b.sha256 = f.blob_sha256
            WHERE v.model_id IS NOT DISTINCT FROM $1
              AND v.bundle_id IS NOT DISTINCT FROM $2
+             AND v.import_id IS NULL
            ORDER BY v.field_id"#,
         model_id,
         bundle_id,
@@ -2009,6 +2014,8 @@ async fn restore_custom_fields(
         let applies = match owner {
             crate::routes::custom_fields::ValueOwner::Model(_) => field.applies_to_models,
             crate::routes::custom_fields::ValueOwner::Bundle(_) => field.applies_to_bundles,
+            // A restore recreates models and bundles, never an import.
+            crate::routes::custom_fields::ValueOwner::Import(_) => false,
         };
         if !applies {
             continue;
