@@ -102,9 +102,11 @@ Implementation quirks worth knowing (found the hard way):
   filesystem. Picking up never modifies the dropbox — the entry stays until the
   admin deletes it, so a failed import is always retryable.
 - **Job workers are concurrent and lane-split, not a separate process** (added
-  2026-07-21). `--job-workers` (default 2) and `--render-workers` (default 2)
+  2026-07-21). `--job-workers` (default 1) and `--render-workers` (default 2)
   spawn N worker tasks each; the claim query already used `FOR UPDATE SKIP
-  LOCKED`, so concurrency needed no locking work. The *lanes* are the point: a
+  LOCKED`, so concurrency needed no locking work. Archive work defaults to a
+  single worker: unpacking is disk-bound, so a second concurrent import buys
+  little and competes for the same spindle. The *lanes* are the point: a
   render is short and the UI is waiting on it, so it must not queue behind a
   40GB dropbox import that happens to have a lower id. `Lane::Render` claims an
   allowlist of kinds and `Lane::General` claims its complement, so the two

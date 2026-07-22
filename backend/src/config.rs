@@ -54,7 +54,7 @@ pub struct Arguments {
     create_admin: Option<String>,
 
     /// Workers running imports, exports and dropbox scans (0 stops them running)
-    #[arg(long, env = "MESHTROVE_JOB_WORKERS", default_value = "2",
+    #[arg(long, env = "MESHTROVE_JOB_WORKERS", default_value = "1",
           value_parser = clap::value_parser!(u32).range(0..=64))]
     job_workers: u32,
 
