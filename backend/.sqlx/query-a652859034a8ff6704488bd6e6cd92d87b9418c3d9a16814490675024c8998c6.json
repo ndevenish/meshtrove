@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH ranked AS (\n                   SELECT f.id, f.filename,\n                          row_number() OVER (\n                              PARTITION BY f.model_id, f.variant_id, f.bundle_id,\n                                           f.path, f.filename\n                              ORDER BY f.created_at, f.id\n                          ) AS rn\n                   FROM files f\n                   LEFT JOIN model_variants v ON v.id = f.variant_id\n                   WHERE f.model_id = ANY($1)\n                      OR v.model_id = ANY($1)\n                      OR ($2::uuid IS NOT NULL AND f.bundle_id = $2)\n               )\n               UPDATE files f\n               SET filename = CASE\n                       WHEN r.filename ~ '\\.[^.]+$'\n                       THEN regexp_replace(r.filename, '^(.*)\\.([^.]+)$',\n                                           '\\1 (' || r.rn || ').\\2')\n                       ELSE r.filename || ' (' || r.rn || ')'\n                   END\n               FROM ranked r\n               WHERE f.id = r.id AND r.rn > 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a652859034a8ff6704488bd6e6cd92d87b9418c3d9a16814490675024c8998c6"
+}

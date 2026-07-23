@@ -1185,6 +1185,26 @@ async fn commit(
         }
     }
 
+    // Both rewrites above are blind, and that is what makes this necessary: a
+    // flatten sends every claimed file to `''` and a `folder` capture sends a
+    // whole subtree to one name, so two files that were only ever told apart by
+    // the folder they sat in now agree on `(owner, path, filename)`. Run last,
+    // once every move and rewrite has settled, so it also catches a claimed file
+    // landing on a name the destination already had.
+    let owner_models: Vec<Uuid> = match result.kind.as_str() {
+        "model" => render_models
+            .iter()
+            .copied()
+            .chain(std::iter::once(result.id))
+            .collect(),
+        _ => render_models.clone(),
+    };
+    let owner_bundle = match result.kind.as_str() {
+        "model" => None,
+        _ => Some(result.id),
+    };
+    disambiguate_filenames(&mut tx, &owner_models, owner_bundle).await?;
+
     // Drop the original archive: every byte in it is now also on disk as the
     // files it unpacked into, so keeping it charges the store ~1.3-1.5x forever
     // for a copy nobody browses. What survives is the provenance — name, hash,
@@ -1322,6 +1342,69 @@ async fn claim_files(
     .execute(&mut *tx)
     .await?;
     Ok(())
+}
+
+/// Give every committed file a name unique within its owner, suffixing ` (2)`,
+/// ` (3)`, … before the extension — the same convention export uses for
+/// colliding readable paths (see [`crate::services::transfer`]).
+///
+/// Renaming, not de-duplicating: a clash here is between two files the user
+/// asked for, which happened to share a name in different folders. Dropping one
+/// would lose geometry. What the rename buys is that nothing downstream has to
+/// guess — two files with one name under one owner list twice identically,
+/// collide as one entry on export, and make "delete that file" a coin toss.
+///
+/// Staged files are exempt by construction: this runs only over the commit's
+/// destination owners, never over an import. An import may legitimately hold a
+/// clash while its archives unpack, and settling it there would fight the next
+/// carve, which matches on the paths this would rewrite.
+///
+/// Looped because a generated name can itself be taken — an owner holding
+/// `Bolt.stl` twice *and* a real `Bolt (2).stl` needs a second pass. Each pass
+/// strictly lengthens the names it touches, so this terminates; the bound is
+/// there to make that a fact about the code rather than about the argument.
+async fn disambiguate_filenames(
+    tx: &mut sqlx::PgConnection,
+    models: &[Uuid],
+    bundle: Option<Uuid>,
+) -> Result<(), ApiError> {
+    for _ in 0..16 {
+        let renamed = sqlx::query!(
+            r#"WITH ranked AS (
+                   SELECT f.id, f.filename,
+                          row_number() OVER (
+                              PARTITION BY f.model_id, f.variant_id, f.bundle_id,
+                                           f.path, f.filename
+                              ORDER BY f.created_at, f.id
+                          ) AS rn
+                   FROM files f
+                   LEFT JOIN model_variants v ON v.id = f.variant_id
+                   WHERE f.model_id = ANY($1)
+                      OR v.model_id = ANY($1)
+                      OR ($2::uuid IS NOT NULL AND f.bundle_id = $2)
+               )
+               UPDATE files f
+               SET filename = CASE
+                       WHEN r.filename ~ '\.[^.]+$'
+                       THEN regexp_replace(r.filename, '^(.*)\.([^.]+)$',
+                                           '\1 (' || r.rn || ').\2')
+                       ELSE r.filename || ' (' || r.rn || ')'
+                   END
+               FROM ranked r
+               WHERE f.id = r.id AND r.rn > 1"#,
+            models,
+            bundle,
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if renamed == 0 {
+            return Ok(());
+        }
+    }
+    Err(ApiError::Internal(anyhow::anyhow!(
+        "could not settle colliding filenames after 16 passes"
+    )))
 }
 
 // ---------------------------------------------------------------------------
