@@ -48,6 +48,7 @@ import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 import ImageIcon from '@mui/icons-material/Image'
+import ArticleIcon from '@mui/icons-material/Article'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 
@@ -68,6 +69,8 @@ const StlPreviewDialog = lazy(() => import('./StlPreviewDialog'))
 // Cheap by comparison (an `<img>`), but it only ever opens on a click, so it
 // rides the same lazy split rather than sitting in the main bundle.
 const ImagePreviewDialog = lazy(() => import('./ImagePreviewDialog'))
+// Lighter still (it fetches the text itself), and lazy for the same reason.
+const TextPreviewDialog = lazy(() => import('./TextPreviewDialog'))
 
 /// Raster formats a browser will draw in an `<img>`. SVG is in: an `<img>`
 /// renders it inert, so an embedded script never runs.
@@ -76,6 +79,16 @@ const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 's
 const isImage = (filename: string) => {
   const ext = filename.toLowerCase().split('.').pop() ?? ''
   return IMAGE_EXTENSIONS.includes(ext)
+}
+
+/// Plain-text formats worth reading in place — a readme, a licence, a slicer's
+/// print settings. Rendered as text, never interpreted, so nothing in the file
+/// can run.
+const TEXT_EXTENSIONS = ['txt']
+
+const isText = (filename: string) => {
+  const ext = filename.toLowerCase().split('.').pop() ?? ''
+  return TEXT_EXTENSIONS.includes(ext)
 }
 
 /// What the archive chip says for each unpack state. `none` covers a staged
@@ -776,7 +789,11 @@ export const FileTree = memo(function FileTree({
   // download/render icons stay in aligned columns next to files (projects,
   // documents) that can't be previewed. Nothing previewable → no wasted column.
   const anyPreviewable = useMemo(
-    () => files.some((f) => f.filename.toLowerCase().endsWith('.stl') || isImage(f.filename)),
+    () =>
+      files.some(
+        (f) =>
+          f.filename.toLowerCase().endsWith('.stl') || isImage(f.filename) || isText(f.filename),
+      ),
     [files],
   )
 
@@ -1074,11 +1091,17 @@ export const FileTree = memo(function FileTree({
                 <ViewInArIcon sx={{ fontSize: 18 }} />
               </IconButton>
             </Tooltip>
+          ) : isImage(file.filename) ? (
+            <Tooltip title="Preview image">
+              <IconButton size="small" onClick={() => setPreviewFile(file)}>
+                <ImageIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Tooltip>
           ) : (
-            isImage(file.filename) && (
-              <Tooltip title="Preview image">
+            isText(file.filename) && (
+              <Tooltip title="Preview text">
                 <IconButton size="small" onClick={() => setPreviewFile(file)}>
-                  <ImageIcon sx={{ fontSize: 18 }} />
+                  <ArticleIcon sx={{ fontSize: 18 }} />
                 </IconButton>
               </Tooltip>
             )
@@ -1272,6 +1295,14 @@ export const FileTree = memo(function FileTree({
               open
               fileId={previewFile.id}
               filename={previewFile.filename}
+              onClose={() => setPreviewFile(null)}
+            />
+          ) : isText(previewFile.filename) ? (
+            <TextPreviewDialog
+              open
+              fileId={previewFile.id}
+              filename={previewFile.filename}
+              size={previewFile.size}
               onClose={() => setPreviewFile(null)}
             />
           ) : (
