@@ -256,12 +256,16 @@ export default function BundlePatchDialog({
 
   // Grid keeps the rename box, category, name and tags in aligned columns across
   // every row regardless of whether a row has a rename control or a dropdown.
+  // Rows are top-aligned because the name column wraps and so sets the height.
   const GRID = {
     display: 'grid',
-    gridTemplateColumns: '32px 88px minmax(180px, 300px) 1fr',
-    alignItems: 'center',
+    gridTemplateColumns: '32px 88px minmax(180px, 340px) 1fr',
+    alignItems: 'start',
     columnGap: 8,
   }
+  // Long names wrap instead of truncating, breaking mid-word if a single token
+  // is wider than the column (scraped titles have no spaces to break on).
+  const WRAP = { overflowWrap: 'anywhere' as const }
   // Strike a name when it is *not* the result: the old name when renaming, the new
   // one when not — so the target is always shown, just crossed out if it won't apply.
   const strike = (on: boolean) =>
@@ -438,11 +442,13 @@ export default function BundlePatchDialog({
 
                       {/* col 3 — the model. Auto matches show old → new; manual
                           matches keep their dropdown mounted so a wrong pick can be
-                          changed, with the rename target shown beneath. */}
+                          changed. Names wrap rather than truncate: the column is
+                          the only place either name is written out, and a shop
+                          title is routinely longer than it. */}
                       <Box sx={{ minWidth: 0 }}>
                         {r.fixed ? (
                           nameDiffers(r) ? (
-                            <Typography variant="body2" noWrap>
+                            <Typography variant="body2" sx={WRAP}>
                               <Box component="span" sx={strike(willRename)}>
                                 {r.fixed.name}
                               </Box>
@@ -452,23 +458,28 @@ export default function BundlePatchDialog({
                               </Box>
                             </Typography>
                           ) : (
-                            <Typography variant="body2" noWrap>
+                            <Typography variant="body2" sx={WRAP}>
                               {r.fixed.name}
                             </Typography>
                           )
                         ) : (
                           <>
+                            {/* The incoming entry's title, in full. It used to live
+                                only in the closed dropdown, which clips it — and it
+                                vanished entirely once a model was picked. */}
+                            <Typography
+                              variant="body2"
+                              sx={{ ...WRAP, mb: 0.5, ...(renames ? strike(!willRename) : null) }}
+                            >
+                              {r.label}
+                            </Typography>
                             <FormControl size="small" fullWidth>
                               <Select
                                 displayEmpty
                                 value={resolved[r.key] ?? ''}
                                 onChange={(e) => pickMember(r, e.target.value)}
                                 renderValue={(v) =>
-                                  v ? (
-                                    (membersById.get(v)?.name ?? '')
-                                  ) : (
-                                    <em>{r.label} — pick a model</em>
-                                  )
+                                  v ? (membersById.get(v)?.name ?? '') : <em>pick a model</em>
                                 }
                               >
                                 <MenuItem value="">
@@ -509,13 +520,12 @@ export default function BundlePatchDialog({
                               <Typography
                                 variant="caption"
                                 component="div"
+                                color="text.secondary"
                                 sx={{ mt: 0.25 }}
-                                noWrap
                               >
-                                {'renames to '}
-                                <Box component="span" sx={strike(!willRename)}>
-                                  {r.label}
-                                </Box>
+                                {willRename
+                                  ? 'renames the model to the title above'
+                                  : 'keeps the model’s own name'}
                               </Typography>
                             )}
                           </>
