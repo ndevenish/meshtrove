@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH moved AS (\n             UPDATE files\n                -- `::int` or postgres reads the two-argument `substring` as the\n                -- regex one and infers a text parameter.\n                SET path = $3 || substring(path from $4::int)\n              WHERE import_id = $1\n                AND left(path, length($2) + 1) = $2 || '/'\n              RETURNING 1\n           )\n           SELECT count(*) as \"count!\" FROM moved",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f83ecd20d9baac0b82a1a5aaabc9c94bcbeca7a28205144c8e96af62fd748d23"
+}

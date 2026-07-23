@@ -361,6 +361,20 @@ function ImportWorkbench() {
     }
   }
 
+  // Take a wrapper folder out of the tree: everything under it moves up into
+  // its parent. Drops arrive under levels that say nothing about the models
+  // inside — the zip's own name, a "Files/STL" pair — and a layout reads names
+  // and tags off folder segments, so removing the noise is the difference
+  // between a rule that reads the tree and one written around it.
+  const flattenFolder = async (dir: string) => {
+    try {
+      await api.flattenImportFolder(staged.id, dir)
+      await refreshStagedFiles()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   // Lift a folder out into an import of its own. One drop is often several
   // things — a dropbox pickup of a creator's back catalogue is a folder per
   // product — and an import commits to exactly one destination.
@@ -672,6 +686,7 @@ function ImportWorkbench() {
               onNeedFolder={needFolders}
               archivesExtracted
               onFolderDiscard={discardFolder}
+              onFolderFlatten={flattenFolder}
               onFolderSplit={splitFolder}
               onFolderSplitMany={splitFolders}
               maxHeight="calc(100vh - 160px)"
@@ -697,6 +712,7 @@ function ImportWorkbench() {
               files={fileList}
               archivesExtracted
               onFolderDiscard={discardFolder}
+              onFolderFlatten={flattenFolder}
               onFolderSplit={splitFolder}
               onFolderSplitMany={splitFolders}
               maxHeight="calc(100vh - 160px)"

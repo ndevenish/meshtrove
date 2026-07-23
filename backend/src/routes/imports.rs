@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/imports", get(list).post(create))
         .route("/api/imports/{id}", get(detail).put(update).delete(remove))
         .route("/api/imports/{id}/split", post(split))
+        .route("/api/imports/{id}/flatten", post(flatten))
         .route("/api/imports/{id}/discard", post(discard))
         .route("/api/imports/{id}/plan", post(plan))
         .route("/api/imports/{id}/commit", post(commit))
@@ -430,6 +431,113 @@ async fn split(
         "split folders out of an import"
     );
     Ok(Json(fetch_import(&state, new_id).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct FlattenInput {
+    /// The folder level to remove, as it appears in the tree. Everything under
+    /// it moves up into its parent; the folder itself stops existing.
+    pub folder: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FlattenResult {
+    pub moved: i64,
+}
+
+/// Drop an intermediate folder level, shuffling everything under it up one.
+///
+/// Archives arrive wrapped in folders that say nothing about the models inside:
+/// `Patreon_March_2024/Files/STL/Dragon/…`, a zip whose top folder is the zip's
+/// own name, a `__MACOSX`-style container round the real drop. A layout reads
+/// model names and variant tags off folder *segments*, so those levels are noise
+/// the rules have to be written around. Removing one rewrites the paths instead:
+/// `Loot/Files/A/x.stl` with `Loot/Files` flattened becomes `Loot/A/x.stl`.
+///
+/// Only a folder holding no files directly can go — that is what makes this a
+/// pure re-shaping of the tree, with nothing landing anywhere it wasn't already
+/// heading. A folder with files of its own is a folder with contents to decide
+/// about, and the tree offers discard and split for that.
+///
+/// Folders that collide after the move merge, which is the point: two levels
+/// spelling the same name collapse into one.
+///
+/// Refused while the import is still unpacking — the folder is only empty of
+/// files so far, and the files still to be staged carry the old path.
+async fn flatten(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<FlattenInput>,
+) -> Result<Json<FlattenResult>, ApiError> {
+    let import = fetch_import(&state, id).await?;
+    user.require_can_edit(import.created_by)?;
+    if import.unpacking {
+        return Err(ApiError::BadRequest(
+            "this import is still unpacking — wait for it to finish before reshaping it".into(),
+        ));
+    }
+    let folder = input.folder.trim().trim_matches('/').to_string();
+    if folder.is_empty() {
+        return Err(ApiError::BadRequest(
+            "the import's root is not a folder that can be removed".into(),
+        ));
+    }
+    // What the parent path is, and where a moved path resumes. Both counted in
+    // characters, like `substring` and postgres `length`: a folder name is free
+    // to hold anything a filesystem allows.
+    let parent = match folder.rfind('/') {
+        Some(cut) => format!("{}/", &folder[..cut]),
+        None => String::new(),
+    };
+    let resume = (folder.chars().count() + 2) as i32;
+
+    let mut tx = state.db.begin().await?;
+    let here = sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM files WHERE import_id = $1 AND path = $2"#,
+        id,
+        folder,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if here > 0 {
+        tx.rollback().await?;
+        return Err(ApiError::BadRequest(format!(
+            "{folder} holds {here} file(s) of its own — only a folder that just wraps other folders can be removed"
+        )));
+    }
+    // Same `left(path, n)` test as `split` and `discard`, and for the same
+    // reason: a folder name may hold `%` or `_`, which LIKE would read as
+    // wildcards. Only the folder's own segment is cut out — what sits either
+    // side of it is carried through untouched.
+    let moved = sqlx::query_scalar!(
+        r#"WITH moved AS (
+             UPDATE files
+                -- `::int` or postgres reads the two-argument `substring` as the
+                -- regex one and infers a text parameter.
+                SET path = $3 || substring(path from $4::int)
+              WHERE import_id = $1
+                AND left(path, length($2) + 1) = $2 || '/'
+              RETURNING 1
+           )
+           SELECT count(*) as "count!" FROM moved"#,
+        id,
+        folder,
+        parent,
+        resume,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if moved == 0 {
+        tx.rollback().await?;
+        return Err(ApiError::BadRequest(format!(
+            "nothing is staged under {folder}"
+        )));
+    }
+    tx.commit().await?;
+
+    tracing::info!(import = %id, %folder, files = moved, "removed a staged folder level");
+    Ok(Json(FlattenResult { moved }))
 }
 
 #[derive(Deserialize, ToSchema)]

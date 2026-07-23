@@ -41,6 +41,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import FolderDeleteIcon from '@mui/icons-material/FolderDelete'
 import CallSplitIcon from '@mui/icons-material/CallSplit'
+import KeyboardDoubleArrowUpIcon from '@mui/icons-material/KeyboardDoubleArrowUp'
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
@@ -435,6 +436,7 @@ export const FileTree = memo(function FileTree({
   archivesExtracted,
   onFolderRename,
   onFolderDiscard,
+  onFolderFlatten,
   onFolderSplit,
   onFolderSplitMany,
   maxHeight = '70vh',
@@ -471,6 +473,11 @@ export const FileTree = memo(function FileTree({
       and keeps the files. Used on the import page to drop chaff before committing.
       When set, real folder headers gain a "Discard folder" control. */
   onFolderDiscard?: (dir: string, tree: boolean) => void | Promise<void>
+  /** Remove a folder level that holds no files of its own, moving everything
+      under it up into its parent. When set, exactly those folders — the wrappers
+      an archive arrives in, which a layout's rules would otherwise have to be
+      written around — gain a "remove this level" control. */
+  onFolderFlatten?: (dir: string) => void | Promise<void>
   /** Lift a folder and everything under it out into an import of its own — one
       drop is often several things. Takes the folder's path and the name for the
       new import; the folder itself becomes its top directory. */
@@ -497,6 +504,7 @@ export const FileTree = memo(function FileTree({
   } | null>(null)
   // Which of the two a discard means, for a folder that has folders under it.
   const [discardTree, setDiscardTree] = useState(true)
+  const [flatteningDir, setFlatteningDir] = useState<string | null>(null)
   const [confirmSplit, setConfirmSplit] = useState<{ dir: string; count: number } | null>(null)
   const [splitName, setSplitName] = useState('')
   const [splitting, setSplitting] = useState(false)
@@ -559,6 +567,19 @@ export const FileTree = memo(function FileTree({
       setConfirmDiscard(null)
     } finally {
       setDiscardingDir(null)
+    }
+  }
+
+  // Take a wrapper folder out of the middle of the tree. No confirmation: every
+  // file survives at a shorter path, and the folders that offer it hold nothing
+  // of their own — there is nothing here to be sure about.
+  const flattenFolder = async (dir: string) => {
+    if (!onFolderFlatten) return
+    setFlatteningDir(dir)
+    try {
+      await onFolderFlatten(dir)
+    } finally {
+      setFlatteningDir(null)
     }
   }
 
@@ -935,6 +956,24 @@ export const FileTree = memo(function FileTree({
                   </IconButton>
                 </Tooltip>
               </>
+            )}
+            {/* A folder that only wraps other folders is a path segment and
+                nothing else — the zip's own name, a "Files" or "STL" level —
+                and one a layout's rules would have to be written around.
+                Offered only there: a folder with files of its own has contents
+                to place, which is what discard and split are for. */}
+            {onFolderFlatten && dir !== '/' && expected === 0 && below > 0 && (
+              <Tooltip title="Remove this folder — everything under it moves up a level">
+                <span>
+                  <IconButton
+                    size="small"
+                    disabled={flatteningDir === dir}
+                    onClick={() => void flattenFolder(dir)}
+                  >
+                    <KeyboardDoubleArrowUpIcon sx={{ fontSize: 17 }} />
+                  </IconButton>
+                </span>
+              </Tooltip>
             )}
             {onFolderSplit && (
               <Tooltip title="Split this folder and everything under it into a separate import">

@@ -771,6 +771,11 @@ export const api = {
       several keep their own names under the folder they all sat in. */
   splitImport: (id: string, folders: string[], name?: string) =>
     request<ImportSummary>(`/api/imports/${id}/split`, json({ folders, name })),
+  /** remove a folder level that only wraps other folders: everything under it
+      moves up into its parent, so the wrapper stops being a segment a layout's
+      rules have to be written around */
+  flattenImportFolder: (id: string, folder: string) =>
+    request<{ moved: number }>(`/api/imports/${id}/flatten`, json({ folder })),
   /** drop a staged folder without importing it — one request, whether it holds
       eight files or eight thousand, and without needing their ids */
   discardImportFolder: (id: string, folder: string, tree: boolean) =>
