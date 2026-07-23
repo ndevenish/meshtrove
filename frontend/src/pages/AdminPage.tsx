@@ -16,6 +16,7 @@ import { useAuth } from '../main'
 import CustomFieldsPanel from '../components/CustomFieldsPanel'
 import StoragePanel from '../components/StoragePanel'
 import UsersPanel from '../components/UsersPanel'
+import ApiTokensPanel from '../components/ApiTokensPanel'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
 /// affects new renders; "re-render stale" migrates existing images.
@@ -235,6 +236,8 @@ export default function AdminPage() {
       <CustomFieldsPanel />
 
       <UsersPanel />
+
+      <ApiTokensPanel />
     </Container>
   )
 }

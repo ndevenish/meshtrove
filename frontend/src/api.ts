@@ -16,6 +16,26 @@ export interface UserAccount {
   created_at: string
 }
 
+/** An API token as the admin page lists it — never the secret itself. */
+export interface ApiToken {
+  id: string
+  name: string
+  created_at: string
+  last_used_at: string | null
+  expires_at: string | null
+  /** the admin the token acts as */
+  created_by_username: string
+}
+
+/** The response to creating a token — the only time the plaintext is returned. */
+export interface NewApiToken {
+  id: string
+  name: string
+  token: string
+  created_at: string
+  expires_at: string | null
+}
+
 /** What a custom field *is*: how its value is entered and rendered. */
 export type CustomFieldKind = 'text' | 'checkbox' | 'choice' | 'rating' | 'file'
 
@@ -680,6 +700,13 @@ export const api = {
   resetUserPassword: (id: string, new_password: string) =>
     request<void>(`/api/users/${id}/password`, json({ new_password })),
   deleteUser: (id: string) => request<void>(`/api/users/${id}`, { method: 'DELETE' }),
+
+  // API tokens: admin-issued Bearer credentials for reaching the API from a
+  // script or CI. The plaintext is returned only by create, once.
+  apiTokens: () => request<ApiToken[]>('/api/admin/tokens'),
+  createApiToken: (name: string, expires_at?: string | null) =>
+    request<NewApiToken>('/api/admin/tokens', json({ name, expires_at: expires_at || null })),
+  deleteApiToken: (id: string) => request<void>(`/api/admin/tokens/${id}`, { method: 'DELETE' }),
 
   // Custom field definitions: readable by editors (they drive the edit forms),
   // writable by admins only.
