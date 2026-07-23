@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)\n               VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8) RETURNING id",
+  "query": "INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)\n                       VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -46,5 +46,5 @@
       false
     ]
   },
-  "hash": "e9d2d1070e734ebeeee8c9d58627388a588d2684c2a9944d57b41c79e31ac1c0"
+  "hash": "8902d96909e8000f415bde914240978f2534c2de46c5095155fd5c351a3380d3"
 }

@@ -25,6 +25,21 @@ struct ImportPayload {
     /// [`queue_nested`]). Absent on jobs queued before nesting existed.
     #[serde(default)]
     depth: u32,
+    /// Where this unpack decided to put its entries, written back on the first
+    /// attempt and read by every later one.
+    ///
+    /// [`unpack_dest`] judges the destination from what else shares the
+    /// archive's folder *at the moment it asks*, and a retry asks a folder that
+    /// the previous attempt has since filled with this very archive's output.
+    /// Left to recompute, attempt 2 sees company that is really its own
+    /// reflection, decides the archive needs a folder of its own after all, and
+    /// stages a second copy of everything one level down — where the resume
+    /// below cannot recognise it, because it is looking somewhere else.
+    ///
+    /// So the decision is made once and remembered. Absent on jobs queued
+    /// before this field existed, and on the first attempt of any job.
+    #[serde(default)]
+    base_path: Option<String>,
 }
 
 /// How far down a nest of archives we follow. A pack of packs is two or three
@@ -74,18 +89,34 @@ pub async fn import_archive(state: &AppState, job_id: i64, payload: &Value) -> R
     };
 
     let archive_path = state.store.path_for(&archive.blob_sha256);
-    let base_path = match import_id {
-        Some(import) => {
-            unpack_dest(
-                &state.db,
-                import,
-                payload.archive_file_id,
-                &archive.path,
-                &archive.filename,
+    let base_path = match payload.base_path.clone() {
+        Some(remembered) => remembered,
+        None => {
+            let chosen = match import_id {
+                Some(import) => {
+                    unpack_dest(
+                        &state.db,
+                        import,
+                        payload.archive_file_id,
+                        &archive.path,
+                        &archive.filename,
+                    )
+                    .await?
+                }
+                None => archive.path.clone(),
+            };
+            // Recorded before a single entry is staged, so a crash one file in
+            // still leaves the retry pointed at the same place.
+            sqlx::query!(
+                "UPDATE jobs SET payload = payload || jsonb_build_object('base_path', $2::text)
+                 WHERE id = $1",
+                job_id,
+                chosen,
             )
-            .await?
+            .execute(&state.db)
+            .await?;
+            chosen
         }
-        None => archive.path.clone(),
     };
 
     let format = archive::format_of(&archive.filename)
@@ -126,12 +157,64 @@ pub async fn import_archive(state: &AppState, job_id: i64, payload: &Value) -> R
         return Err(anyhow!("archive contained no usable files"));
     }
 
+    // What this unpack's destination already holds, so a retry resumes instead
+    // of staging the whole archive a second time on top of the attempt that
+    // died — the bug that put 16k phantom rows in one import before
+    // `dropbox_import` learned the same trick.
+    //
+    // Keyed by content as well as by name, which is where this differs from
+    // [`crate::services::dropbox::plan_resume`]: that one refuses to hash,
+    // because hashing the source is the whole cost it exists to avoid. Here the
+    // sha is already in hand — `BlobStore::put` has to hash an entry to know
+    // where to put it — so including it is free and strictly sharper. A prior
+    // attempt's row matches on all three and is skipped; a genuinely different
+    // file that merely shares a name does not, and gets staged and named apart
+    // at commit (see `disambiguate_filenames` in `routes::imports`).
+    //
+    // Scoped to the subtree this unpack writes into. Everything it stages lands
+    // under `base_path`, so the rest of the owner cannot match, and for an
+    // import the (import_id, path) index answers it directly.
+    let mut prior: std::collections::HashMap<
+        (String, String, String),
+        (Uuid, crate::routes::files::FileKind),
+    > = std::collections::HashMap::new();
+    for row in sqlx::query!(
+        r#"SELECT id, path as "path!", filename as "filename!",
+                  blob_sha256 as "blob_sha256!",
+                  kind as "kind!: crate::routes::files::FileKind"
+           FROM files
+           WHERE (($1::uuid IS NOT NULL AND model_id = $1)
+               OR ($2::uuid IS NOT NULL AND variant_id = $2)
+               OR ($3::uuid IS NOT NULL AND bundle_id = $3)
+               OR ($4::uuid IS NOT NULL AND import_id = $4))
+             AND ($5 = '' OR path = $5 OR path LIKE $5 || '/%')"#,
+        model_id,
+        variant_id,
+        bundle_id,
+        import_id,
+        base_path,
+    )
+    .fetch_all(&state.db)
+    .await?
+    {
+        prior.insert(
+            (row.path, row.filename, row.blob_sha256),
+            (row.id, row.kind),
+        );
+    }
+
     let mut model_file_ids = Vec::new();
     // Archives found inside this one, queued once the whole of this unpack is
     // staged — never as we go. Where an entry lands is judged from what else
     // shares its folder at the moment its job runs (see `unpack_dest`), so a
     // child released early would look around a folder still filling up.
     let mut nested = Vec::new();
+    // Archives a previous attempt had already staged. They rejoin `nested` only
+    // if nothing queued them last time: `jobs::enqueue` is unconditional, so
+    // re-queueing one that already has a job unpacks it twice into the same
+    // owner — the very duplication this resume is here to stop.
+    let mut carried: Vec<(Uuid, String, String)> = Vec::new();
+    let mut resumed = 0usize;
     // The count is exact and free from here: extraction has already walked the
     // whole archive, whatever its format. Reading it *before* extracting is
     // another matter — only a zip carries a central directory cheap enough to
@@ -160,38 +243,53 @@ pub async fn import_archive(state: &AppState, job_id: i64, payload: &Value) -> R
             .first()
             .map(|m| m.to_string());
 
-        let mut tx = state.db.begin().await?;
-        sqlx::query!(
-            "INSERT INTO blobs (sha256, size) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            blob.sha256,
-            blob.size,
-        )
-        .execute(&mut *tx)
-        .await?;
-        let file_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)
-               VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8) RETURNING id"#,
-            blob.sha256,
-            model_id,
-            variant_id,
-            bundle_id,
-            full_path,
-            filename,
-            mime,
-            kind as crate::routes::files::FileKind,
-            import_id,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        tx.commit().await?;
+        // Already here, same folder, same name, same bytes: a previous attempt
+        // of this job staged it. Take its row rather than making a second one.
+        let existing = prior.get(&(full_path.clone(), filename.to_string(), blob.sha256.clone()));
+        let file_id: Uuid = match existing {
+            Some((id, prior_kind)) => {
+                resumed += 1;
+                if matches!(prior_kind, crate::routes::files::FileKind::Archive) {
+                    carried.push((*id, filename.to_string(), blob.sha256.clone()));
+                }
+                *id
+            }
+            None => {
+                let mut tx = state.db.begin().await?;
+                sqlx::query!(
+                    "INSERT INTO blobs (sha256, size) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    blob.sha256,
+                    blob.size,
+                )
+                .execute(&mut *tx)
+                .await?;
+                let id: Uuid = sqlx::query_scalar!(
+                    r#"INSERT INTO files (blob_sha256, model_id, variant_id, bundle_id, import_id, path, filename, mime, kind)
+                       VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8) RETURNING id"#,
+                    blob.sha256,
+                    model_id,
+                    variant_id,
+                    bundle_id,
+                    full_path,
+                    filename,
+                    mime,
+                    kind as crate::routes::files::FileKind,
+                    import_id,
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                if matches!(kind, crate::routes::files::FileKind::Archive) {
+                    nested.push((id, filename.to_string(), blob.sha256.clone()));
+                }
+                id
+            }
+        };
 
         if matches!(kind, crate::routes::files::FileKind::Model)
             && filename.to_lowercase().ends_with(".stl")
         {
             model_file_ids.push(file_id);
-        }
-        if matches!(kind, crate::routes::files::FileKind::Archive) {
-            nested.push((file_id, filename.to_string(), blob.sha256.clone()));
         }
         if (staged + 1) % jobs::PROGRESS_EVERY == 0 {
             jobs::report_progress(&state.db, job_id, staged + 1, Some(entries.len())).await;
@@ -199,6 +297,34 @@ pub async fn import_archive(state: &AppState, job_id: i64, payload: &Value) -> R
     }
 
     let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+    // An archive carried over from a previous attempt gets a job only if that
+    // attempt never got as far as queueing one — nested unpacks are released in
+    // one go after the whole staging loop, so an attempt that died mid-loop left
+    // its archives with a row and no job, and nothing else would ever notice.
+    for (file_id, filename, sha256) in carried {
+        let queued = sqlx::query_scalar!(
+            r#"SELECT EXISTS (
+                 SELECT 1 FROM jobs
+                 WHERE kind = 'import_archive' AND payload->>'archive_file_id' = $1
+               ) as "exists!""#,
+            file_id.to_string(),
+        )
+        .fetch_one(&state.db)
+        .await?;
+        if !queued {
+            nested.push((file_id, filename, sha256));
+        }
+    }
+
+    if resumed > 0 {
+        tracing::info!(
+            job = job_id,
+            resumed,
+            staged = entries.len() - resumed,
+            "picked up where a previous attempt of this unpack stopped"
+        );
+    }
 
     let nested = queue_nested(state, payload.depth, &archive.blob_sha256, nested).await?;
 

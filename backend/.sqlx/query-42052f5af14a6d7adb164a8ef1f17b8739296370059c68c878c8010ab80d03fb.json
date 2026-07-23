@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, path as \"path!\", filename as \"filename!\",\n                  blob_sha256 as \"blob_sha256!\",\n                  kind as \"kind!: crate::routes::files::FileKind\"\n           FROM files\n           WHERE (($1::uuid IS NOT NULL AND model_id = $1)\n               OR ($2::uuid IS NOT NULL AND variant_id = $2)\n               OR ($3::uuid IS NOT NULL AND bundle_id = $3)\n               OR ($4::uuid IS NOT NULL AND import_id = $4))\n             AND ($5 = '' OR path = $5 OR path LIKE $5 || '/%')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "path!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "filename!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "filename"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "blob_sha256!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "blob_sha256"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "kind!: crate::routes::files::FileKind",
+        "type_info": {
+          "Custom": {
+            "name": "file_kind",
+            "kind": {
+              "Enum": [
+                "model",
+                "document",
+                "archive",
+                "other",
+                "project",
+                "raw"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "42052f5af14a6d7adb164a8ef1f17b8739296370059c68c878c8010ab80d03fb"
+}
