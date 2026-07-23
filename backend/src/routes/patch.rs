@@ -33,6 +33,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/bundles/{id}/patch/preview", post(preview))
         .route("/api/bundles/{id}/patch", post(apply))
+        .route("/api/models/{id}/patch/preview", post(model_preview))
+        .route("/api/models/{id}/patch", post(model_apply))
         // The zip carries images; the store streams, so no body cap.
         .layer(DefaultBodyLimit::disable())
 }
@@ -861,7 +863,7 @@ async fn preview(
 // Apply.
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, Default, PartialEq, Clone, Copy)]
+#[derive(Debug, Deserialize, Default, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum TagMode {
     #[default]
@@ -870,7 +872,7 @@ enum TagMode {
     Skip,
 }
 
-#[derive(Deserialize, Default, PartialEq, Clone, Copy)]
+#[derive(Debug, Deserialize, Default, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ImageMode {
     /// Drop the model's rendered previews and make the scraped image its picture.
@@ -907,7 +909,7 @@ struct ApplyOptions {
     matches: HashMap<String, Uuid>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, Default)]
 struct ApplyResult {
     models_updated: usize,
     images_added: usize,
@@ -1210,6 +1212,289 @@ async fn apply(
         custom_fields = result.custom_fields_set,
         "patch apply: committed"
     );
+    Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// Single-model patch: the same scraper zip, but onto one model rather than a
+// bundle's members. There is nothing to match — the target is fixed — so the
+// only question a multi-model patch raises is *which* patch model to apply, and
+// the user answers it. The bundle block contributes only creator/source
+// fill-if-empty; its name/cover/description belong to a bundle, and there isn't
+// one here.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, ToSchema)]
+struct ModelPatchPreview {
+    /// The model's current name — the left side of the rename diff.
+    model_name: String,
+    /// Whether the model already carries a creator / source URL, so the UI can
+    /// say whether the bundle-level values below would actually fill anything.
+    model_has_creator: bool,
+    model_has_source_url: bool,
+    /// The creator and source URL the patch's bundle block carries — stamped onto
+    /// the model only where it has none (see the apply). Shown so the fill is not
+    /// a surprise.
+    bundle_creator: Option<String>,
+    bundle_source_url: Option<String>,
+    /// One row per model the patch carries; the user picks which applies to this
+    /// model (auto-selected when there is only one).
+    models: Vec<ModelPatchRow>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ModelPatchRow {
+    /// The patch model's index — its stable identity, the same in preview and
+    /// apply (`model_index`). Names are not unique, so the UI keys on this.
+    key: usize,
+    patch_name: String,
+    /// The tags the patch carries (lowercased); the UI shows which are new once a
+    /// target is known (here, always this one model).
+    tags: Vec<String>,
+    has_image: bool,
+    has_description: bool,
+    category: Option<String>,
+    /// The Creator ID this row would write — it replaces what the model has.
+    creator_ref: Option<String>,
+    source_url: Option<String>,
+    /// Custom field values this row would write onto the model, and the ones it
+    /// would skip (each with why — informational, never fatal).
+    custom_fields_applied: usize,
+    custom_field_warnings: Vec<CustomFieldWarning>,
+}
+
+/// Read the single zip a model patch is delivered as — the first `file` part.
+/// (`read_upload` already rejects an empty upload.)
+async fn read_single(files: Vec<(String, Vec<u8>)>) -> Result<Archive, ApiError> {
+    let (name, bytes) = files
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::BadRequest("no file field in upload".into()))?;
+    read_archive_from_bytes(bytes).await.map_err(|e| match e {
+        ApiError::BadRequest(m) => ApiError::BadRequest(format!("{name}: {m}")),
+        other => other,
+    })
+}
+
+/// Survey one patch model's custom fields against this model: how many would
+/// write, and which would be skipped and why. Same primitive the bundle preview
+/// uses (`resolve_patch_value`), just for a single fixed owner.
+fn survey_model_fields(
+    fields: &HashMap<String, CustomField>,
+    pm: &PatchModel,
+    model_id: Uuid,
+) -> (usize, Vec<CustomFieldWarning>) {
+    let mut applied = 0;
+    let mut warnings = Vec::new();
+    let mut keys: Vec<&String> = pm.custom_fields.keys().collect();
+    keys.sort();
+    for key in keys {
+        match resolve_patch_value(
+            fields,
+            ValueOwner::Model(model_id),
+            key,
+            &pm.custom_fields[key],
+        ) {
+            Resolved::Value { .. } => applied += 1,
+            Resolved::Warning(reason) => warnings.push(CustomFieldWarning {
+                source: pm.label(),
+                key: key.clone(),
+                reason,
+            }),
+        }
+    }
+    (applied, warnings)
+}
+
+async fn model_preview(
+    State(state): State<AppState>,
+    user: User,
+    Path(model_id): Path<Uuid>,
+    multipart: Multipart,
+) -> Result<Json<ModelPatchPreview>, ApiError> {
+    let created_by = crate::routes::models::model_created_by(&state, model_id).await?;
+    user.require_can_edit(created_by)?;
+
+    let archive = read_single(read_upload(multipart).await?.files).await?;
+    let model = sqlx::query!(
+        r#"SELECT name,
+                  (creator_id IS NOT NULL) as "has_creator!",
+                  (source_url IS NOT NULL) as "has_source_url!"
+           FROM models WHERE id = $1"#,
+        model_id,
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    let fields = fields_by_key(&mut *state.db.acquire().await?).await?;
+    let has_image = |pm: &PatchModel| {
+        pm.image_paths()
+            .iter()
+            .any(|p| archive.images.contains_key(*p))
+    };
+    let models = archive
+        .patch
+        .models
+        .iter()
+        .enumerate()
+        .map(|(key, pm)| {
+            let (custom_fields_applied, custom_field_warnings) =
+                survey_model_fields(&fields, pm, model_id);
+            ModelPatchRow {
+                key,
+                patch_name: pm.label(),
+                tags: pm.tags.iter().map(|t| t.to_lowercase()).collect(),
+                has_image: has_image(pm),
+                has_description: pm
+                    .description_md
+                    .as_deref()
+                    .is_some_and(|d| !d.trim().is_empty()),
+                category: pm.category.clone(),
+                creator_ref: pm
+                    .source_ref
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .map(str::to_string),
+                source_url: pm
+                    .source_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .map(str::to_string),
+                custom_fields_applied,
+                custom_field_warnings,
+            }
+        })
+        .collect();
+
+    Ok(Json(ModelPatchPreview {
+        model_name: model.name,
+        model_has_creator: model.has_creator,
+        model_has_source_url: model.has_source_url,
+        bundle_creator: archive
+            .patch
+            .bundle
+            .creator
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
+        bundle_source_url: archive
+            .patch
+            .source
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string),
+        models,
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct ModelApplyOptions {
+    /// Which of the patch's models to apply to this one — its `key` from the
+    /// preview. Defaults to the first, which is the only one for a single-model
+    /// patch (the common case, where the UI need not ask).
+    #[serde(default)]
+    model_index: usize,
+    /// Rename this model to the chosen patch model's name.
+    #[serde(default)]
+    rename: bool,
+    #[serde(default)]
+    model_tags: TagMode,
+    #[serde(default)]
+    model_images: ImageMode,
+    #[serde(default)]
+    model_descriptions: bool,
+}
+
+#[tracing::instrument(skip_all, fields(model = %model_id))]
+async fn model_apply(
+    State(state): State<AppState>,
+    user: User,
+    Path(model_id): Path<Uuid>,
+    multipart: Multipart,
+) -> Result<Json<ApplyResult>, ApiError> {
+    let created_by = crate::routes::models::model_created_by(&state, model_id).await?;
+    user.require_can_edit(created_by)?;
+
+    let upload = read_upload(multipart).await?;
+    let options: ModelApplyOptions = match upload.options.as_deref() {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| ApiError::BadRequest(format!("bad options: {e}")))?,
+        None => ModelApplyOptions::default(),
+    };
+    let archive = read_single(upload.files).await?;
+
+    let pm = archive
+        .patch
+        .models
+        .get(options.model_index)
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "the patch has no model at index {} (it carries {})",
+                options.model_index,
+                archive.patch.models.len()
+            ))
+        })?;
+
+    // Put image blobs before opening the transaction — a blob put is async
+    // filesystem work, and a rollback must not have to un-write the store.
+    let mut staged_images = Vec::new();
+    if options.model_images != ImageMode::Skip {
+        for path in pm.image_paths() {
+            if let Some(staged) = stage_image(&state, &archive.images, path).await? {
+                staged_images.push(staged);
+            }
+        }
+    }
+
+    let custom_fields = fields_by_key(&mut *state.db.acquire().await?).await?;
+    let mut result = ApplyResult::default();
+    let mut tx = state.db.begin().await?;
+
+    // The bundle block's creator/source fill this model where it has none, the
+    // same fill-if-empty stamp a bundle patch gives its members.
+    let patch_creator_id = match archive.patch.bundle.creator.as_deref() {
+        Some(name) => resolve_creator(&mut tx, name).await?,
+        None => None,
+    };
+    let patch_source_url = archive
+        .patch
+        .source
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+
+    let current_name = sqlx::query_scalar!("SELECT name FROM models WHERE id = $1", model_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    apply_model_metadata(
+        &mut tx,
+        &state,
+        &user,
+        pm,
+        model_id,
+        &current_name,
+        &staged_images,
+        patch_creator_id,
+        patch_source_url,
+        &custom_fields,
+        PerModelOptions {
+            rename: options.rename,
+            model_tags: options.model_tags,
+            model_images: options.model_images,
+            model_descriptions: options.model_descriptions,
+        },
+        &mut result,
+    )
+    .await?;
+
+    tx.commit().await?;
     Ok(Json(result))
 }
 
@@ -2066,5 +2351,45 @@ mod tests {
             Err(other) => panic!("expected a bad-request, got {other:?}"),
             Ok(_) => panic!("expected the broken zip to fail the whole merge"),
         }
+    }
+
+    /// A single-model patch takes one zip; the reader names a bad one so the
+    /// error points at the file, the same courtesy the multi-zip merge gives.
+    #[tokio::test]
+    async fn read_single_reads_one_zip_and_names_a_bad_one() {
+        let (archive, _) = read_merged(vec![("only.zip".into(), zip_of("Solo", None, b"X"))])
+            .await
+            .unwrap();
+        assert_eq!(archive.patch.models.len(), 1);
+
+        match read_single(vec![("bad.zip".into(), b"nope".to_vec())]).await {
+            Err(ApiError::BadRequest(msg)) => assert!(msg.starts_with("bad.zip: "), "got {msg:?}"),
+            Err(other) => panic!("expected a bad-request, got {other:?}"),
+            Ok(_) => panic!("expected the broken zip to fail"),
+        }
+    }
+
+    /// The apply options default to "apply the only model, merge, replace the
+    /// render" — so a single-model patch needs no options at all, and `key`
+    /// (the preview's row id) is the `model_index` the apply selects by.
+    #[test]
+    fn model_apply_options_default_and_parse() {
+        let d: ModelApplyOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.model_index, 0);
+        assert!(!d.rename);
+        assert_eq!(d.model_tags, TagMode::Merge);
+        assert_eq!(d.model_images, ImageMode::ReplaceGenerated);
+        assert!(!d.model_descriptions);
+
+        let o: ModelApplyOptions = serde_json::from_str(
+            r#"{"model_index":2,"rename":true,"model_tags":"replace",
+                "model_images":"add","model_descriptions":true}"#,
+        )
+        .unwrap();
+        assert_eq!(o.model_index, 2);
+        assert!(o.rename);
+        assert_eq!(o.model_tags, TagMode::Replace);
+        assert_eq!(o.model_images, ImageMode::Add);
+        assert!(o.model_descriptions);
     }
 }
