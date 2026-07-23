@@ -934,6 +934,28 @@ export const api = {
       body: form,
     })
   },
+
+  /// Preview a bundle-patch zip onto a single model. The same scraper format,
+  /// but the patch decorates this one model rather than a bundle's members — so
+  /// there is nothing to match, only (when the patch carries more than one model)
+  /// a choice of which one to apply, keyed by its row `key`/`model_index`.
+  previewModelPatch: (modelId: string, zip: File) => {
+    const form = new FormData()
+    form.append('file', zip)
+    return request<ModelPatchPreview>(`/api/models/${modelId}/patch/preview`, {
+      method: 'POST',
+      body: form,
+    })
+  },
+  applyModelPatch: (modelId: string, zip: File, options: ModelPatchApplyOptions) => {
+    const form = new FormData()
+    form.append('options', JSON.stringify(options))
+    form.append('file', zip)
+    return request<PatchApplyResult>(`/api/models/${modelId}/patch`, {
+      method: 'POST',
+      body: form,
+    })
+  },
 }
 
 // --- Bundle metadata patch --------------------------------------------------
@@ -1024,6 +1046,51 @@ export interface PatchApplyResult {
   custom_fields_set: number
   /** models whose Creator ID the patch set or corrected */
   creator_refs_set: number
+}
+
+// --- Single-model metadata patch --------------------------------------------
+
+/** One model the patch carries — a candidate to apply to the target model. */
+export interface ModelPatchRow {
+  /** the patch model's index — its stable identity and the `model_index` to apply */
+  key: number
+  patch_name: string
+  /** tags the patch carries (already lowercased) */
+  tags: string[]
+  has_image: boolean
+  has_description: boolean
+  category: string | null
+  /** the Creator ID this would write — it replaces what the model has */
+  creator_ref: string | null
+  source_url: string | null
+  /** custom field values this row would write onto the model */
+  custom_fields_applied: number
+  /** ...and the ones it would skip, each with why — informational, never fatal */
+  custom_field_warnings: PatchCustomFieldWarning[]
+}
+
+export interface ModelPatchPreview {
+  /** the model's current name — the left side of the rename diff */
+  model_name: string
+  /** whether the model already has a creator / source URL (so the bundle fill is moot) */
+  model_has_creator: boolean
+  model_has_source_url: boolean
+  /** creator / source URL the patch's bundle block carries (fill-if-empty) */
+  bundle_creator: string | null
+  bundle_source_url: string | null
+  /** one row per model the patch carries; pick one (auto when there is only one) */
+  models: ModelPatchRow[]
+}
+
+export interface ModelPatchApplyOptions {
+  /** which patch model to apply — its row `key` */
+  model_index: number
+  /** rename the target model to the chosen patch model's name */
+  rename: boolean
+  model_tags: 'merge' | 'replace' | 'skip'
+  model_images: 'replace_generated' | 'add' | 'skip'
+  /** apply the chosen model's description as a new revision */
+  model_descriptions: boolean
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`
