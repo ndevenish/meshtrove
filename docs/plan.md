@@ -412,6 +412,10 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
   `GET /api/images/{id}` (serve); `PUT /api/images/{id}/primary` (mark as the
   owner's preview image, atomically demoting the previous primary)
 - `GET/POST /api/tags`; tag assignment on model create/update
+- `POST /api/{bundles|models}/{id}/patch/preview` + `.../patch` — apply a scraped
+  `meshtrove.bundle-patch/1` zip: onto a bundle (each patch model matched to a
+  member) or onto one model (the user picks which patch model when several).
+  Details and merge rules in `docs/bundle-patch.md`
 - `GET /api/jobs?status=` (visibility into queue); `POST /api/jobs/{id}/retry`
 - Admin: `GET/PUT /api/admin/settings/renderer`;
   `POST /api/admin/rerender { scope: "stale", mode: "add"|"replace" }` —

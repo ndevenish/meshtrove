@@ -224,6 +224,43 @@ POST /api/bundles/{id}/patch
 identity across preview and apply. Names are not unique (two "Gold"s), so
 everything keys on the index; send the same files to both calls.
 
+## Applying to a single model
+
+The same format applies onto **one model** from its detail page, for the scrape
+of a single product rather than a whole bundle. There are no members to match —
+the target is fixed — so the only question a patch raises is *which* of its
+models to apply, and the user answers it (there is nothing to ask when the patch
+carries just one). The **bundle block contributes only** `bundle.creator` and
+`source.url`, filled onto the model where it has none; `bundle.name`, cover and
+`description_md` describe a bundle and are ignored, as are `bundle.custom_fields`.
+
+Both endpoints require edit rights on the model, take one zip (not repeatable),
+and reuse the same per-model merge semantics and result shape as the bundle apply:
+
+```
+POST /api/models/{id}/patch/preview
+  file: the patch zip (one)
+→ 200 {
+    model_name,                       // current name — the rename diff's left side
+    model_has_creator, model_has_source_url,   // whether the bundle fill would apply
+    bundle_creator, bundle_source_url,         // the fill-if-empty values, or null
+    models: [{key, patch_name, tags, has_image, has_description, category,
+              creator_ref, source_url, custom_fields_applied, custom_field_warnings}]
+  }
+
+POST /api/models/{id}/patch
+  file:    the patch zip (one)
+  options: JSON text field {
+    model_index:  0,                    // which patch model — its preview `key`
+    rename:       bool,                 // default false
+    model_tags:   "merge" | "replace" | "skip",           // default merge
+    model_images: "replace_generated" | "add" | "skip",   // default replace_generated
+    model_descriptions: bool,           // default false
+  }
+→ 200 { models_updated, images_added, tags_added, aliases_added, descriptions_added,
+        custom_fields_set, creator_refs_set }
+```
+
 ## Applying several at once
 
 The `file` part is **repeatable**. Several per-model patches — one product page
