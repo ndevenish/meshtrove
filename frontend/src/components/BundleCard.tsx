@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom'
 import { Card, CardActionArea, CardContent, Typography, Box, Chip, Stack } from '@mui/material'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
 
-import { type BundleSummary, imageUrl } from '../api'
+import { type BundleSummary, squareImageUrl } from '../api'
 import LikeButton from './LikeButton'
 
 /// A bundle in the browse grid. Mirrors ModelCard but links to /bundles and
@@ -34,7 +34,7 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
           {bundle.primary_image_id ? (
             <Box
               component="img"
-              src={imageUrl(bundle.primary_image_id)}
+              src={squareImageUrl(bundle.primary_image_id)}
               alt={bundle.name}
               loading="lazy"
               sx={{ width: '100%', height: '100%', objectFit: 'cover' }}

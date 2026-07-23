@@ -4,20 +4,21 @@
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::Response,
     routing::{get, post, put},
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
-use crate::routes::files::stream_blob;
+use crate::routes::files::{serve_file, stream_blob};
 use crate::services::blobstore::BlobStore;
+use crate::services::squares;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -29,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/variants/{id}/images", post(upload_variant_image))
         .route("/api/bundles/{id}/images", post(upload_bundle_image))
         .route("/api/images/{id}", get(serve_image).delete(remove_image))
+        .route("/api/images/{id}/square", get(serve_square))
         .route("/api/images/{id}/primary", put(mark_primary))
         .route(
             "/api/models/{id}/images/{image_id}/promote",
@@ -243,6 +245,110 @@ async fn serve_image(
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct SquareQuery {
+    size: Option<u32>,
+}
+
+/// Serve a square version of an image, seam-carved from the original so a
+/// non-square photo loses its dull margins rather than being centre-cropped.
+///
+/// The carved preview is cached beside the store, keyed by the source blob and
+/// the requested edge, so the carve happens once per size. A source that is
+/// already square (renders are; some uploads are) carries no cheaper square than
+/// itself, so it is streamed as-is. Anything we cannot decode falls back to the
+/// original too — a broken card is worse than an uncarved one.
+///
+/// The URL is content-addressed in spirit — an image id names one immutable
+/// blob — so the response is marked immutable and cached hard by the browser,
+/// which is what keeps the server from re-deciding squareness on every card.
+async fn serve_square(
+    State(state): State<AppState>,
+    _user: User,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SquareQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let size = query
+        .size
+        .unwrap_or(squares::DEFAULT_SIZE)
+        .clamp(squares::MIN_SIZE, squares::MAX_SIZE);
+
+    let row = sqlx::query!("SELECT blob_sha256, mime FROM images WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let store_dir = state.config.store_dir.clone();
+    let sha = row.blob_sha256.clone();
+
+    // A carve already on disk needs no source and no CPU.
+    if let Some(preview) = squares::cached(&store_dir, &sha, size) {
+        return serve_square_file(&preview.path, preview.mime, &headers).await;
+    }
+
+    let source = state.store.path_for(&sha);
+    let built =
+        tokio::task::spawn_blocking(move || squares::build(&store_dir, &source, &sha, size))
+            .await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("carve task panicked: {e}")))?;
+
+    match built {
+        Ok(Some(preview)) => serve_square_file(&preview.path, preview.mime, &headers).await,
+        // Already square, or undecodable: serve the stored bytes unchanged.
+        Ok(None) => stream_blob(
+            &state,
+            &row.blob_sha256,
+            row.mime.as_deref().unwrap_or("image/png"),
+            None,
+            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        )
+        .await
+        .map(with_immutable_cache),
+        Err(error) => {
+            tracing::warn!(image = %id, %error, "square carve failed; serving original");
+            stream_blob(
+                &state,
+                &row.blob_sha256,
+                row.mime.as_deref().unwrap_or("image/png"),
+                None,
+                headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+            )
+            .await
+            .map(with_immutable_cache)
+        }
+    }
+}
+
+/// Long, immutable browser caching: the id names one blob for good, so a client
+/// that has the carve never needs to ask again.
+fn with_immutable_cache(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
+async fn serve_square_file(
+    path: &std::path::Path,
+    mime: &'static str,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("opening carved preview: {e}")))?;
+    let size = file
+        .metadata()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("statting carved preview: {e}")))?
+        .len();
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file(file, size, mime, None, range)
+        .await
+        .map(with_immutable_cache)
 }
 
 async fn image_owner(state: &AppState, id: Uuid) -> Result<(Owner, Uuid), ApiError> {

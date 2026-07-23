@@ -19,6 +19,7 @@ futures = "0.3.32"
 hex = "0.4.3"
 html-escape = "0.2.14"
 http-body = "1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 mime_guess = "2.0.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["stream", "json", "rustls"] }
 # statvfs for the admin storage panel

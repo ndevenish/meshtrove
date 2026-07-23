@@ -112,6 +112,9 @@ pub struct GcReport {
     /// newer than the grace period — most likely an upload still in flight,
     /// whose row has simply not been inserted yet.
     pub skipped_recent: i64,
+    /// Seam-carved square previews dropped because their source blob is gone.
+    /// Derived, not a blob — see `services::squares`.
+    pub squares_purged: u64,
 }
 
 /// Default grace period for disk orphans. Every write path stores the bytes
@@ -178,6 +181,27 @@ pub async fn sweep(state: &AppState, dry_run: bool, disk_grace: Duration) -> Res
             tracing::info!(blob = %entry.sha256, size = entry.size, "collected disk orphan");
         }
     }
+
+    // --- Derived square previews whose source blob no longer exists. ---
+    // A carve is live only if its source blob will *survive* this sweep. On a
+    // real run `known` already excludes the collected orphans; on a dry run they
+    // are still in `known`, so subtract them explicitly — otherwise the dry run
+    // reports 0 for the very carves a real run would drop, out of step with the
+    // would-be-freed counts above.
+    let survivors: HashSet<String> = if dry_run {
+        let doomed: HashSet<&str> = orphans.iter().map(|o| o.sha256.as_str()).collect();
+        known
+            .into_iter()
+            .filter(|sha| !doomed.contains(sha.as_str()))
+            .collect()
+    } else {
+        known
+    };
+    let store_dir = state.config.store_dir.clone();
+    report.squares_purged = tokio::task::spawn_blocking(move || {
+        super::squares::purge_stale(&store_dir, &survivors, dry_run)
+    })
+    .await??;
 
     Ok(report)
 }

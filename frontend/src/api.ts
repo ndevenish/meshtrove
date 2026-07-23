@@ -1019,6 +1019,11 @@ export interface PatchApplyResult {
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`
+/// A square version of an image for card thumbnails: the backend seam-carves a
+/// non-square source down to a square, taking the pixels from its dullest
+/// regions rather than centre-cropping the subject. Already-square images are
+/// served unchanged. `size` is the edge length in CSS pixels before DPR.
+export const squareImageUrl = (id: string, size = 512) => `/api/images/${id}/square?size=${size}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 /// An f3d-rendered PNG still of a single file, rendered on demand and not
 /// persisted. The STL viewer shows this first for large meshes, before the user

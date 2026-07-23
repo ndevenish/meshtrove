@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom'
 import { Card, CardActionArea, CardContent, Typography, Box, Chip, Stack } from '@mui/material'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
 
-import { type ModelSummary, imageUrl } from '../api'
+import { type ModelSummary, squareImageUrl } from '../api'
 import LikeButton from './LikeButton'
 
 export default function ModelCard({
@@ -34,7 +34,7 @@ export default function ModelCard({
           {model.primary_image_id ? (
             <Box
               component="img"
-              src={imageUrl(model.primary_image_id)}
+              src={squareImageUrl(model.primary_image_id)}
               alt={model.name}
               loading="lazy"
               sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
