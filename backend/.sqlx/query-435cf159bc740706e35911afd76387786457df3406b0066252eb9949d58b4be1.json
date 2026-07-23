@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE model_variants f SET name = NULL\n          WHERE f.model_id = $2 AND f.name IS NOT NULL\n            AND EXISTS (SELECT 1 FROM model_variants t\n                         WHERE t.model_id = $1 AND t.name = f.name)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "435cf159bc740706e35911afd76387786457df3406b0066252eb9949d58b4be1"
+}

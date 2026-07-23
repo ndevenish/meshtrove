@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO images (blob_sha256, model_id, kind, renderer, renderer_config,\n                             mime, width, height, is_primary, sort_order, created_by)\n         SELECT blob_sha256, $1, kind, renderer, renderer_config, mime, width, height,\n                is_primary AND NOT EXISTS\n                    (SELECT 1 FROM images o WHERE o.model_id = $1 AND o.is_primary),\n                sort_order, created_by\n         FROM images WHERE model_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "29fb972953f2e91ec4f8fab6768273b872e219eb4d8d7120ca996bb06dfe1ec0"
+}

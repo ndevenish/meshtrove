@@ -19,6 +19,7 @@ import EditIcon from '@mui/icons-material/Edit'
 import StarIcon from '@mui/icons-material/Star'
 import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
+import MergeIcon from '@mui/icons-material/Merge'
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
 import ReactMarkdown from 'react-markdown'
@@ -35,6 +36,7 @@ import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ModelDeleteDialog from '../components/ModelDeleteDialog'
+import ModelMergeDialog from '../components/ModelMergeDialog'
 
 export default function ModelPage() {
   const { id } = useParams<{ id: string }>()
@@ -54,6 +56,7 @@ export default function ModelPage() {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [mergeOpen, setMergeOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
 
@@ -361,9 +364,17 @@ export default function ModelPage() {
             )}
             {canEdit && editing && (
               <Stack direction="row" spacing={1}>
-                {/* Delete leads, kept clear of Save/Cancel: it sits at the far
-                    end from where a double-click on the primary action would
-                    land, so a stray second click can't fall on it. */}
+                {/* Merge and Delete both sit at the far end from Save, clear of
+                    where a double-click on the primary action would land, so a
+                    stray second click can't fall on either. */}
+                <Button
+                  startIcon={<MergeIcon />}
+                  disabled={saving}
+                  onClick={() => setMergeOpen(true)}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Merge in…
+                </Button>
                 <Button
                   color="error"
                   startIcon={<DeleteIcon />}
@@ -528,6 +539,20 @@ export default function ModelPage() {
           setDeleteOpen(false)
           await queryClient.invalidateQueries()
           navigate('/')
+        }}
+      />
+      <ModelMergeDialog
+        open={mergeOpen}
+        onClose={() => setMergeOpen(false)}
+        model={model}
+        onMerged={async (merged, from) => {
+          setMergeOpen(false)
+          // The survivor is this model; seed its cache with the merged result,
+          // then invalidate broadly — variant lists, file lists and browse
+          // counts all shifted, and this model absorbed the other's contents.
+          queryClient.setQueryData(['model', id], merged)
+          await queryClient.invalidateQueries()
+          setToast(`Merged “${from.name}” in`)
         }}
       />
       <Snackbar

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bundle_models (bundle_id, model_id)\n         SELECT bundle_id, $1 FROM bundle_models WHERE model_id = $2\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3eaf968a0761b30c51ec5f6cdc6bdc851798d493e9e170c9fe479b2767356b0b"
+}

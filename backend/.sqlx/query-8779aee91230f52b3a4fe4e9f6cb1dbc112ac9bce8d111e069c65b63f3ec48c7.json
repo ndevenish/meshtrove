@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET is_primary = false\n          WHERE model_id = $2 AND is_primary\n            AND EXISTS (SELECT 1 FROM images o WHERE o.model_id = $1 AND o.is_primary)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8779aee91230f52b3a4fe4e9f6cb1dbc112ac9bce8d111e069c65b63f3ec48c7"
+}

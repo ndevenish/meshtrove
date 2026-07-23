@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET model_id = $1 WHERE model_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4ebbd88ddbb64f3f15264fc69e3850563f627c79a2242fc0379024b40817ddc8"
+}

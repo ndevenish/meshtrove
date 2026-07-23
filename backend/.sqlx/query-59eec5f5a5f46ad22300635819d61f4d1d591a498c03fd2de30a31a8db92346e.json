@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO files (blob_sha256, variant_id, path, filename, mime, kind)\n             SELECT blob_sha256, $1, path, filename, mime, kind FROM files WHERE variant_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59eec5f5a5f46ad22300635819d61f4d1d591a498c03fd2de30a31a8db92346e"
+}

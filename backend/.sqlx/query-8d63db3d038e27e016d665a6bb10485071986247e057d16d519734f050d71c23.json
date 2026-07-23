@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_model_marks (user_id, model_id, mark)\n         SELECT user_id, $1, mark FROM user_model_marks WHERE model_id = $2\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8d63db3d038e27e016d665a6bb10485071986247e057d16d519734f050d71c23"
+}

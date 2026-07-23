@@ -17,10 +17,13 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::custom_fields::{
-    CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
+    CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, copy_values_onto,
+    fetch_values, values_of,
 };
 use crate::routes::tags::upsert_tag;
-use crate::routes::variants::{VariantDetail, fetch_variants};
+use crate::routes::variants::{
+    VariantDetail, fetch_variants, set_variant_tags, variant_with_tag_set,
+};
 use crate::state::AppState;
 use crate::util::{slug_token, slug_token_of, slugify};
 
@@ -28,6 +31,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/models", get(search).post(create))
         .route("/api/models/{id}", get(detail).put(update).delete(remove))
+        .route("/api/models/{id}/merge", axum::routing::post(merge))
         .route("/api/models/{id}/description", put(update_description))
         .route(
             "/api/models/{id}/description/revisions",
@@ -628,6 +632,340 @@ async fn remove(
     // Blobs are left in place: content-addressed and possibly shared. A future
     // GC job sweeps orphans (docs/plan.md).
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// merge
+// ---------------------------------------------------------------------------
+
+/// What becomes of the model being merged *in*, once its contents are on the
+/// model we're editing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OtherModel {
+    /// Everything comes across — files, variants, pictures, tags, provenance,
+    /// likes, bundle memberships and any custom field this model hasn't answered
+    /// — and the emptied model is deleted.
+    #[default]
+    Delete,
+    /// It stays exactly as it is; this model gains a *copy* of its files,
+    /// variants and pictures (and its tags, and any blank custom field). The
+    /// blobs are content-addressed and shared, so the copy is rows, not bytes.
+    Keep,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct MergeInput {
+    /// The model being merged into this one.
+    pub from: Uuid,
+    #[serde(default)]
+    pub other: OtherModel,
+}
+
+/// Fold another model into the one being edited.
+///
+/// This model survives — it keeps its own name, slug, URL and description. What
+/// the caller says is what becomes of the other: a duplicate picked up twice
+/// disappears into this one (`delete`), while a model that should stay standing
+/// lends this one a copy of its contents (`keep`).
+async fn merge(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<MergeInput>,
+) -> Result<Json<ModelDetail>, ApiError> {
+    user.require_can_edit(model_created_by(&state, id).await?)?;
+    if input.from == id {
+        return Err(ApiError::BadRequest(
+            "a model can't be merged into itself".into(),
+        ));
+    }
+    // Taking another model's files — and, on `delete`, the model itself — needs
+    // the right to edit it, not just the right to edit this one.
+    user.require_can_edit(model_created_by(&state, input.from).await?)?;
+
+    let mut tx = state.db.begin().await?;
+    match input.other {
+        OtherModel::Delete => move_model(&mut tx, input.from, id, &user).await?,
+        OtherModel::Keep => copy_model(&mut tx, input.from, id, &user).await?,
+    }
+    sqlx::query!("UPDATE models SET updated_at = now() WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    tracing::info!(into = %id, from = %input.from, other = ?input.other, "merged a model");
+    fetch_detail(&state, id, &user).await.map(Json)
+}
+
+/// Move everything `from` owns onto `into`, then delete `from`. A variant merge
+/// one level up: files and pictures change owner, variants move, and any that
+/// then share a tag set with one already on `into` fold together.
+async fn move_model(
+    tx: &mut sqlx::PgConnection,
+    from: Uuid,
+    into: Uuid,
+    user: &User,
+) -> Result<(), ApiError> {
+    // Loose model files and the archives they were carved from.
+    sqlx::query!(
+        "UPDATE files SET model_id = $1 WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE source_archives SET model_id = $1 WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    // One primary per model (a unique index): this model keeps its own cover, so
+    // an incoming primary arrives as an ordinary picture.
+    sqlx::query!(
+        "UPDATE images SET is_primary = false
+          WHERE model_id = $2 AND is_primary
+            AND EXISTS (SELECT 1 FROM images o WHERE o.model_id = $1 AND o.is_primary)",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE images SET model_id = $1 WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // A name is a label, unique per model; a variant's identity is its tag set.
+    // Clear an incoming name that collides with one already here so the move
+    // can't trip the name index — the tag set that identifies the variant is
+    // left untouched.
+    sqlx::query!(
+        "UPDATE model_variants f SET name = NULL
+          WHERE f.model_id = $2 AND f.name IS NOT NULL
+            AND EXISTS (SELECT 1 FROM model_variants t
+                         WHERE t.model_id = $1 AND t.name = f.name)",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Move the variants across. The tag-set unique constraint is deferred, so a
+    // duplicate can exist until the fold below clears it before commit.
+    sqlx::query!(
+        "UPDATE model_variants SET model_id = $1 WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Two variants of one model with the same tag set were always one variant:
+    // fold the pairs the move just created (the same helper the retag path runs).
+    sqlx::query!("SELECT merge_duplicate_variants()")
+        .execute(&mut *tx)
+        .await?;
+
+    // Tags, likes and bundle memberships are sets — union them on.
+    sqlx::query!(
+        "INSERT INTO model_tags (model_id, tag_id)
+         SELECT $1, tag_id FROM model_tags WHERE model_id = $2
+         ON CONFLICT DO NOTHING",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO user_model_marks (user_id, model_id, mark)
+         SELECT user_id, $1, mark FROM user_model_marks WHERE model_id = $2
+         ON CONFLICT DO NOTHING",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO bundle_models (bundle_id, model_id)
+         SELECT bundle_id, $1 FROM bundle_models WHERE model_id = $2
+         ON CONFLICT DO NOTHING",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    fill_blank_fields(&mut *tx, from, into, user).await?;
+
+    // The emptied model goes; its description revisions cascade with it, and this
+    // model keeps its own.
+    sqlx::query!("DELETE FROM models WHERE id = $1", from)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
+/// Copy everything `from` owns onto `into`, leaving `from` untouched. The blobs
+/// are content-addressed and shared, so this duplicates rows, not bytes. Likes
+/// and bundle memberships are the other model's own record rather than its
+/// contents, so they stay with it.
+async fn copy_model(
+    tx: &mut sqlx::PgConnection,
+    from: Uuid,
+    into: Uuid,
+    user: &User,
+) -> Result<(), ApiError> {
+    // Loose model files and the record of the archives they came from.
+    sqlx::query!(
+        "INSERT INTO files (blob_sha256, model_id, path, filename, mime, kind)
+         SELECT blob_sha256, $1, path, filename, mime, kind FROM files WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO source_archives (model_id, filename, sha256, size)
+         SELECT $1, filename, sha256, size FROM source_archives WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+    // A copied picture points at no source file of its own (that file is on the
+    // other model), and an incoming primary only takes if this model has no
+    // cover yet.
+    sqlx::query!(
+        "INSERT INTO images (blob_sha256, model_id, kind, renderer, renderer_config,
+                             mime, width, height, is_primary, sort_order, created_by)
+         SELECT blob_sha256, $1, kind, renderer, renderer_config, mime, width, height,
+                is_primary AND NOT EXISTS
+                    (SELECT 1 FROM images o WHERE o.model_id = $1 AND o.is_primary),
+                sort_order, created_by
+         FROM images WHERE model_id = $2",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Each of the other model's variants copies onto the one here that shares its
+    // tag set, or a fresh one carrying the same tags. Oldest first, so a copied
+    // variant that has to be renamed away from a clash keeps the earliest label.
+    let variants = sqlx::query!(
+        "SELECT id, name, print_notes FROM model_variants
+          WHERE model_id = $1 ORDER BY created_at, id",
+        from,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for v in variants {
+        let tag_ids: Vec<Uuid> = sqlx::query_scalar!(
+            "SELECT tag_id FROM variant_tag_assignments WHERE variant_id = $1",
+            v.id,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let target = match variant_with_tag_set(&mut *tx, into, &tag_ids).await? {
+            Some(existing) => existing,
+            None => {
+                let name = free_variant_name(&mut *tx, into, v.name).await?;
+                let new_id: Uuid = sqlx::query_scalar!(
+                    "INSERT INTO model_variants (model_id, name, print_notes, created_by)
+                     VALUES ($1, $2, $3, $4) RETURNING id",
+                    into,
+                    name,
+                    v.print_notes,
+                    user.id,
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                set_variant_tags(&mut *tx, new_id, &tag_ids).await?;
+                new_id
+            }
+        };
+
+        sqlx::query!(
+            "INSERT INTO files (blob_sha256, variant_id, path, filename, mime, kind)
+             SELECT blob_sha256, $1, path, filename, mime, kind FROM files WHERE variant_id = $2",
+            target,
+            v.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO images (blob_sha256, variant_id, kind, renderer, renderer_config,
+                                 mime, width, height, is_primary, sort_order, created_by)
+             SELECT blob_sha256, $1, kind, renderer, renderer_config, mime, width, height,
+                    is_primary AND NOT EXISTS
+                        (SELECT 1 FROM images o WHERE o.variant_id = $1 AND o.is_primary),
+                    sort_order, created_by
+             FROM images WHERE variant_id = $2",
+            target,
+            v.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query!(
+        "INSERT INTO model_tags (model_id, tag_id)
+         SELECT $1, tag_id FROM model_tags WHERE model_id = $2
+         ON CONFLICT DO NOTHING",
+        into,
+        from,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    fill_blank_fields(&mut *tx, from, into, user).await?;
+    Ok(())
+}
+
+/// The other model's custom-field answers, copied onto this one, but only for
+/// fields this model hasn't answered itself: a value already here wins.
+async fn fill_blank_fields(
+    tx: &mut sqlx::PgConnection,
+    from: Uuid,
+    into: Uuid,
+    user: &User,
+) -> Result<(), ApiError> {
+    let theirs = values_of(&mut *tx, ValueOwner::Model(from)).await?;
+    let mine = values_of(&mut *tx, ValueOwner::Model(into)).await?;
+    copy_values_onto(
+        &mut *tx,
+        &theirs,
+        ValueOwner::Model(into),
+        |v| !mine.iter().any(|m| m.field_id == v.field_id),
+        user,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A variant name free to use on `model_id` — the given one if no variant there
+/// already carries it, else none. A name is only a label, so a copied variant
+/// gives its up rather than collide (its tag set is what identifies it).
+async fn free_variant_name(
+    tx: &mut sqlx::PgConnection,
+    model_id: Uuid,
+    name: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let Some(name) = name else { return Ok(None) };
+    let taken = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM model_variants WHERE model_id = $1 AND name = $2)",
+        model_id,
+        name,
+    )
+    .fetch_one(&mut *tx)
+    .await?
+    .unwrap_or(false);
+    Ok((!taken).then_some(name))
 }
 
 // ---------------------------------------------------------------------------

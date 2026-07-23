@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO source_archives (model_id, filename, sha256, size)\n         SELECT $1, filename, sha256, size FROM source_archives WHERE model_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34ffd68fc34acb2c6ec6fdc015b41d6b274c0e27a0bc2e44e1eea89b01085da5"
+}

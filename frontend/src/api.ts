@@ -258,6 +258,11 @@ export type BundleMemberDisposition = 'keep' | 'delete' | 'delete_exclusive'
 /// and deletes it.
 export type OtherBundleDisposition = 'keep' | 'delete'
 
+/// What becomes of the model merged *into* another: `delete` moves everything it
+/// has across and deletes it; `keep` leaves it whole and gives the survivor a
+/// copy of its files, variants and pictures instead.
+export type OtherModelDisposition = 'keep' | 'delete'
+
 /// One row in the unified browse (models + bundles mixed). `count` is
 /// variant_count for models, model_count for bundles.
 export interface BrowseItem {
@@ -707,6 +712,9 @@ export const api = {
   updateModel: (id: string, body: unknown) =>
     request<ModelDetail>(`/api/models/${id}`, { ...json(body), method: 'PUT' }),
   deleteModel: (id: string) => request<void>(`/api/models/${id}`, { method: 'DELETE' }),
+  /** Absorb `from` into `id`; returns the model that did the absorbing. */
+  mergeModel: (id: string, from: string, other: OtherModelDisposition) =>
+    request<ModelDetail>(`/api/models/${id}/merge`, json({ from, other })),
 
   // Description revisions work identically for models and bundles.
   updateDescription: (owner: DescOwner, id: string, body_md: string) =>
