@@ -377,6 +377,12 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
 ## API surface
 
 - `POST /auth/register|login|logout`; `GET /api/me`; `GET /api/version`
+- Auth is a session cookie for browsers **or** `Authorization: Bearer <token>`
+  for API clients — both resolve through the one `User` extractor, so a token
+  reaches the whole `/api/*` surface (the SPA shell needs no auth). Admin mints
+  tokens: `GET/POST /api/admin/tokens`, `DELETE /api/admin/tokens/{id}`. A token
+  acts as the admin who created it (sha256-hashed at rest, optional expiry); an
+  invalid/expired Bearer is a hard 401
 - `GET /api/browse` — unified model+bundle search (`?q=&tags=&vtags=`, see
   Search design above)
 - `GET/POST/PUT/DELETE /api/creators`
@@ -421,7 +427,7 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
   `POST /api/admin/rerender { scope: "stale", mode: "add"|"replace" }` —
   enqueues render jobs for images whose renderer/config ≠ current setting
 - Permissions: viewer = read + marks; editor = edit own models/bundles;
-  admin = edit all + settings
+  admin = edit all + settings + API tokens
 
 ## Imports — the staging area
 
