@@ -444,6 +444,14 @@ function ImportWorkbench() {
     )
   }
 
+  // Which of the Contents panels is about to be drawn, because the file tree
+  // scrolls itself and the others don't. Two nested scrollers over one list is
+  // one too many: the wheel acts on whichever the pointer is over, and the
+  // column's bar and the tree's bar sit a few pixels apart both claiming to
+  // describe the same thing. So the column only scrolls for the panels that
+  // need it, and hands the tree a fixed height to fill instead.
+  const treeFills = !staged.unpacking && (lazy || (!filesLoading && !layout))
+
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 2 }}>
@@ -669,7 +677,9 @@ function ImportWorkbench() {
             position: { md: 'sticky' },
             top: { md: 88 },
             maxHeight: { md: 'calc(100vh - 104px)' },
-            overflowY: { md: 'auto' },
+            ...(treeFills
+              ? { display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }
+              : { overflowY: { md: 'auto' } }),
           }}
         >
           <Typography variant="h6" sx={{ mb: 1 }}>
@@ -690,6 +700,7 @@ function ImportWorkbench() {
               onFolderSplit={splitFolder}
               onFolderSplitMany={splitFolders}
               maxHeight="calc(100vh - 160px)"
+              fill
             />
           ) : filesLoading ? (
             // Until the first fetch lands we hold an empty list, which the file
@@ -716,6 +727,7 @@ function ImportWorkbench() {
               onFolderSplit={splitFolder}
               onFolderSplitMany={splitFolders}
               maxHeight="calc(100vh - 160px)"
+              fill
             />
           )}
         </Box>

@@ -440,6 +440,7 @@ export const FileTree = memo(function FileTree({
   onFolderSplit,
   onFolderSplitMany,
   maxHeight = '70vh',
+  fill = false,
 }: {
   files: FileRecord[]
   /** How tall the list may grow before it scrolls within itself. Virtualising
@@ -447,6 +448,12 @@ export const FileTree = memo(function FileTree({
       height and look exactly as they did, long ones stop taking the page with
       them. */
   maxHeight?: number | string
+  /** Take the height a fixed-height parent gives us rather than asking for one.
+      For a caller that already caps its column: without this the tree's own
+      scroller sits inside the column's, and a drag on the tree scrolls whichever
+      of the two the pointer happens to be over. `maxHeight` still applies, so
+      the same element also works unfilled at narrow widths. */
+  fill?: boolean
   /** Every folder and how many files it holds directly, when the caller is
       loading them lazily. Without it the tree is built from `files` alone and
       everything is assumed present. */
@@ -1139,7 +1146,13 @@ export const FileTree = memo(function FileTree({
     )
 
   return (
-    <Box>
+    <Box
+      sx={
+        fill
+          ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }
+          : undefined
+      }
+    >
       {/* Once folders are ticked, this replaces the fold controls: acting on the
           selection is what the toolbar is for now. Sticks to the top of the panel
           so it stays reachable however far the tree is scrolled. */}
@@ -1209,7 +1222,15 @@ export const FileTree = memo(function FileTree({
           </Stack>
         )
       )}
-      <Box ref={scrollRef} sx={{ maxHeight, overflowY: 'auto', overscrollBehavior: 'contain' }}>
+      <Box
+        ref={scrollRef}
+        sx={{
+          maxHeight,
+          overflowY: 'auto',
+          overscrollBehavior: 'contain',
+          ...(fill && { flex: '1 1 auto', minHeight: 0 }),
+        }}
+      >
         {/* Sized to the whole list, so the scrollbar describes the tree rather
             than the handful of rows currently built. */}
         <Box sx={{ position: 'relative', height: virtualizer.getTotalSize() }}>
