@@ -196,13 +196,18 @@ impl FromRequestParts<AppState> for User {
 /// value and look that up.
 async fn authenticate_token(state: &AppState, token: &str) -> Result<User, AuthError> {
     let hash = crate::routes::api_tokens::hash_token(token);
+    // The effective role is the *least* privilege of the token's role and the
+    // owner's live role. The `user_role` enum is declared admin < editor <
+    // viewer, so GREATEST is the more restrictive of the two — a viewer token
+    // stays a viewer, and a token can never outrank an owner who was demoted.
     sqlx::query_as!(
         User,
         r#"UPDATE api_tokens t SET last_used_at = now()
            FROM users u
            WHERE t.token_hash = $1 AND u.id = t.created_by
              AND (t.expires_at IS NULL OR t.expires_at > now())
-           RETURNING u.id, u.username as "username: String", u.role as "role: UserRole""#,
+           RETURNING u.id, u.username as "username: String",
+                     GREATEST(t.role, u.role) as "role!: UserRole""#,
         hash,
     )
     .fetch_optional(&state.db)

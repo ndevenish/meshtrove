@@ -20,7 +20,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::extractors::User;
+use crate::extractors::{User, UserRole};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -52,6 +52,8 @@ fn generate_token() -> String {
 struct TokenSummary {
     id: Uuid,
     name: String,
+    /// The role the token grants — capped at its owner's live role when used.
+    role: UserRole,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
     expires_at: Option<DateTime<Utc>>,
@@ -65,7 +67,8 @@ async fn list(
 ) -> Result<Json<Vec<TokenSummary>>, ApiError> {
     user.require_admin()?;
     let rows = sqlx::query!(
-        r#"SELECT t.id, t.name, t.created_at, t.last_used_at, t.expires_at,
+        r#"SELECT t.id, t.name, t.role as "role: UserRole",
+                  t.created_at, t.last_used_at, t.expires_at,
                   u.username as "created_by_username: String"
            FROM api_tokens t JOIN users u ON u.id = t.created_by
            ORDER BY t.created_at DESC"#,
@@ -77,6 +80,7 @@ async fn list(
             .map(|r| TokenSummary {
                 id: r.id,
                 name: r.name,
+                role: r.role,
                 created_at: r.created_at,
                 last_used_at: r.last_used_at,
                 expires_at: r.expires_at,
@@ -89,6 +93,10 @@ async fn list(
 #[derive(Deserialize, ToSchema)]
 struct CreateToken {
     name: String,
+    /// The role the token grants. Omit for a full-admin token (the default and
+    /// prior behaviour); set `editor` or `viewer` for a lesser, safer token.
+    #[serde(default)]
+    role: Option<UserRole>,
     /// Optional expiry; omit or null for a token that never expires.
     #[serde(default)]
     expires_at: Option<DateTime<Utc>>,
@@ -100,6 +108,7 @@ struct CreateToken {
 struct NewToken {
     id: Uuid,
     name: String,
+    role: UserRole,
     token: String,
     created_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
@@ -116,14 +125,19 @@ async fn create(
         return Err(ApiError::BadRequest("a token name is required".into()));
     }
 
+    // Default to admin, matching a token minted before roles existed. Any role
+    // is allowed here — only an admin reaches this handler, and the extractor
+    // caps the effective role at the owner's live role anyway.
+    let role = input.role.unwrap_or(UserRole::Admin);
     let token = generate_token();
     let hash = hash_token(&token);
     let row = sqlx::query!(
-        r#"INSERT INTO api_tokens (name, token_hash, created_by, expires_at)
-           VALUES ($1, $2, $3, $4)
+        r#"INSERT INTO api_tokens (name, token_hash, role, created_by, expires_at)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING id, created_at"#,
         name,
         hash,
+        role as UserRole,
         user.id,
         input.expires_at,
     )
@@ -133,6 +147,7 @@ async fn create(
     Ok(Json(NewToken {
         id: row.id,
         name,
+        role,
         token,
         created_at: row.created_at,
         expires_at: input.expires_at,
