@@ -75,6 +75,15 @@ function ImportWorkbench() {
   // re-resolved from the loaded list below.
   const [targetId, setTargetId] = useImportDraftState<string | null>(id!, 'targetId', null)
   const [layout, setLayout] = useState<{ spec: LayoutSpec; plan: LayoutPlan } | null>(null)
+  // Show the plain tree even though a layout is planned. Mid-carve you still
+  // want the drop as it actually is — to see what a folder holds, drop chaff, or
+  // flatten a wrapper the rules are fighting — and the annotated list is a view
+  // of the plan, not of the files. Not in the draft: which view you last had
+  // open is about this sitting, and the carve is what the page comes back to.
+  const [showFiles, setShowFiles] = useState(false)
+  // Bumped whenever files move under a planned layout, so the panel re-plans
+  // against the tree as it now stands. See its `revision` prop.
+  const [fileRevision, setFileRevision] = useState(0)
   // Per member-model merge choices from the layout panel, index-aligned to the
   // plan's models (a member id or null=new); null when not merging into a bundle.
   const [mergeTargets, setMergeTargets] = useState<(string | null)[] | null>(null)
@@ -209,6 +218,7 @@ function ImportWorkbench() {
     await queryClient.invalidateQueries({ queryKey: ['import-folder-files', id] })
     await queryClient.invalidateQueries({ queryKey: ['import-files', id] })
     await queryClient.invalidateQueries({ queryKey: ['imports'] })
+    setFileRevision((n) => n + 1)
   }
 
   // Referentially stable so the memoised layout panel isn't re-rendered by
@@ -450,7 +460,9 @@ function ImportWorkbench() {
   // column's bar and the tree's bar sit a few pixels apart both claiming to
   // describe the same thing. So the column only scrolls for the panels that
   // need it, and hands the tree a fixed height to fill instead.
-  const treeFills = !staged.unpacking && (lazy || (!filesLoading && !layout))
+  const treeFills = !staged.unpacking && (lazy || (!filesLoading && (!layout || showFiles)))
+  // Only a choice once there is a plan to be an alternative to.
+  const canSwitchViews = !staged.unpacking && !filesLoading && !lazy && !!layout
 
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
@@ -623,6 +635,7 @@ function ImportWorkbench() {
               fileCount={
                 lazy ? staged.file_count : fileList.filter((f) => f.kind !== 'archive').length
               }
+              revision={fileRevision}
               unpacking={staged.unpacking}
               target={dest === 'new_model' ? 'model' : 'bundle'}
               bundleId={dest === 'bundle' ? target?.id : undefined}
@@ -682,9 +695,26 @@ function ImportWorkbench() {
               : { overflowY: { md: 'auto' } }),
           }}
         >
-          <Typography variant="h6" sx={{ mb: 1 }}>
-            Contents
-          </Typography>
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
+            <Typography variant="h6" sx={{ flexGrow: 1 }}>
+              Contents
+            </Typography>
+            {canSwitchViews && (
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={showFiles ? 'files' : 'carve'}
+                onChange={(_, next) => next && setShowFiles(next === 'files')}
+              >
+                <ToggleButton value="carve" sx={{ textTransform: 'none', py: 0.25 }}>
+                  Carve
+                </ToggleButton>
+                <ToggleButton value="files" sx={{ textTransform: 'none', py: 0.25 }}>
+                  Files
+                </ToggleButton>
+              </ToggleButtonGroup>
+            )}
+          </Stack>
           {staged.unpacking ? (
             <ImportStagingProgress staged={staged} folders={folders ?? NO_FOLDERS} />
           ) : lazy ? (
@@ -712,7 +742,7 @@ function ImportWorkbench() {
                 Loading files…
               </Typography>
             </Stack>
-          ) : layout ? (
+          ) : layout && !showFiles ? (
             <AnnotatedFileList
               files={fileList}
               annotations={layout.plan.annotations}

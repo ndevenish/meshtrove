@@ -98,6 +98,7 @@ const blankRule = (): LayoutRule => ({
 export default memo(function ImportLayoutPanel({
   importId,
   fileCount,
+  revision = 0,
   unpacking,
   target,
   bundleId,
@@ -107,6 +108,11 @@ export default memo(function ImportLayoutPanel({
   importId: string
   /** re-plan when this grows */
   fileCount: number
+  /** bumped by the caller whenever the staged files change in a way the count
+      doesn't show — a folder flattened or renamed from the file view keeps every
+      file and moves them all, and the rules match on path, so the plan on screen
+      would otherwise still be annotating the old tree */
+  revision?: number
   /** the archive is still extracting: plan against the finished tree, not a
       half-unpacked one that changes under us every second */
   unpacking: boolean
@@ -278,6 +284,7 @@ export default memo(function ImportLayoutPanel({
     rules,
     target,
     fileCount,
+    revision,
     unpacking,
     effectiveFlatten,
     keepUnmatched,
