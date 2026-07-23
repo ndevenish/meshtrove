@@ -1156,264 +1156,34 @@ async fn apply(
     // ---- per model ----
     for (idx, model_id) in &targets {
         let pm = &archive.patch.models[*idx];
-        let mut touched = false;
-
-        // Stamp the bundle's creator/source onto the model, but only where it has
-        // none — coalesce keeps whatever the model already knows, and the WHERE
-        // means an all-already-set model reports no change.
-        if patch_creator_id.is_some() || patch_source_url.is_some() {
-            let filled = sqlx::query!(
-                r#"UPDATE models SET
-                     creator_id = coalesce(creator_id, $2::uuid),
-                     source_url = coalesce(source_url, $3::text)
-                   WHERE id = $1
-                     AND (($2::uuid IS NOT NULL AND creator_id IS NULL)
-                       OR ($3::text IS NOT NULL AND source_url IS NULL))"#,
-                model_id,
-                patch_creator_id,
-                patch_source_url,
-            )
-            .execute(&mut *tx)
-            .await?;
-            if filled.rows_affected() > 0 {
-                touched = true;
-            }
-        }
-
-        // The model's *own* page, when the scrape has one. Unlike the bundle's
-        // URL above this replaces: `source.url` is a fill-if-empty guess (the
-        // bundle's page stamped on a member for want of anything better), while
-        // this is the page that model was actually scraped from, so a re-scrape
-        // should be able to correct a URL an earlier one guessed.
-        if let Some(url) = pm
-            .source_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-        {
-            let set = sqlx::query!(
-                r#"UPDATE models SET source_url = $2
-                   WHERE id = $1 AND source_url IS DISTINCT FROM $2"#,
-                model_id,
-                url,
-            )
-            .execute(&mut *tx)
-            .await?;
-            if set.rows_affected() > 0 {
-                touched = true;
-            }
-        }
-
-        // The creator's own id/SKU (`models.creator_ref`, shown as "Creator ID").
-        //
-        // **Replaces**, like `source_url` and for the same reason: the shop page
-        // is the authority on the shop's own product code, and a re-scrape
-        // should be able to correct one an earlier pass got wrong. The other
-        // filler of this column is a carve layout's `creator_ref` capture group,
-        // which read it off a folder name — a name that may well be a truncation
-        // of the real code, so deferring to it would be deferring to the weaker
-        // source. Blank/whitespace is absent, and clears nothing.
-        if let Some(reference) = pm
-            .source_ref
-            .as_deref()
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-        {
-            let set = sqlx::query!(
-                r#"UPDATE models SET creator_ref = $2
-                   WHERE id = $1 AND creator_ref IS DISTINCT FROM $2"#,
-                model_id,
-                reference,
-            )
-            .execute(&mut *tx)
-            .await?;
-            if set.rows_affected() > 0 {
-                result.creator_refs_set += 1;
-                touched = true;
-            }
-        }
-
-        let renamed_to = if options.rename.contains(&idx.to_string()) {
-            pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
-        } else {
-            None
-        };
-        if let Some(name) = renamed_to {
-            // The slug follows the name, like the model editor and the bundle
-            // rename above: regenerate it from the new name, carrying the current
-            // slug's token so the URL keeps its identity and old slugs/the UUID
-            // still redirect. Without this the slug stayed stale — "Bayul" kept
-            // `bayul-<token>` after being renamed to "Bayul Greytusk".
-            let current_slug =
-                sqlx::query_scalar!("SELECT slug FROM models WHERE id = $1", model_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            let slug = crate::routes::models::unique_slug(
-                &state,
-                name,
-                Some(&current_slug),
-                Some(*model_id),
-            )
-            .await?;
-            sqlx::query!(
-                "UPDATE models SET name = $2, slug = $3 WHERE id = $1",
-                model_id,
-                name,
-                slug,
-            )
-            .execute(&mut *tx)
-            .await?;
-            touched = true;
-        }
-
-        if options.model_tags != TagMode::Skip && !pm.tags.is_empty() {
-            if options.model_tags == TagMode::Replace {
-                sqlx::query!("DELETE FROM model_tags WHERE model_id = $1", model_id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            for name in &pm.tags {
-                let tag = upsert_tag(&mut *tx, name).await?;
-                let added = sqlx::query!(
-                    "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2)
-                     ON CONFLICT DO NOTHING",
-                    model_id,
-                    tag.id,
-                )
-                .execute(&mut *tx)
-                .await?;
-                result.tags_added += added.rows_affected() as usize;
-            }
-            touched = true;
-        }
-
-        // A model description becomes a revision, like every description edit
-        // (newest = current, history kept) — but only when it would change
-        // something: re-applying the same patch must not stack duplicate
-        // revisions the way it must not re-add tags or images.
-        if options.model_descriptions
-            && let Some(body) = pm
-                .description_md
-                .as_deref()
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-        {
-            let current = sqlx::query_scalar!(
-                "SELECT body_md FROM model_description_revisions
-                 WHERE model_id = $1 ORDER BY created_at DESC LIMIT 1",
-                model_id,
-            )
-            .fetch_optional(&mut *tx)
-            .await?;
-            if current.as_deref() != Some(body) {
-                sqlx::query!(
-                    "INSERT INTO model_description_revisions (model_id, body_md, created_by)
-                     VALUES ($1, $2, $3)",
-                    model_id,
-                    body,
-                    user.id,
-                )
-                .execute(&mut *tx)
-                .await?;
-                result.descriptions_added += 1;
-                touched = true;
-            }
-        }
-
-        if let Some(imgs) = model_images.get(idx) {
-            if options.model_images == ImageMode::ReplaceGenerated {
-                // The auto previews live on the model's variants (and, rarely, the
-                // model). Drop them so the scraped image is what shows.
-                sqlx::query!(
-                    "DELETE FROM images WHERE kind = 'rendered' AND (model_id = $1
-                       OR variant_id IN (SELECT id FROM model_variants WHERE model_id = $1))",
-                    model_id,
-                )
-                .execute(&mut *tx)
-                .await?;
-            }
-            sqlx::query!(
-                "UPDATE images SET is_primary = false WHERE model_id = $1 AND is_primary",
-                model_id,
-            )
-            .execute(&mut *tx)
-            .await?;
-            // First is primary, the rest ride along — the same rule as
-            // `bundle.images`. Deduped by content hash inside insert_image, so
-            // re-applying a patch adds nothing.
-            for (n, img) in imgs.iter().enumerate() {
-                if insert_image(&mut tx, ImageOwner::Model(*model_id), img, n == 0, user.id).await?
-                {
-                    result.images_added += 1;
-                }
-            }
-            touched = true;
-        }
-
-        // ---- aliases ----
-        // Teach the model every name this scrape knows it by, so a later import
-        // resolves it outright instead of falling back to a fuzzy match; a rename
-        // also records the name being left behind. citext + the (model, alias)
-        // key dedup case variants; we drop any that just repeat the model's own
-        // (final) name.
-        let member = members.iter().find(|m| m.id == *model_id);
-        let final_name = renamed_to
-            .map(str::to_string)
-            .or_else(|| member.map(|m| m.name.clone()))
+        // The name the model currently carries, for the alias dedup and the
+        // "name left behind" a rename records.
+        let current_name = members
+            .iter()
+            .find(|m| m.id == *model_id)
+            .map(|m| m.name.as_str())
             .unwrap_or_default();
-        let mut aliases: Vec<&str> = pm.match_hint.aliases.iter().map(String::as_str).collect();
-        if renamed_to.is_some()
-            && let Some(m) = member
-        {
-            aliases.push(m.name.as_str());
-        }
-        // Rename declined: the name it would have taken is still a name this scrape
-        // knows the model by. Record it as an alias so a later import recognises the
-        // model by it and doesn't re-offer the rename. (When the rename was applied,
-        // pm.name is the new name and the dedup below drops it — hence the guard.)
-        if renamed_to.is_none()
-            && let Some(name) = pm.name.as_deref()
-        {
-            aliases.push(name);
-        }
-        for alias in aliases {
-            let alias = alias.trim();
-            if alias.is_empty() || alias.eq_ignore_ascii_case(&final_name) {
-                continue;
-            }
-            let added = sqlx::query!(
-                "INSERT INTO model_aliases (model_id, alias) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                model_id,
-                alias,
-            )
-            .execute(&mut *tx)
-            .await?;
-            if added.rows_affected() > 0 {
-                result.aliases_added += 1;
-                touched = true;
-            }
-        }
-
-        // Scraped extra metadata. An unknown or inapplicable key was already
-        // reported as a warning by the preview; here it is simply skipped.
-        if !pm.custom_fields.is_empty() {
-            let skipped = apply_patch_values(
-                &mut tx,
-                &custom_fields,
-                ValueOwner::Model(*model_id),
-                &pm.custom_fields,
-                &user,
-            )
-            .await?;
-            if pm.custom_fields.len() > skipped.len() {
-                result.custom_fields_set += pm.custom_fields.len() - skipped.len();
-                touched = true;
-            }
-        }
-
-        if touched {
-            result.models_updated += 1;
-        }
+        let per_model = PerModelOptions {
+            rename: options.rename.contains(&idx.to_string()),
+            model_tags: options.model_tags,
+            model_images: options.model_images,
+            model_descriptions: options.model_descriptions,
+        };
+        apply_model_metadata(
+            &mut tx,
+            &state,
+            &user,
+            pm,
+            *model_id,
+            current_name,
+            model_images.get(idx).map(Vec::as_slice).unwrap_or(&[]),
+            patch_creator_id,
+            patch_source_url,
+            &custom_fields,
+            per_model,
+            &mut result,
+        )
+        .await?;
     }
 
     // The bundle's own extra metadata, and the members it reaches from there.
@@ -1441,6 +1211,291 @@ async fn apply(
         "patch apply: committed"
     );
     Ok(Json(result))
+}
+
+/// How to apply one patch model's metadata onto its target — the subset of the
+/// apply options that is per-model rather than per-request.
+struct PerModelOptions {
+    /// Rename the target to the patch's `name` (slug follows).
+    rename: bool,
+    model_tags: TagMode,
+    model_images: ImageMode,
+    model_descriptions: bool,
+}
+
+/// Merge one `PatchModel`'s metadata onto one library model, inside the caller's
+/// transaction. This is the whole per-model half of a patch apply — the bundle
+/// apply runs it once per matched member, the single-model apply runs it once for
+/// the model the user picked, so the merge rules (creator/source fill-if-empty,
+/// own source_url/creator_ref replace, opt-in rename, tag merge/replace/skip,
+/// description-as-revision with dedup, image replace/add/skip, alias recording,
+/// custom fields) live in exactly one place.
+///
+/// `current_name` is the model's name as it stands now: the fallback for the
+/// alias dedup and the name a rename leaves behind. Counters accumulate into
+/// `result`, and a model that changed anything bumps `models_updated`.
+#[allow(clippy::too_many_arguments)]
+async fn apply_model_metadata(
+    tx: &mut sqlx::PgConnection,
+    state: &AppState,
+    user: &User,
+    pm: &PatchModel,
+    model_id: Uuid,
+    current_name: &str,
+    staged_images: &[StagedImage],
+    patch_creator_id: Option<Uuid>,
+    patch_source_url: Option<&str>,
+    custom_fields: &HashMap<String, CustomField>,
+    options: PerModelOptions,
+    result: &mut ApplyResult,
+) -> Result<(), ApiError> {
+    let mut touched = false;
+
+    // Stamp the bundle's creator/source onto the model, but only where it has
+    // none — coalesce keeps whatever the model already knows, and the WHERE
+    // means an all-already-set model reports no change.
+    if patch_creator_id.is_some() || patch_source_url.is_some() {
+        let filled = sqlx::query!(
+            r#"UPDATE models SET
+                 creator_id = coalesce(creator_id, $2::uuid),
+                 source_url = coalesce(source_url, $3::text)
+               WHERE id = $1
+                 AND (($2::uuid IS NOT NULL AND creator_id IS NULL)
+                   OR ($3::text IS NOT NULL AND source_url IS NULL))"#,
+            model_id,
+            patch_creator_id,
+            patch_source_url,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if filled.rows_affected() > 0 {
+            touched = true;
+        }
+    }
+
+    // The model's *own* page, when the scrape has one. Unlike the bundle's
+    // URL above this replaces: `source.url` is a fill-if-empty guess (the
+    // bundle's page stamped on a member for want of anything better), while
+    // this is the page that model was actually scraped from, so a re-scrape
+    // should be able to correct a URL an earlier one guessed.
+    if let Some(url) = pm
+        .source_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        let set = sqlx::query!(
+            r#"UPDATE models SET source_url = $2
+               WHERE id = $1 AND source_url IS DISTINCT FROM $2"#,
+            model_id,
+            url,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if set.rows_affected() > 0 {
+            touched = true;
+        }
+    }
+
+    // The creator's own id/SKU (`models.creator_ref`, shown as "Creator ID").
+    //
+    // **Replaces**, like `source_url` and for the same reason: the shop page
+    // is the authority on the shop's own product code, and a re-scrape
+    // should be able to correct one an earlier pass got wrong. The other
+    // filler of this column is a carve layout's `creator_ref` capture group,
+    // which read it off a folder name — a name that may well be a truncation
+    // of the real code, so deferring to it would be deferring to the weaker
+    // source. Blank/whitespace is absent, and clears nothing.
+    if let Some(reference) = pm
+        .source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        let set = sqlx::query!(
+            r#"UPDATE models SET creator_ref = $2
+               WHERE id = $1 AND creator_ref IS DISTINCT FROM $2"#,
+            model_id,
+            reference,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if set.rows_affected() > 0 {
+            result.creator_refs_set += 1;
+            touched = true;
+        }
+    }
+
+    let renamed_to = if options.rename {
+        pm.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
+    } else {
+        None
+    };
+    if let Some(name) = renamed_to {
+        // The slug follows the name, like the model editor and the bundle
+        // rename above: regenerate it from the new name, carrying the current
+        // slug's token so the URL keeps its identity and old slugs/the UUID
+        // still redirect. Without this the slug stayed stale — "Bayul" kept
+        // `bayul-<token>` after being renamed to "Bayul Greytusk".
+        let current_slug = sqlx::query_scalar!("SELECT slug FROM models WHERE id = $1", model_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let slug =
+            crate::routes::models::unique_slug(state, name, Some(&current_slug), Some(model_id))
+                .await?;
+        sqlx::query!(
+            "UPDATE models SET name = $2, slug = $3 WHERE id = $1",
+            model_id,
+            name,
+            slug,
+        )
+        .execute(&mut *tx)
+        .await?;
+        touched = true;
+    }
+
+    if options.model_tags != TagMode::Skip && !pm.tags.is_empty() {
+        if options.model_tags == TagMode::Replace {
+            sqlx::query!("DELETE FROM model_tags WHERE model_id = $1", model_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for name in &pm.tags {
+            let tag = upsert_tag(&mut *tx, name).await?;
+            let added = sqlx::query!(
+                "INSERT INTO model_tags (model_id, tag_id) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+                model_id,
+                tag.id,
+            )
+            .execute(&mut *tx)
+            .await?;
+            result.tags_added += added.rows_affected() as usize;
+        }
+        touched = true;
+    }
+
+    // A model description becomes a revision, like every description edit
+    // (newest = current, history kept) — but only when it would change
+    // something: re-applying the same patch must not stack duplicate
+    // revisions the way it must not re-add tags or images.
+    if options.model_descriptions
+        && let Some(body) = pm
+            .description_md
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+    {
+        let current = sqlx::query_scalar!(
+            "SELECT body_md FROM model_description_revisions
+             WHERE model_id = $1 ORDER BY created_at DESC LIMIT 1",
+            model_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current.as_deref() != Some(body) {
+            sqlx::query!(
+                "INSERT INTO model_description_revisions (model_id, body_md, created_by)
+                 VALUES ($1, $2, $3)",
+                model_id,
+                body,
+                user.id,
+            )
+            .execute(&mut *tx)
+            .await?;
+            result.descriptions_added += 1;
+            touched = true;
+        }
+    }
+
+    if !staged_images.is_empty() {
+        if options.model_images == ImageMode::ReplaceGenerated {
+            // The auto previews live on the model's variants (and, rarely, the
+            // model). Drop them so the scraped image is what shows.
+            sqlx::query!(
+                "DELETE FROM images WHERE kind = 'rendered' AND (model_id = $1
+                   OR variant_id IN (SELECT id FROM model_variants WHERE model_id = $1))",
+                model_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query!(
+            "UPDATE images SET is_primary = false WHERE model_id = $1 AND is_primary",
+            model_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        // First is primary, the rest ride along — the same rule as
+        // `bundle.images`. Deduped by content hash inside insert_image, so
+        // re-applying a patch adds nothing.
+        for (n, img) in staged_images.iter().enumerate() {
+            if insert_image(&mut *tx, ImageOwner::Model(model_id), img, n == 0, user.id).await? {
+                result.images_added += 1;
+            }
+        }
+        touched = true;
+    }
+
+    // ---- aliases ----
+    // Teach the model every name this scrape knows it by, so a later import
+    // resolves it outright instead of falling back to a fuzzy match; a rename
+    // also records the name being left behind. citext + the (model, alias)
+    // key dedup case variants; we drop any that just repeat the model's own
+    // (final) name.
+    let final_name = renamed_to.unwrap_or(current_name);
+    let mut aliases: Vec<&str> = pm.match_hint.aliases.iter().map(String::as_str).collect();
+    if renamed_to.is_some() {
+        aliases.push(current_name);
+    }
+    // Rename declined: the name it would have taken is still a name this scrape
+    // knows the model by. Record it as an alias so a later import recognises the
+    // model by it and doesn't re-offer the rename. (When the rename was applied,
+    // pm.name is the new name and the dedup below drops it — hence the guard.)
+    if renamed_to.is_none()
+        && let Some(name) = pm.name.as_deref()
+    {
+        aliases.push(name);
+    }
+    for alias in aliases {
+        let alias = alias.trim();
+        if alias.is_empty() || alias.eq_ignore_ascii_case(final_name) {
+            continue;
+        }
+        let added = sqlx::query!(
+            "INSERT INTO model_aliases (model_id, alias) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            model_id,
+            alias,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if added.rows_affected() > 0 {
+            result.aliases_added += 1;
+            touched = true;
+        }
+    }
+
+    // Scraped extra metadata. An unknown or inapplicable key was already
+    // reported as a warning by the preview; here it is simply skipped.
+    if !pm.custom_fields.is_empty() {
+        let skipped = apply_patch_values(
+            &mut *tx,
+            custom_fields,
+            ValueOwner::Model(model_id),
+            &pm.custom_fields,
+            user,
+        )
+        .await?;
+        if pm.custom_fields.len() > skipped.len() {
+            result.custom_fields_set += pm.custom_fields.len() - skipped.len();
+            touched = true;
+        }
+    }
+
+    if touched {
+        result.models_updated += 1;
+    }
+    Ok(())
 }
 
 enum ImageOwner {

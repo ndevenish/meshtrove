@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE models SET source_url = $2\n               WHERE id = $1 AND source_url IS DISTINCT FROM $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f5155da2230f202eb8ad48bca8da07d5c80c8c1bc80bb1359456a6e3e1f62a3b"
+}

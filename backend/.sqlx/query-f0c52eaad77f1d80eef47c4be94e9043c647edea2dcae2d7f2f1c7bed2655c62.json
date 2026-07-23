@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE models SET creator_ref = $2\n               WHERE id = $1 AND creator_ref IS DISTINCT FROM $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f0c52eaad77f1d80eef47c4be94e9043c647edea2dcae2d7f2f1c7bed2655c62"
+}

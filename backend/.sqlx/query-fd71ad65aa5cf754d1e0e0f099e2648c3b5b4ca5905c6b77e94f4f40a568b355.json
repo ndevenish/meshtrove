@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT body_md FROM model_description_revisions\n                 WHERE model_id = $1 ORDER BY created_at DESC LIMIT 1",
+  "query": "SELECT body_md FROM model_description_revisions\n             WHERE model_id = $1 ORDER BY created_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "2c62a7a3871a2c8c6ec61932fd2885f9795cd22ff0c07b03eb8ba67291dae1eb"
+  "hash": "fd71ad65aa5cf754d1e0e0f099e2648c3b5b4ca5905c6b77e94f4f40a568b355"
 }

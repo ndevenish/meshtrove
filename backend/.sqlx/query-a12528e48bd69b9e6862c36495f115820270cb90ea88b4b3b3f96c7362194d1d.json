@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO model_description_revisions (model_id, body_md, created_by)\n                 VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a12528e48bd69b9e6862c36495f115820270cb90ea88b4b3b3f96c7362194d1d"
+}
