@@ -1,13 +1,36 @@
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{
+    Modify, OpenApi, ToSchema,
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+};
 
 use crate::extractors::{AuthError, User};
 use crate::state::AppState;
 
 #[derive(OpenApi)]
-#[openapi(paths(version, me), components(schemas(VersionInfo, User)))]
+#[openapi(paths(version, me), components(schemas(VersionInfo, User)), modifiers(&BearerAuth))]
 pub struct ApiDoc;
+
+/// Advertises the `Authorization: Bearer <api-token>` scheme in the spec so
+/// `/docs` offers an "Authorize" box. Every `/api/*` route accepts it (it is the
+/// shared `User` extractor that reads it), alongside the browser's session cookie.
+struct BearerAuth;
+
+impl Modify for BearerAuth {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "api_token",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some("An admin-issued API token (see the admin page)."))
+                    .build(),
+            ),
+        );
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()

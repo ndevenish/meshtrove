@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod api;
+pub mod api_tokens;
 pub mod auth;
 pub mod browse;
 pub mod bundles;

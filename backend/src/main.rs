@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(routes::admin::router())
         .merge(routes::api::router())
+        .merge(routes::api_tokens::router())
         .merge(routes::auth::router())
         .merge(routes::variant_tags::router())
         .merge(routes::browse::router())

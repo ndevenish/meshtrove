@@ -2,7 +2,7 @@
 
 use axum::{
     extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
+    http::{StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::PrivateCookieJar;
@@ -146,6 +146,20 @@ impl FromRequestParts<AppState> for User {
             });
         }
 
+        // API token: `Authorization: Bearer <token>`. This is a deliberate
+        // credential, so a bad one is a hard 401 — never a silent downgrade to the
+        // guest viewer, which would surface as confusing 403s on the writes the
+        // client expected to be allowed. A non-Bearer Authorization header is left
+        // for the cookie path below (it means nothing to us).
+        if let Some(header) = parts.headers.get(header::AUTHORIZATION)
+            && let Some(token) = header
+                .to_str()
+                .ok()
+                .and_then(|value| value.strip_prefix("Bearer "))
+        {
+            return authenticate_token(state, token.trim()).await;
+        }
+
         // No valid session → an anonymous viewer, not a rejection: browsing is
         // open, and writes still fail on their own `require_*` gate.
         let jar =
@@ -172,4 +186,27 @@ impl FromRequestParts<AppState> for User {
         .map_err(|e| AuthError::Internal(e.into()))?
         .unwrap_or_else(User::guest))
     }
+}
+
+/// Resolve an API token to the admin it acts as. One statement stamps
+/// `last_used_at`, enforces the optional expiry, and returns the owner's *live*
+/// row — so the token's powers follow their current role. An unknown, expired, or
+/// otherwise unmatched token yields `Unauthenticated` (the caller turns that into
+/// a 401); the token is stored only as its SHA-256 hash, so we hash the presented
+/// value and look that up.
+async fn authenticate_token(state: &AppState, token: &str) -> Result<User, AuthError> {
+    let hash = crate::routes::api_tokens::hash_token(token);
+    sqlx::query_as!(
+        User,
+        r#"UPDATE api_tokens t SET last_used_at = now()
+           FROM users u
+           WHERE t.token_hash = $1 AND u.id = t.created_by
+             AND (t.expires_at IS NULL OR t.expires_at > now())
+           RETURNING u.id, u.username as "username: String", u.role as "role: UserRole""#,
+        hash,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| AuthError::Internal(e.into()))?
+    .ok_or(AuthError::Unauthenticated)
 }
