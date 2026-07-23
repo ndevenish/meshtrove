@@ -381,8 +381,10 @@ docker-compose.yml     postgres:17 (+ volume); store/ is a bind-mounted dir
   for API clients — both resolve through the one `User` extractor, so a token
   reaches the whole `/api/*` surface (the SPA shell needs no auth). Admin mints
   tokens: `GET/POST /api/admin/tokens`, `DELETE /api/admin/tokens/{id}`. A token
-  acts as the admin who created it (sha256-hashed at rest, optional expiry); an
-  invalid/expired Bearer is a hard 401
+  acts as the admin who created it (sha256-hashed at rest, optional expiry) and
+  carries an optional role — its effective role is the least privilege of the
+  token's role and the owner's live role, so a viewer token can only read and a
+  token never outranks its owner. An invalid/expired Bearer is a hard 401
 - `GET /api/browse` — unified model+bundle search (`?q=&tags=&vtags=`, see
   Search design above)
 - `GET/POST/PUT/DELETE /api/creators`

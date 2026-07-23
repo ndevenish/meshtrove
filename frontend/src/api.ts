@@ -20,6 +20,8 @@ export interface UserAccount {
 export interface ApiToken {
   id: string
   name: string
+  /** the role it grants, capped at the owner's live role when used */
+  role: Role
   created_at: string
   last_used_at: string | null
   expires_at: string | null
@@ -31,6 +33,7 @@ export interface ApiToken {
 export interface NewApiToken {
   id: string
   name: string
+  role: Role
   token: string
   created_at: string
   expires_at: string | null
@@ -704,8 +707,8 @@ export const api = {
   // API tokens: admin-issued Bearer credentials for reaching the API from a
   // script or CI. The plaintext is returned only by create, once.
   apiTokens: () => request<ApiToken[]>('/api/admin/tokens'),
-  createApiToken: (name: string, expires_at?: string | null) =>
-    request<NewApiToken>('/api/admin/tokens', json({ name, expires_at: expires_at || null })),
+  createApiToken: (name: string, role: Role, expires_at?: string | null) =>
+    request<NewApiToken>('/api/admin/tokens', json({ name, role, expires_at: expires_at || null })),
   deleteApiToken: (id: string) => request<void>(`/api/admin/tokens/${id}`, { method: 'DELETE' }),
 
   // Custom field definitions: readable by editors (they drive the edit forms),

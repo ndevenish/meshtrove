@@ -92,7 +92,11 @@ Implementation quirks worth knowing (found the hard way):
   so a token reaches the whole `/api/*` surface (the SPA shell is public and
   needs none). A token **acts as the admin who created it** — its `created_by`
   loads the live user row, keeping write attribution correct and its powers tied
-  to that user's role. Stored only as `sha256(token)` hex (the 256-bit random
+  to that user's role. A token also carries a **role** (migration 0037): the
+  effective role is `GREATEST(token.role, owner.role)` — the enum is admin <
+  editor < viewer, so that is the *least* privilege of the two, letting an admin
+  mint a read-only viewer or an editor token that can never outrank its owner.
+  Stored only as `sha256(token)` hex (the 256-bit random
   token needs no argon2), returned in plaintext once at creation, optional
   `expires_at`, and a bad/expired/unknown Bearer is a **hard 401** rather than a
   silent downgrade to guest. Table `api_tokens` (migration 0036);
