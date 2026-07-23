@@ -37,6 +37,9 @@ import UnsortedSection from '../components/UnsortedSection'
 import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ModelDeleteDialog from '../components/ModelDeleteDialog'
 import ModelMergeDialog from '../components/ModelMergeDialog'
+import ModelPatchDialog from '../components/ModelPatchDialog'
+import Dropzone from '../components/Dropzone'
+import { useSuppressGlobalDrop } from '../globalDrop'
 
 export default function ModelPage() {
   const { id } = useParams<{ id: string }>()
@@ -59,6 +62,14 @@ export default function ModelPage() {
   const [mergeOpen, setMergeOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [toast, setToast] = useState('')
+  // Import scraped metadata: the inline drop box lives in edit mode, so the
+  // app-wide drop overlay must stand aside while editing or it swallows the zip.
+  const [patchOpen, setPatchOpen] = useState(false)
+  const [patchFile, setPatchFile] = useState<File | null>(null)
+  // A patch was applied and its reload is owed; held until the dialog closes so
+  // the reload's navigation doesn't unmount the dialog mid-summary.
+  const patchReloadOwed = useRef(false)
+  useSuppressGlobalDrop(editing)
 
   const { data: model } = useQuery({
     queryKey: ['model', id],
@@ -404,13 +415,29 @@ export default function ModelPage() {
           </Stack>
 
           {editing && (
-            <ModelDetailsEditor
-              key={model.id}
-              ref={editorRef}
-              model={model}
-              onDone={() => setEditing(false)}
-              onBusyChange={setSaving}
-            />
+            <>
+              <ModelDetailsEditor
+                key={model.id}
+                ref={editorRef}
+                model={model}
+                onDone={() => setEditing(false)}
+                onBusyChange={setSaving}
+              />
+              <Box sx={{ mb: 2 }}>
+                <Dropzone
+                  label="Import scraped metadata"
+                  hint="Drop a bundle-patch zip — its metadata is applied to this model"
+                  accept=".zip"
+                  onDrop={(drop) => {
+                    const file = drop.files[0]?.file
+                    if (file) {
+                      setPatchFile(file)
+                      setPatchOpen(true)
+                    }
+                  }}
+                />
+              </Box>
+            </>
           )}
           {!editing && (model.creator_name || model.source_url) && (
             <Typography color="text.secondary" sx={{ mb: 1 }}>
@@ -531,6 +558,31 @@ export default function ModelPage() {
         onChange={refresh}
       />
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} model={model} />
+      <ModelPatchDialog
+        modelId={model.id}
+        open={patchOpen}
+        initialFile={patchFile}
+        onApplied={() => {
+          // Don't reload here — the dialog still shows its summary, and the
+          // reload's navigation would unmount it. Remember it's owed; run on close.
+          patchReloadOwed.current = true
+          // The in-place editor seeded its fields at mount, so it still shows the
+          // pre-patch values; saving them would revert the patch. Leave edit mode.
+          setEditing(false)
+        }}
+        onClose={() => {
+          setPatchOpen(false)
+          setPatchFile(null)
+          if (!patchReloadOwed.current) return
+          patchReloadOwed.current = false
+          // A patch can rename the model, which moves the slug and so the URL. The
+          // old slug no longer resolves, so refetching in place would 404; drop
+          // the cache and jump to the stable UUID, and the canonical-slug effect
+          // lands us on the new slug with fresh data.
+          queryClient.removeQueries({ queryKey: ['model', model.id] })
+          navigate(`/models/${model.id}`, { replace: true })
+        }}
+      />
       <ModelDeleteDialog
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
