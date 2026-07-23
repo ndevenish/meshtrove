@@ -897,18 +897,25 @@ export const api = {
       json({ fresh, custom_fields }),
     ),
 
-  previewBundlePatch: (bundleId: string, zip: File) => {
+  /// Preview one or more bundle-patch zips merged onto this bundle. Several
+  /// per-model patches (one product page each) compose into one apply, so the
+  /// server takes a repeated `file` part rather than a single zip.
+  ///
+  /// It orders them by filename, not by the order they are appended here, so
+  /// the `key` each row is identified by is the same in the preview and the
+  /// apply as long as both calls are handed the same files.
+  previewBundlePatch: (bundleId: string, zips: File[]) => {
     const form = new FormData()
-    form.append('file', zip)
+    for (const zip of zips) form.append('file', zip)
     return request<PatchPreview>(`/api/bundles/${bundleId}/patch/preview`, {
       method: 'POST',
       body: form,
     })
   },
-  applyBundlePatch: (bundleId: string, zip: File, options: PatchApplyOptions) => {
+  applyBundlePatch: (bundleId: string, zips: File[], options: PatchApplyOptions) => {
     const form = new FormData()
     form.append('options', JSON.stringify(options))
-    form.append('file', zip)
+    for (const zip of zips) form.append('file', zip)
     return request<PatchApplyResult>(`/api/bundles/${bundleId}/patch`, {
       method: 'POST',
       body: form,
@@ -952,6 +959,8 @@ export interface PatchPreview {
     has_image: boolean
     has_description: boolean
     category: string | null
+    /** the creator's own id/SKU this would write to Creator ID — it replaces */
+    creator_ref: string | null
   }[]
   ambiguous: PatchUnresolvedRow[]
   unmatched_patch: PatchUnresolvedRow[]
@@ -961,6 +970,14 @@ export interface PatchPreview {
   custom_fields_applied: number
   /** ...and the ones that won't, each with why — informational, never fatal */
   custom_field_warnings: PatchCustomFieldWarning[]
+  /** the uploaded files this preview merged, in the order models were numbered */
+  files: PatchFileRow[]
+}
+
+/** One uploaded zip's contribution to a merged preview. */
+export interface PatchFileRow {
+  name: string
+  models: number
 }
 
 /** One scraped metadata key the apply will skip, and why. */
@@ -992,6 +1009,8 @@ export interface PatchApplyResult {
   descriptions_added: number
   /** custom field values written, bundle and members together */
   custom_fields_set: number
+  /** models whose Creator ID the patch set or corrected */
+  creator_refs_set: number
 }
 
 export const imageUrl = (id: string) => `/api/images/${id}`

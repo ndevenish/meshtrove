@@ -117,6 +117,11 @@ struct PatchModel {
     /// bundle-level `source.url` — see the apply below.
     #[serde(default)]
     source_url: Option<String>,
+    /// The creator's own id/SKU for this model — Fat Dragon's `FDG0250`,
+    /// a publisher's product code. Lands in `models.creator_ref`, the same
+    /// column a carve layout fills from a `creator_ref` capture group.
+    #[serde(default)]
+    source_ref: Option<String>,
     /// Admin-defined extra metadata for this model, by field key. Same lenient
     /// rule as the bundle's.
     #[serde(default)]
@@ -227,25 +232,171 @@ struct Archive {
     images: HashMap<String, Vec<u8>>,
 }
 
-async fn read_archive(mut multipart: Multipart) -> Result<Archive, ApiError> {
-    let mut zip_bytes: Option<Vec<u8>> = None;
+/// A multipart body: every `file` field, plus the `options` text field if the
+/// caller sent one (apply does, preview doesn't).
+struct Upload {
+    options: Option<String>,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+async fn read_upload(mut multipart: Multipart) -> Result<Upload, ApiError> {
+    let mut upload = Upload {
+        options: None,
+        files: Vec::new(),
+    };
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| ApiError::BadRequest(format!("bad multipart body: {e}")))?
     {
-        if field.name() == Some("file") {
-            zip_bytes = Some(
-                field
+        match field.name() {
+            Some("options") => {
+                upload.options = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| ApiError::BadRequest(format!("bad options field: {e}")))?,
+                );
+            }
+            // Repeatable. One drop of six per-model patch zips is six `file`
+            // parts, and they merge into a single logical patch below.
+            Some("file") => {
+                let name = field.file_name().unwrap_or_default().to_string();
+                let bytes = field
                     .bytes()
                     .await
                     .map_err(|e| ApiError::BadRequest(format!("reading upload: {e}")))?
-                    .to_vec(),
-            );
+                    .to_vec();
+                upload.files.push((name, bytes));
+            }
+            _ => {}
         }
     }
-    let bytes = zip_bytes.ok_or_else(|| ApiError::BadRequest("no file field in upload".into()))?;
-    read_archive_from_bytes(bytes).await
+    if upload.files.is_empty() {
+        return Err(ApiError::BadRequest("no file field in upload".into()));
+    }
+    Ok(upload)
+}
+
+/// One file's contribution, for the preview's benefit — a six-zip drop should
+/// say which six and what each brought.
+#[derive(Serialize, ToSchema)]
+struct PatchFileRow {
+    name: String,
+    models: usize,
+}
+
+/// Read every uploaded zip and merge them into one logical patch.
+///
+/// The point is that per-model patches compose: `fdg-scrape` emits one zip per
+/// product page, and dropping six of them on a bundle should behave exactly
+/// like dropping one six-model zip. Nothing here changes what a single file
+/// means — one file in gives one archive out, unchanged.
+///
+/// **Order is by filename, not arrival.** `key` — a patch model's index in the
+/// merged `models[]` — is the identity the preview reports and the apply
+/// options refer back to, so it has to be the same in both calls. Sorting means
+/// that holds even if the two requests enumerate the same files in a different
+/// order, which a drag-and-drop of a multi-file selection does not promise.
+/// Duplicate filenames keep their arrival order relative to each other (the
+/// sort is stable), so the client contract is only "send the same files".
+///
+/// Bundle-level fields are **first non-empty wins**, per field. In practice
+/// per-model patches carry nothing but `bundle.creator` and they all agree; the
+/// rule matters when one file in the drop is a deliberate bundle-cover patch
+/// (ps-scrape's second button) and the rest are models — then that file
+/// supplies name/description/cover whatever position it lands in.
+async fn read_merged(
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<(Archive, Vec<PatchFileRow>), ApiError> {
+    let mut files = files;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut merged = Archive {
+        patch: Patch::default(),
+        images: HashMap::new(),
+    };
+    let mut rows = Vec::new();
+    let mut seen_cover_paths: Vec<String> = Vec::new();
+
+    for (i, (name, bytes)) in files.into_iter().enumerate() {
+        let archive = read_archive_from_bytes(bytes)
+            .await
+            // Which of six zips was the bad one is the only thing you want to
+            // know here, and the inner error never says.
+            .map_err(|e| match e {
+                ApiError::BadRequest(m) => ApiError::BadRequest(format!("{name}: {m}")),
+                other => other,
+            })?;
+        let Archive { mut patch, images } = archive;
+
+        // Namespace every image path by the file's position, and rewrite this
+        // patch's references to match, before anything is concatenated. Two
+        // scrapers independently emitting `images/00.jpg` is not a collision
+        // worth losing an image to — and it is the default case, since entry
+        // names are per-zip and nothing coordinates them.
+        //
+        // Prefixing with an index that is unique per archive cannot itself
+        // collide: two rewritten paths differ in their first segment unless
+        // they came from the same file, where they were already distinct.
+        let qualify = |path: &str| format!("{i}/{path}");
+        for path in patch.bundle.images.iter_mut() {
+            *path = qualify(path);
+        }
+        for m in patch.models.iter_mut() {
+            if let Some(p) = m.image.as_mut() {
+                *p = qualify(p);
+            }
+            for p in m.images.iter_mut() {
+                *p = qualify(p);
+            }
+        }
+        for (path, bytes) in images {
+            merged.images.insert(qualify(&path), bytes);
+        }
+
+        rows.push(PatchFileRow {
+            name,
+            models: patch.models.len(),
+        });
+
+        // First non-empty wins, field by field.
+        let b = &mut merged.patch.bundle;
+        if b.name.is_none() {
+            b.name = patch.bundle.name.take();
+        }
+        if b.creator.is_none() {
+            b.creator = patch.bundle.creator.take();
+        }
+        if b.description_md.is_none() {
+            b.description_md = patch.bundle.description_md.take();
+        }
+        if merged.patch.source.url.is_none() {
+            merged.patch.source.url = patch.source.url.take();
+        }
+        for (key, value) in patch.bundle.custom_fields {
+            merged
+                .patch
+                .bundle
+                .custom_fields
+                .entry(key)
+                .or_insert(value);
+        }
+        // Covers concatenate rather than first-wins: `bundle.images` is
+        // documented as "all added, the first becomes primary", so appending
+        // keeps that meaning across files. Deduped by path so re-dropping the
+        // same file twice doesn't queue the same cover twice.
+        for path in patch.bundle.images {
+            if !seen_cover_paths.contains(&path) {
+                seen_cover_paths.push(path.clone());
+                merged.patch.bundle.images.push(path);
+            }
+        }
+
+        merged.patch.models.extend(patch.models);
+    }
+
+    Ok((merged, rows))
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +584,9 @@ struct PatchPreview {
     /// ...and the ones that won't, each with why. Never fatal: a scrape carries
     /// whatever the shop page had, and the user decides whether it matters.
     custom_field_warnings: Vec<CustomFieldWarning>,
+    /// The uploaded files this preview merged, in the order their models were
+    /// numbered — so a multi-file drop can show what it actually read.
+    files: Vec<PatchFileRow>,
 }
 
 /// One scraped metadata key that will be skipped, and why.
@@ -497,6 +651,10 @@ struct MatchedRow {
     /// The patch carries a description for this model.
     has_description: bool,
     category: Option<String>,
+    /// The creator's own id/SKU the patch would write to `creator_ref`. Shown
+    /// because it *replaces* what the model has, which is worth seeing before
+    /// you agree to it.
+    creator_ref: Option<String>,
 }
 
 /// A patch model with no single match — ambiguous or unmatched. Carries the
@@ -535,7 +693,7 @@ async fn preview(
     let created_by = bundle_created_by(&state, bundle_id).await?;
     user.require_can_edit(created_by)?;
 
-    let archive = read_archive(multipart).await?;
+    let (archive, files) = read_merged(read_upload(multipart).await?.files).await?;
     let members = bundle_members(&state, bundle_id).await?;
     let resolution = resolve(&archive.patch, &members);
     let member_of = |id: Uuid| members.iter().find(|m| m.id == id);
@@ -617,6 +775,12 @@ async fn preview(
                     has_image: has_image(pm),
                     has_description: has_description(pm),
                     category: pm.category.clone(),
+                    creator_ref: pm
+                        .source_ref
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|r| !r.is_empty())
+                        .map(str::to_string),
                 });
             }
             many => {
@@ -660,6 +824,7 @@ async fn preview(
     Ok(Json(PatchPreview {
         custom_fields_applied,
         custom_field_warnings,
+        files,
         bundle_description: archive
             .patch
             .bundle
@@ -751,6 +916,8 @@ struct ApplyResult {
     descriptions_added: usize,
     /// Custom field values written, on the bundle and its members together.
     custom_fields_set: usize,
+    /// Models whose `creator_ref` ("Creator ID") the patch set or corrected.
+    creator_refs_set: usize,
 }
 
 /// A blob already put into the store, ready to become an image row.
@@ -787,45 +954,23 @@ async fn apply(
     State(state): State<AppState>,
     user: User,
     Path(bundle_id): Path<Uuid>,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<ApplyResult>, ApiError> {
     tracing::info!("patch apply: start");
     let created_by = bundle_created_by(&state, bundle_id).await?;
     user.require_can_edit(created_by)?;
 
-    // options come as a text field alongside the file; read both.
-    let mut options = ApplyOptions::default();
-    let mut zip_bytes: Option<Vec<u8>> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("bad multipart body: {e}")))?
-    {
-        match field.name() {
-            Some("options") => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| ApiError::BadRequest(format!("bad options field: {e}")))?;
-                options = serde_json::from_str(&text)
-                    .map_err(|e| ApiError::BadRequest(format!("bad options: {e}")))?;
-            }
-            Some("file") => {
-                zip_bytes = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|e| ApiError::BadRequest(format!("reading upload: {e}")))?
-                        .to_vec(),
-                );
-            }
-            _ => {}
-        }
-    }
-    let archive = read_archive_from_bytes(
-        zip_bytes.ok_or_else(|| ApiError::BadRequest("no file field in upload".into()))?,
-    )
-    .await?;
+    // options come as a text field alongside the file(s); read them together.
+    let upload = read_upload(multipart).await?;
+    let options: ApplyOptions = match upload.options.as_deref() {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| ApiError::BadRequest(format!("bad options: {e}")))?,
+        None => ApplyOptions::default(),
+    };
+    // Same merge as the preview, so `key` means the same thing in both — which
+    // is what `options.rename` and `options.matches` are indexed by. Send the
+    // same files and the numbering is identical; see `read_merged`.
+    let (archive, _files) = read_merged(upload.files).await?;
 
     let members = bundle_members(&state, bundle_id).await?;
     let resolution = resolve(&archive.patch, &members);
@@ -895,6 +1040,7 @@ async fn apply(
         aliases_added: 0,
         descriptions_added: 0,
         custom_fields_set: 0,
+        creator_refs_set: 0,
     };
     let custom_fields = fields_by_key(&mut *state.db.acquire().await?).await?;
     let mut tx = state.db.begin().await?;
@@ -1054,6 +1200,35 @@ async fn apply(
             .execute(&mut *tx)
             .await?;
             if set.rows_affected() > 0 {
+                touched = true;
+            }
+        }
+
+        // The creator's own id/SKU (`models.creator_ref`, shown as "Creator ID").
+        //
+        // **Replaces**, like `source_url` and for the same reason: the shop page
+        // is the authority on the shop's own product code, and a re-scrape
+        // should be able to correct one an earlier pass got wrong. The other
+        // filler of this column is a carve layout's `creator_ref` capture group,
+        // which read it off a folder name — a name that may well be a truncation
+        // of the real code, so deferring to it would be deferring to the weaker
+        // source. Blank/whitespace is absent, and clears nothing.
+        if let Some(reference) = pm
+            .source_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            let set = sqlx::query!(
+                r#"UPDATE models SET creator_ref = $2
+                   WHERE id = $1 AND creator_ref IS DISTINCT FROM $2"#,
+                model_id,
+                reference,
+            )
+            .execute(&mut *tx)
+            .await?;
+            if set.rows_affected() > 0 {
+                result.creator_refs_set += 1;
                 touched = true;
             }
         }
@@ -1365,6 +1540,7 @@ fn decode_entities(patch: &mut Patch) {
         dec(&mut m.category);
         dec(&mut m.description_md);
         dec(&mut m.source_url);
+        dec(&mut m.source_ref);
         dec_all(&mut m.tags);
         dec(&mut m.match_hint.name);
         dec_all(&mut m.match_hint.aliases);
@@ -1483,6 +1659,7 @@ mod tests {
             images: Vec::new(),
             category: category.map(str::to_string),
             source_url: None,
+            source_ref: None,
             custom_fields: HashMap::new(),
         }
     }
@@ -1678,6 +1855,7 @@ mod tests {
                 images: vec!["gallery&#8211;.png".into()],
                 category: Some("Enemies &amp; Foes".into()),
                 source_url: Some("https://x.test/p?a=1&amp;b=2".into()),
+                source_ref: Some("FDG&#8211;0250".into()),
                 custom_fields: HashMap::from([(
                     "notes".into(),
                     serde_json::json!("supports &#8211; 45&#176;"),
@@ -1704,6 +1882,7 @@ mod tests {
             Some("Crocodile & Camel")
         );
         assert_eq!(patch.models[0].match_hint.aliases, vec!["Croc – v2"]);
+        assert_eq!(patch.models[0].source_ref.as_deref(), Some("FDG–0250"));
         // A text custom field value is text like any other — a choice value has
         // to match its defined choice exactly, and non-strings are untouched.
         assert_eq!(
@@ -1722,5 +1901,115 @@ mod tests {
         assert_eq!(patch.bundle.images, vec!["cover&#8211;.png"]);
         assert_eq!(patch.models[0].image.as_deref(), Some("model&#8211;.png"));
         assert_eq!(patch.models[0].images, vec!["gallery&#8211;.png"]);
+    }
+
+    /// Build a one-model patch zip in memory: `patch.json` plus one image, both
+    /// at paths a real scraper would use — the collision this merge has to
+    /// survive is that every scraper independently calls its first image
+    /// `images/00.jpg`.
+    fn zip_of(model: &str, creator: Option<&str>, image: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let bundle = match creator {
+            Some(c) => format!(r#"{{"creator":"{c}"}}"#),
+            None => "{}".to_string(),
+        };
+        let doc = format!(
+            r#"{{"schema":"meshtrove.bundle-patch/1","bundle":{bundle},
+                 "models":[{{"match":{{"name":"{model}"}},"name":"{model}",
+                             "image":"images/00.jpg","images":["images/00.jpg"]}}]}}"#
+        );
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default();
+        w.start_file("patch.json", opts).unwrap();
+        w.write_all(doc.as_bytes()).unwrap();
+        w.start_file("images/00.jpg", opts).unwrap();
+        w.write_all(image).unwrap();
+        w.finish().unwrap().into_inner()
+    }
+
+    /// Several per-model patches merge into one, which is what lets a drop of
+    /// six product-page zips behave like one six-model patch.
+    #[tokio::test]
+    async fn several_patch_files_merge_into_one() {
+        // Handed over in the wrong order on purpose: ordering is by filename, so
+        // that `key` means the same thing here as in the matching apply call.
+        let files = vec![
+            ("b.zip".to_string(), zip_of("Beta", None, b"BBBB")),
+            (
+                "a.zip".to_string(),
+                zip_of("Alpha", Some("Fat Dragon"), b"AAAA"),
+            ),
+        ];
+        let (merged, rows) = read_merged(files).await.unwrap();
+
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["a.zip", "b.zip"],
+            "files are ordered by name, not by arrival"
+        );
+        assert_eq!(
+            merged
+                .patch
+                .models
+                .iter()
+                .map(|m| m.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["Alpha", "Beta"],
+            "models concatenate in file order, so key is the merged index"
+        );
+        // Both files called their image `images/00.jpg`. Namespacing keeps both
+        // blobs, and each model's reference must still resolve to its own.
+        assert_eq!(merged.images.len(), 2, "neither image was overwritten");
+        let alpha = merged.patch.models[0].image.as_deref().unwrap();
+        let beta = merged.patch.models[1].image.as_deref().unwrap();
+        assert_ne!(alpha, beta);
+        assert_eq!(
+            merged.images.get(alpha).map(Vec::as_slice),
+            Some(&b"AAAA"[..])
+        );
+        assert_eq!(
+            merged.images.get(beta).map(Vec::as_slice),
+            Some(&b"BBBB"[..])
+        );
+        // `images` is rewritten alongside `image`, or apply drops the gallery.
+        assert_eq!(merged.patch.models[0].images, vec![alpha.to_string()]);
+        // Bundle fields are first-non-empty wins, and "first" is by sorted name
+        // — a.zip supplies the creator even though it arrived second.
+        assert_eq!(merged.patch.bundle.creator.as_deref(), Some("Fat Dragon"));
+    }
+
+    /// One file in is one archive out: merging must not change what a single
+    /// patch means, since that is every existing caller.
+    #[tokio::test]
+    async fn a_single_file_is_unchanged_by_the_merge() {
+        let files = vec![("only.zip".to_string(), zip_of("Solo", Some("Bob"), b"X"))];
+        let (merged, rows) = read_merged(files).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(merged.patch.models.len(), 1);
+        assert_eq!(merged.patch.bundle.creator.as_deref(), Some("Bob"));
+        let path = merged.patch.models[0].image.as_deref().unwrap();
+        assert_eq!(merged.images.get(path).map(Vec::as_slice), Some(&b"X"[..]));
+    }
+
+    /// A bad zip in a six-file drop has to name itself, or there is no way to
+    /// tell which one to fix.
+    #[tokio::test]
+    async fn a_broken_file_in_the_batch_names_itself() {
+        let files = vec![
+            ("good.zip".to_string(), zip_of("Alpha", None, b"A")),
+            ("broken.zip".to_string(), b"not a zip at all".to_vec()),
+        ];
+        // Not `unwrap_err`: that wants Debug on the Ok type, and an Archive
+        // holds every image byte — deriving it to print on failure would be a
+        // megabyte of hex.
+        match read_merged(files).await {
+            Err(ApiError::BadRequest(msg)) => {
+                assert!(msg.starts_with("broken.zip: "), "got {msg:?}")
+            }
+            Err(other) => panic!("expected a bad-request, got {other:?}"),
+            Ok(_) => panic!("expected the broken zip to fail the whole merge"),
+        }
     }
 }

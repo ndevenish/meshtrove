@@ -35,20 +35,20 @@ import Dropzone from './Dropzone'
 export default function BundlePatchDialog({
   bundleId,
   open,
-  initialFile,
+  initialFiles,
   onClose,
   onApplied,
 }: {
   bundleId: string
   open: boolean
-  /** A zip already dropped on the page's inline box — preview it straight away,
-   * so the dialog opens on the match table instead of its own drop step. */
-  initialFile?: File | null
+  /** Zips already dropped on the page's inline box — preview them straight
+   * away, so the dialog opens on the match table instead of its own drop step. */
+  initialFiles?: File[] | null
   onClose: () => void
   onApplied: () => void
 }) {
   const queryClient = useQueryClient()
-  const [zip, setZip] = useState<File | null>(null)
+  const [zips, setZips] = useState<File[]>([])
   const [preview, setPreview] = useState<PatchPreview | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -72,7 +72,7 @@ export default function BundlePatchDialog({
   }, [preview])
 
   const reset = () => {
-    setZip(null)
+    setZips([])
     setPreview(null)
     setError('')
     setDone('')
@@ -83,12 +83,12 @@ export default function BundlePatchDialog({
   // Memoised so the auto-preview effect can depend on it without re-firing every
   // render; it only changes when the bundle does.
   const runPreview = useCallback(
-    async (file: File) => {
-      setZip(file)
+    async (files: File[]) => {
+      setZips(files)
       setBusy(true)
       setError('')
       try {
-        const p = await api.previewBundlePatch(bundleId, file)
+        const p = await api.previewBundlePatch(bundleId, files)
         setPreview(p)
         // Pre-tick a rename wherever the scraped name is one the matched model
         // isn't already known by — its current name or any of its aliases. The
@@ -114,27 +114,28 @@ export default function BundlePatchDialog({
     [bundleId],
   )
 
-  // When the parent hands us a file already dropped on its inline box, preview it
-  // the moment we open — once per file, tracked by ref so a re-render doesn't
-  // re-fire it; the ref resets on close so the next drop previews afresh.
-  const previewedFile = useRef<File | null>(null)
+  // When the parent hands us files already dropped on its inline box, preview
+  // them the moment we open — once per drop, tracked by ref so a re-render
+  // doesn't re-fire it; the ref resets on close so the next drop previews
+  // afresh. Identity is the array the parent passed, which it replaces per drop.
+  const previewedFiles = useRef<File[] | null>(null)
   useEffect(() => {
     if (!open) {
-      previewedFile.current = null
+      previewedFiles.current = null
       return
     }
-    if (initialFile && previewedFile.current !== initialFile) {
-      previewedFile.current = initialFile
-      void runPreview(initialFile)
+    if (initialFiles?.length && previewedFiles.current !== initialFiles) {
+      previewedFiles.current = initialFiles
+      void runPreview(initialFiles)
     }
-  }, [open, initialFile, runPreview])
+  }, [open, initialFiles, runPreview])
 
   const runApply = async () => {
-    if (!zip) return
+    if (!zips.length) return
     setBusy(true)
     setError('')
     try {
-      const result = await api.applyBundlePatch(bundleId, zip, {
+      const result = await api.applyBundlePatch(bundleId, zips, {
         ...opts,
         // Drop rows left on "skip": an empty value is not a member id, and the
         // server rejects the whole request trying to parse "" as a UUID.
@@ -147,6 +148,7 @@ export default function BundlePatchDialog({
         `Applied: ${result.models_updated} model(s) updated, ${result.tags_added} tag(s) added, ` +
           `${result.images_added} image(s) added, ${result.descriptions_added} description(s) set, ` +
           `${result.aliases_added} alias(es) recorded, ` +
+          `${result.creator_refs_set} Creator ID(s) set, ` +
           `${result.custom_fields_set} custom field value(s) set.`,
       )
     } catch (err) {
@@ -171,6 +173,8 @@ export default function BundlePatchDialog({
     /** how many leading `choices` are the suggested candidates (rest is every
      * other member, so a wrong or missing auto-match can always be corrected) */
     shortlist?: number
+    /** the Creator ID this row would write — it replaces what the model has */
+    creatorRef?: string | null
   }
   const rows: Row[] = useMemo(() => {
     if (!preview) return []
@@ -181,6 +185,7 @@ export default function BundlePatchDialog({
       patchTags: m.add_tags,
       hasImage: m.has_image,
       hasDescription: m.has_description,
+      creatorRef: m.creator_ref,
       fixed: { id: m.model_id, name: m.model_name },
     }))
     for (const u of [...preview.ambiguous, ...preview.unmatched_patch]) {
@@ -275,13 +280,14 @@ export default function BundlePatchDialog({
           <Alert severity="success">{done}</Alert>
         ) : !preview ? (
           <Dropzone
-            label={busy ? 'Reading…' : 'Drop a bundle-patch zip'}
-            hint="patch.json + images"
+            label={busy ? 'Reading…' : 'Drop bundle-patch zips'}
+            hint="patch.json + images — several at once merge into one apply"
             accept=".zip"
+            multiple
             busy={busy}
             onDrop={(drop) => {
-              const file = drop.files[0]?.file
-              if (file) void runPreview(file)
+              const files = drop.files.map((f) => f.file)
+              if (files.length) void runPreview(files)
             }}
           />
         ) : (
@@ -307,6 +313,12 @@ export default function BundlePatchDialog({
                     />
                   ))}
                 </Stack>
+              </Alert>
+            )}
+            {preview.files.length > 1 && (
+              <Alert severity="info">
+                Merged {preview.files.length} files into one apply:{' '}
+                {preview.files.map((f) => `${f.name} (${f.models})`).join(', ')}
               </Alert>
             )}
             {(preview.bundle_covers.length > 0 || preview.bundle_description) && (
@@ -519,6 +531,11 @@ export default function BundlePatchDialog({
                         {r.hasImage && <Chip size="small" label="image" variant="outlined" />}
                         {r.hasDescription && (
                           <Chip size="small" label="description" variant="outlined" />
+                        )}
+                        {r.creatorRef && (
+                          <Tooltip title="Creator ID — replaces what the model has">
+                            <Chip size="small" label={r.creatorRef} variant="outlined" />
+                          </Tooltip>
                         )}
                         {addTags(r).map((t) => (
                           <Chip
