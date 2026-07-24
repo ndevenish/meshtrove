@@ -923,13 +923,47 @@ async fn update_file(
         }
         // Bundle file "unsorted" is a no-op (already bundle-owned).
         (FileContext::Bundle(_), Some(true), None, None, None) => None,
-        // Staged files don't move: an import is committed as a whole, which is
-        // what gives them an owner (see routes/imports.rs).
-        (FileContext::Import, _, _, _, _) => {
-            return Err(ApiError::BadRequest(
-                "staged files can't be moved — commit the import first".into(),
-            ));
+        // Staged import file → straight onto a variant, model, or bundle,
+        // server-side. The blob is already in the content-addressed store, so
+        // this only rewrites the owner columns (the path is kept) — the file
+        // never leaves the server. It is the cheap way to sort a demerged
+        // import's leftovers onto where the rest of that set already lives,
+        // where a full `commit` (which carves the *whole* import into one owner)
+        // is the wrong shape. Editing the destination is required; the source
+        // import was already checked at the top of the handler.
+        (FileContext::Import, _, Some(variant_id), None, None) => {
+            let owner = sqlx::query_scalar!(
+                "SELECT m.created_by FROM model_variants v JOIN models m ON m.id = v.model_id
+                 WHERE v.id = $1",
+                variant_id,
+            )
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("no such variant".into()))?;
+            user.require_can_edit(owner)?;
+            Some((None, Some(variant_id), None))
         }
+        (FileContext::Import, _, None, Some(model_id), None) => {
+            let owner =
+                sqlx::query_scalar!("SELECT created_by FROM models WHERE id = $1", model_id)
+                    .fetch_optional(&state.db)
+                    .await?
+                    .ok_or_else(|| ApiError::BadRequest("no such model".into()))?;
+            user.require_can_edit(owner)?;
+            Some((Some(model_id), None, None))
+        }
+        (FileContext::Import, _, None, None, Some(bundle_id)) => {
+            let owner =
+                sqlx::query_scalar!("SELECT created_by FROM bundles WHERE id = $1", bundle_id)
+                    .fetch_optional(&state.db)
+                    .await?
+                    .ok_or_else(|| ApiError::BadRequest("no such bundle".into()))?;
+            user.require_can_edit(owner)?;
+            Some((None, None, Some(bundle_id)))
+        }
+        // A staged file named no destination stays staged: there is no in-place
+        // "unsorted" bucket on an import to move it within.
+        (FileContext::Import, _, None, None, None) => None,
         _ => return Err(ApiError::BadRequest("invalid move for this file".into())),
     };
 
