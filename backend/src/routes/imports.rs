@@ -258,7 +258,22 @@ pub struct SplitInput {
     /// directly in each and everything under it move together. One is the common
     /// case (carving a product off a back-catalogue drop); several at once is for
     /// gathering scattered folders into one import in a single move.
+    ///
+    /// Optional only because a split may name `file_ids` instead; a request with
+    /// neither is refused below rather than silently moving nothing.
+    #[serde(default)]
     pub folders: Vec<String>,
+    /// Individual staged files to lift out alongside (or instead of) the folders.
+    ///
+    /// A folder is the usual unit because a folder is usually the product. But a
+    /// set that interleaves two products in one directory — `Crusader_body.stl`
+    /// beside `Lioness.stl` — has no folder to name, and carving it by hand
+    /// afterwards means creating the model empty and moving its files onto it
+    /// one request at a time, outside the commit that gave every sibling model
+    /// its provenance. Naming the files here keeps that case on the same path as
+    /// every other: split, then commit.
+    #[serde(default)]
+    pub file_ids: Vec<Uuid>,
     /// What to call the new import. Defaults to the folder's own name for a lone
     /// folder, and to the name of the folder the selection sits under otherwise.
     #[serde(default)]
@@ -283,6 +298,12 @@ pub struct SplitInput {
 ///
 /// Nested selections collapse to their outermost folder: picking `Loot` and
 /// `Loot/A` moves `Loot`, since `A` is already inside it.
+///
+/// Individual files can be named too, for the set that interleaves two products
+/// in one directory and so offers no folder to carve on. They have no folder of
+/// their own to preserve, so any selection naming files drops the deepest
+/// directory the whole selection shares — files taken from a single directory
+/// land at the new import's root.
 ///
 /// Refused while the source is still unpacking: half a folder is staged at that
 /// point, and the rest would land in the import this one just left.
@@ -312,7 +333,10 @@ async fn split(
         .iter()
         .map(|f| f.trim().trim_matches('/').to_string())
         .collect();
-    if folders.is_empty() || folders.iter().any(String::is_empty) {
+    let mut file_ids = input.file_ids.clone();
+    file_ids.sort();
+    file_ids.dedup();
+    if folders.iter().any(String::is_empty) || (folders.is_empty() && file_ids.is_empty()) {
         return Err(ApiError::BadRequest(
             "the whole import is not a folder to split out".into(),
         ));
@@ -332,10 +356,49 @@ async fn split(
         .cloned()
         .collect();
 
+    // Where the named files sit — needed for the prefix below, and the chance to
+    // check they are this import's. Without the check an id belonging to some
+    // other import simply wouldn't match the move, and the caller would be told
+    // nothing: it would look like a split that quietly left files behind.
+    let file_dirs: Vec<String> = if file_ids.is_empty() {
+        Vec::new()
+    } else {
+        let dirs = sqlx::query_scalar!(
+            "SELECT path FROM files WHERE import_id = $1 AND id = ANY($2::uuid[])",
+            id,
+            &file_ids,
+        )
+        .fetch_all(&state.db)
+        .await?;
+        if dirs.len() != file_ids.len() {
+            return Err(ApiError::BadRequest(format!(
+                "{} of the {} named file(s) are not staged on this import",
+                file_ids.len() - dirs.len(),
+                file_ids.len(),
+            )));
+        }
+        dirs
+    };
+
     // The prefix every moved path loses. For a lone folder that is its parent, so
     // the folder itself stays as the top directory. For several it is the deepest
     // directory they all share, so each keeps its own name and they stay apart.
-    let prefix_segs: Vec<&str> = if folders.len() == 1 {
+    //
+    // Named files have no folder of their own to keep — the whole point is that
+    // they were never in one — so a selection including any of them takes the
+    // deepest directory the *whole* selection shares. Files picked out of one
+    // directory therefore land at the new import's root, which is what a carve
+    // wants: nothing about where they used to sit says what they are.
+    let selection: Vec<String> = folders.iter().chain(&file_dirs).cloned().collect();
+    let prefix_segs: Vec<&str> = if !file_ids.is_empty() {
+        // A file sitting at the import's own root shares no directory with
+        // anything, and its empty path must not be read as one leading segment.
+        if selection.iter().any(String::is_empty) {
+            Vec::new()
+        } else {
+            common_prefix(&selection)
+        }
+    } else if folders.len() == 1 {
         let segs: Vec<&str> = folders[0].split('/').collect();
         segs[..segs.len() - 1].to_vec()
     } else {
@@ -348,7 +411,7 @@ async fn split(
     };
     // The default name says what the new import holds: the lone folder's own name,
     // or — for a gathered selection — the folder they were all sitting under.
-    let default_name = if folders.len() == 1 {
+    let default_name = if folders.len() == 1 && file_ids.is_empty() {
         folders[0]
             .rsplit('/')
             .next()
@@ -388,9 +451,12 @@ async fn split(
                 SET import_id = $2,
                     path = substring(path from $4)
               WHERE import_id = $1
-                AND EXISTS (
-                  SELECT 1 FROM unnest($3::text[]) AS f(folder)
-                   WHERE path = f.folder OR left(path, length(f.folder) + 1) = f.folder || '/'
+                AND (
+                  id = ANY($5::uuid[])
+                  OR EXISTS (
+                    SELECT 1 FROM unnest($3::text[]) AS f(folder)
+                     WHERE path = f.folder OR left(path, length(f.folder) + 1) = f.folder || '/'
+                  )
                 )
               RETURNING 1
            )
@@ -401,11 +467,14 @@ async fn split(
         // 1-based, and in characters: `substring` counts characters, and a
         // folder name is free to hold anything a filesystem allows.
         (prefix.chars().count() + 1) as i32,
+        &file_ids,
     )
     .fetch_one(&mut *tx)
     .await?;
     if moved == 0 {
         tx.rollback().await?;
+        // Named files were checked against the import above, so an empty move
+        // here can only mean the folders matched nothing.
         return Err(ApiError::BadRequest(format!(
             "nothing is staged under {}",
             folders.join(", ")
@@ -427,7 +496,8 @@ async fn split(
     tx.commit().await?;
 
     tracing::info!(
-        from = %id, to = %new_id, folders = %folders.join(", "), files = moved,
+        from = %id, to = %new_id, folders = %folders.join(", "),
+        named_files = file_ids.len(), files = moved,
         "split folders out of an import"
     );
     Ok(Json(fetch_import(&state, new_id).await?))
@@ -2231,5 +2301,25 @@ mod tests {
             common_prefix(&f(&["Loot/A", "Loota/B"])),
             Vec::<&str>::new()
         );
+    }
+
+    #[test]
+    fn a_file_selection_drops_the_directory_it_shares() {
+        let f = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Files picked out of one directory share all of it, so it goes whole and
+        // they land at the new import's root — the directory held two products
+        // and so says nothing about either.
+        assert_eq!(
+            common_prefix(&f(&["Set/Pre-Supported", "Set/Pre-Supported"])),
+            vec!["Set", "Pre-Supported"]
+        );
+        // Files gathered from two directories keep what tells them apart.
+        assert_eq!(
+            common_prefix(&f(&["Set/Pre-Supported", "Set/Tomb Raiders"])),
+            vec!["Set"]
+        );
+        // A folder named alongside a file inside it collapses to that folder,
+        // which is the shared directory rule applied consistently.
+        assert_eq!(common_prefix(&f(&["Set/A", "Set/A"])), vec!["Set", "A"]);
     }
 }

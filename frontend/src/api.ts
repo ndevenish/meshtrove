@@ -807,8 +807,11 @@ export const api = {
   /** lift one or more staged folders (and everything under them) out into an
       import of their own. A lone folder becomes the new import's top directory;
       several keep their own names under the folder they all sat in. */
-  splitImport: (id: string, folders: string[], name?: string) =>
-    request<ImportSummary>(`/api/imports/${id}/split`, json({ folders, name })),
+  /// `fileIds` carves out individual staged files, for a set that interleaves
+  /// two products in one directory and so offers no folder to split on. Either
+  /// may be empty, but not both.
+  splitImport: (id: string, folders: string[], name?: string, fileIds: string[] = []) =>
+    request<ImportSummary>(`/api/imports/${id}/split`, json({ folders, file_ids: fileIds, name })),
   /** remove a folder level that only wraps other folders: everything under it
       moves up into its parent, so the wrapper stops being a segment a layout's
       rules have to be written around */
