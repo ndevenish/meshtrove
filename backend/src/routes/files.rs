@@ -980,7 +980,11 @@ async fn update_file(
              path = coalesce($4, path),
              model_id = CASE WHEN $5 THEN $6 ELSE model_id END,
              variant_id = CASE WHEN $5 THEN $7 ELSE variant_id END,
-             bundle_id = CASE WHEN $5 THEN $8 ELSE bundle_id END
+             bundle_id = CASE WHEN $5 THEN $8 ELSE bundle_id END,
+             -- Moving a *staged* file gives it a real owner, so it is no longer
+             -- the import's: clear import_id, or the row carries two owners and
+             -- trips num_nonnulls(model_id, variant_id, bundle_id, import_id)=1.
+             import_id = CASE WHEN $5 THEN NULL ELSE import_id END
            WHERE id = $1
            RETURNING id, blob_sha256, path, filename, mime,
                      kind as "kind: FileKind", created_at,
