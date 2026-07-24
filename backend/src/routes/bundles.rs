@@ -23,6 +23,7 @@ use crate::routes::custom_fields::{
     self, CustomFieldValueDetail, CustomFieldValueInput, ValueOwner, apply_values, fetch_values,
     persist_bundle_fields,
 };
+use crate::routes::imports::{ImportSummary, fetch_import};
 use crate::routes::models::{
     DescriptionInput, ImageSummary, LabelInput, ModelSummary, Revision, SearchQuery,
 };
@@ -47,6 +48,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bundles/{id}/models/tags", post(retag_members))
         .route("/api/bundles/{id}/split", post(split))
         .route("/api/bundles/{id}/merge", post(merge))
+        .route("/api/bundles/{id}/demerge", post(demerge))
         .route("/api/bundles/{id}/models", axum::routing::post(add_model))
         .route(
             "/api/bundles/{id}/models/{model_id}",
@@ -927,6 +929,94 @@ async fn merge(
 
     tracing::info!(into = %id, from = %input.from, other = ?input.other, "merged a bundle");
     fetch_detail(&state, id, &user).await.map(Json)
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct DemergeInput {
+    /// What to call the new import. Defaults to the bundle's own name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which loose files to lift out. Empty (the default) moves the bundle's
+    /// whole unsorted bucket; a subset names individual files.
+    #[serde(default)]
+    pub file_ids: Vec<Uuid>,
+}
+
+/// Lift a bundle's unsorted (loose) files back out into an import of their own.
+///
+/// A bundle's real contents are its member models; but a commit that couldn't
+/// place everything used to drop the remainder into the bundle's own *unsorted
+/// bucket* — files carrying `bundle_id` and no model. That is no longer how a
+/// carve leaves what it can't place (the leftover stays staged in an import, to
+/// be split again later), so this moves those pre-existing buckets back onto an
+/// import where they can be split and committed like any other staged drop.
+///
+/// Only the loose files move: the bundle keeps its members, its cover image and
+/// its source archives. The files' paths already carry the bundle's name at the
+/// top, so the new import is a well-formed single-top-folder drop, and the file
+/// rows change owner (`bundle_id` -> `import_id`) without the blobs moving —
+/// the mirror of `split`, one owner throughout.
+async fn demerge(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<DemergeInput>,
+) -> Result<Json<ImportSummary>, ApiError> {
+    let created_by = bundle_created_by(&state, id).await?;
+    user.require_can_edit(created_by)?;
+
+    let mut file_ids = input.file_ids.clone();
+    file_ids.sort();
+    file_ids.dedup();
+
+    // The import inherits the bundle's owner — it is the same staged work carried
+    // on, not the button-presser's — and its name unless the caller renamed it.
+    let name = match input.name.as_deref().map(str::trim) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            sqlx::query_scalar!("SELECT name FROM bundles WHERE id = $1", id)
+                .fetch_one(&state.db)
+                .await?
+        }
+    };
+
+    let mut tx = state.db.begin().await?;
+    let new_id: Uuid = sqlx::query_scalar!(
+        "INSERT INTO imports (name, created_by, partial) VALUES ($1, $2, true) RETURNING id",
+        name,
+        created_by,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    // `bundle_id = $1` is exactly the unsorted bucket `list_bundle_files` shows;
+    // an empty `file_ids` (the whole bucket) is the common case, a named subset
+    // the exception, and the `$3` guard keeps both on one statement.
+    let moved = sqlx::query_scalar!(
+        r#"WITH moved AS (
+             UPDATE files
+                SET bundle_id = NULL, import_id = $2
+              WHERE bundle_id = $1
+                AND ($3 OR id = ANY($4::uuid[]))
+              RETURNING 1
+           )
+           SELECT count(*) as "count!" FROM moved"#,
+        id,
+        new_id,
+        file_ids.is_empty(),
+        &file_ids,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if moved == 0 {
+        tx.rollback().await?;
+        return Err(ApiError::BadRequest(
+            "this bundle has no unsorted files to move out".into(),
+        ));
+    }
+    tx.commit().await?;
+
+    tracing::info!(bundle = %id, import = %new_id, files = moved, "demerged a bundle's unsorted files into an import");
+    Ok(Json(fetch_import(&state, new_id).await?))
 }
 
 // ---------------------------------------------------------------------------
