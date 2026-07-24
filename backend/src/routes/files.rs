@@ -999,6 +999,12 @@ async fn update_file(
 /// Delete a single file row. The underlying blob is content-addressed and may
 /// be shared (dedup) with other files/images, so it is left in the store;
 /// orphan-blob GC is a separate maintenance concern.
+/// Who owns the file, for a caller that only needs the edit-permission check —
+/// e.g. promoting an unsorted image file into a gallery (see `images.rs`).
+pub(crate) async fn file_created_by(state: &AppState, id: Uuid) -> Result<Uuid, ApiError> {
+    Ok(file_context(state, id).await?.1)
+}
+
 async fn delete_file(
     State(state): State<AppState>,
     user: User,

@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO images (blob_sha256, model_id, variant_id, bundle_id, kind, mime,\n                               is_primary, created_by)\n           SELECT $1, $2, $3, $4, 'uploaded', $5,\n                  $6 OR NOT EXISTS (SELECT 1 FROM images i WHERE\n                      (i.model_id = $2 AND $2 IS NOT NULL) OR\n                      (i.variant_id = $3 AND $3 IS NOT NULL) OR\n                      (i.bundle_id = $4 AND $4 IS NOT NULL)),\n                  $7\n           RETURNING id, kind::text as \"kind!\", is_primary, width, height, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "is_primary",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "is_primary"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "width",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "width"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "height",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "height"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bpchar",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "06b36ecea8633251f7c1f45f9427f45c41fa5c70245891c710b10d00abed40c3"
+}

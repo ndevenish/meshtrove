@@ -32,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/images/{id}", get(serve_image).delete(remove_image))
         .route("/api/images/{id}/square", get(serve_square))
         .route("/api/images/{id}/primary", put(mark_primary))
+        .route("/api/files/{id}/promote", post(promote_file))
         .route(
             "/api/models/{id}/images/{image_id}/promote",
             put(promote_to_model),
@@ -72,6 +73,20 @@ const ALLOWED_IMAGE_TYPES: &[(&str, &str)] = &[
     ("image/webp", "webp"),
     ("image/gif", "gif"),
 ];
+
+/// The image mime to store, preferring the client's declared type and falling
+/// back to what the filename implies — rejecting anything that isn't one of the
+/// gallery formats. Shared by the multipart upload and the file-promote path.
+fn resolve_image_mime(declared: Option<&str>, filename: &str) -> Result<String, ApiError> {
+    if let Some(d) = declared.filter(|d| ALLOWED_IMAGE_TYPES.iter().any(|(m, _)| m == d)) {
+        return Ok(d.to_string());
+    }
+    mime_guess::from_path(filename)
+        .first()
+        .map(|m| m.to_string())
+        .filter(|m| ALLOWED_IMAGE_TYPES.iter().any(|(a, _)| a == m))
+        .ok_or_else(|| ApiError::BadRequest("image must be png, jpeg, webp, or gif".into()))
+}
 
 async fn owner_created_by(state: &AppState, owner: Owner) -> Result<Uuid, ApiError> {
     let created_by = match owner {
@@ -141,17 +156,7 @@ async fn upload_image(
         }
         let declared = field.content_type().unwrap_or("").to_string();
         let filename = field.file_name().unwrap_or("").to_string();
-        let mime = if ALLOWED_IMAGE_TYPES.iter().any(|(m, _)| *m == declared) {
-            declared
-        } else {
-            mime_guess::from_path(&filename)
-                .first()
-                .map(|m| m.to_string())
-                .filter(|m| ALLOWED_IMAGE_TYPES.iter().any(|(a, _)| a == m))
-                .ok_or_else(|| {
-                    ApiError::BadRequest("image must be png, jpeg, webp, or gif".into())
-                })?
-        };
+        let mime = resolve_image_mime(Some(&declared), &filename)?;
 
         use futures::TryStreamExt;
         let stream = field.map_err(|e| anyhow::anyhow!("upload stream failed: {e}"));
@@ -198,6 +203,112 @@ async fn upload_image(
         }));
     }
     Err(ApiError::BadRequest("no file field in upload".into()))
+}
+
+/// Where a promoted file's image should hang. Mirrors `CommitInput`'s tagged
+/// shape: `{"target":"bundle","bundle_id":"…"}`.
+#[derive(Deserialize, ToSchema)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum PromoteTarget {
+    Model { model_id: Uuid },
+    Variant { variant_id: Uuid },
+    Bundle { bundle_id: Uuid },
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct PromoteFileRequest {
+    #[serde(flatten)]
+    target: PromoteTarget,
+    /// Make the new image the owner's primary preview, demoting the current one.
+    /// The first image of an owner is primary regardless.
+    #[serde(default)]
+    primary: bool,
+}
+
+/// Turn an unsorted image *file* into a gallery image on a model, variant, or
+/// bundle. The blob is already in the store — the file references it — so this
+/// costs no new bytes: it inserts an `images` row against that same blob and
+/// consumes the file. This is the file→gallery counterpart to the variant→model
+/// `promote_to_model` above, for the case where a render or promo shot arrives
+/// as a plain file (a dropped folder, a demerged bundle's unsorted bucket)
+/// rather than through the image upload.
+async fn promote_file(
+    State(state): State<AppState>,
+    user: User,
+    Path(file_id): Path<Uuid>,
+    Json(req): Json<PromoteFileRequest>,
+) -> Result<Json<ImageRecord>, ApiError> {
+    let owner = match req.target {
+        PromoteTarget::Model { model_id } => Owner::Model(model_id),
+        PromoteTarget::Variant { variant_id } => Owner::Variant(variant_id),
+        PromoteTarget::Bundle { bundle_id } => Owner::Bundle(bundle_id),
+    };
+    // Rights over both ends: the gallery it lands in, and the file it consumes.
+    user.require_can_edit(owner_created_by(&state, owner).await?)?;
+    user.require_can_edit(crate::routes::files::file_created_by(&state, file_id).await?)?;
+
+    let file = sqlx::query!(
+        "SELECT blob_sha256, mime, filename FROM files WHERE id = $1",
+        file_id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    let mime = resolve_image_mime(file.mime.as_deref(), &file.filename)?;
+
+    let (model_id, variant_id, bundle_id) = owner.columns();
+    let mut tx = state.db.begin().await?;
+    // An explicit `primary` demotes the incumbent; the auto-primary of a first
+    // image needs no demotion (there is nothing to demote).
+    if req.primary {
+        sqlx::query!(
+            r#"UPDATE images SET is_primary = false WHERE is_primary AND (
+                   (model_id = $1 AND $1 IS NOT NULL) OR
+                   (variant_id = $2 AND $2 IS NOT NULL) OR
+                   (bundle_id = $3 AND $3 IS NOT NULL))"#,
+            model_id,
+            variant_id,
+            bundle_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    // The blob already exists (files.blob_sha256 → blobs), so no blobs insert.
+    let record = sqlx::query!(
+        r#"INSERT INTO images (blob_sha256, model_id, variant_id, bundle_id, kind, mime,
+                               is_primary, created_by)
+           SELECT $1, $2, $3, $4, 'uploaded', $5,
+                  $6 OR NOT EXISTS (SELECT 1 FROM images i WHERE
+                      (i.model_id = $2 AND $2 IS NOT NULL) OR
+                      (i.variant_id = $3 AND $3 IS NOT NULL) OR
+                      (i.bundle_id = $4 AND $4 IS NOT NULL)),
+                  $7
+           RETURNING id, kind::text as "kind!", is_primary, width, height, created_at"#,
+        file.blob_sha256,
+        model_id,
+        variant_id,
+        bundle_id,
+        mime,
+        req.primary,
+        user.id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    // The file has become the image; it should not also linger as an unsorted
+    // file. Same blob, so the picture is untouched.
+    sqlx::query!("DELETE FROM files WHERE id = $1", file_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    Ok(Json(ImageRecord {
+        id: record.id,
+        kind: record.kind,
+        is_primary: record.is_primary,
+        width: record.width,
+        height: record.height,
+        created_at: record.created_at,
+    }))
 }
 
 async fn list_model_images(
@@ -501,4 +612,33 @@ async fn remove_image(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_image_mime_is_kept() {
+        assert_eq!(
+            resolve_image_mime(Some("image/png"), "whatever.bin").unwrap(),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_filename_when_declared_is_useless() {
+        // A generic octet-stream (or nothing) declared, but the name gives it away.
+        assert_eq!(
+            resolve_image_mime(Some("application/octet-stream"), "shot.jpg").unwrap(),
+            "image/jpeg"
+        );
+        assert_eq!(resolve_image_mime(None, "shot.webp").unwrap(), "image/webp");
+    }
+
+    #[test]
+    fn a_non_image_is_rejected() {
+        assert!(resolve_image_mime(Some("application/pdf"), "notes.pdf").is_err());
+        assert!(resolve_image_mime(None, "model.stl").is_err());
+    }
 }
