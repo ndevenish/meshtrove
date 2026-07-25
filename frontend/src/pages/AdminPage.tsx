@@ -14,6 +14,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, formatBytes, type GcReport } from '../api'
 import { useAuth } from '../main'
 import CustomFieldsPanel from '../components/CustomFieldsPanel'
+import TagsPanel from '../components/TagsPanel'
 import StoragePanel from '../components/StoragePanel'
 import UsersPanel from '../components/UsersPanel'
 import ApiTokensPanel from '../components/ApiTokensPanel'
@@ -234,6 +235,8 @@ export default function AdminPage() {
       </Paper>
 
       <CustomFieldsPanel />
+
+      <TagsPanel />
 
       <UsersPanel />
 

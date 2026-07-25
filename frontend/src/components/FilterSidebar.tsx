@@ -1,8 +1,10 @@
-import { Box, Typography, Chip, Divider } from '@mui/material'
+import { useState } from 'react'
+import { Box, Typography, Chip, Divider, TextField, FormControlLabel, Switch } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 
 import { api } from '../api'
+import { useAuth } from '../main'
 
 /// Sidebar filters: two chip clouds over two vocabularies — what a model IS
 /// (tags) and which edition of it you want (variant tags). Selecting several
@@ -10,17 +12,26 @@ import { api } from '../api'
 /// will not match a model that has those tags on different variants.
 export default function FilterSidebar() {
   const [params, setParams] = useSearchParams()
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
+  // Client-side name filter over the tag cloud — the vocabulary can grow large,
+  // and typing a few letters narrows the chips without touching the selection.
+  const [tagFilter, setTagFilter] = useState('')
 
   const activeTags = (params.get('tags') ?? '').split(',').filter(Boolean)
   const activeVariantTags = (params.get('vtags') ?? '').split(',').filter(Boolean)
   const search = params.get('q') ?? ''
+  // Admin escape hatch (URL-backed, so it also drives the browse grid): reveal
+  // hidden-tagged items and the tags that only live on them. Only honoured for
+  // admins — the toggle isn't even rendered otherwise, and the API re-checks.
+  const showHidden = isAdmin && params.get('show_hidden') === '1'
 
   // Counts reflect the current selection: each chip shows how many models would
   // remain if it were added, so narrowing filters the numbers down. The
   // selection is in the query key, so the clouds refetch as chips are toggled.
-  const selection = { tags: activeTags, vtags: activeVariantTags, q: search }
+  const selection = { tags: activeTags, vtags: activeVariantTags, q: search, showHidden }
   const { data: tags } = useQuery({
-    queryKey: ['tags', activeTags, activeVariantTags, search],
+    queryKey: ['tags', activeTags, activeVariantTags, search, showHidden],
     queryFn: () => api.tags(selection),
   })
   const { data: variantTags } = useQuery({
@@ -79,21 +90,62 @@ export default function FilterSidebar() {
       <Typography variant="subtitle2" sx={{ mb: 1.5, textTransform: 'uppercase', opacity: 0.7 }}>
         Tags
       </Typography>
-      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
-        {(tags ?? []).map((tag) => {
-          const active = activeTags.includes(tag.name)
-          return (
-            <Chip
-              key={tag.id}
-              label={`${tag.name} (${tag.model_count})`}
+      {isAdmin && (
+        <FormControlLabel
+          control={
+            <Switch
               size="small"
-              color={active ? 'primary' : 'default'}
-              variant={active ? 'filled' : 'outlined'}
-              onClick={() => toggle('tags', activeTags, tag.name)}
-              sx={{ opacity: tag.model_count === 0 && !active ? 0.1 : 1 }}
+              checked={showHidden}
+              onChange={() =>
+                update((next) => {
+                  if (showHidden) next.delete('show_hidden')
+                  else next.set('show_hidden', '1')
+                })
+              }
             />
-          )
-        })}
+          }
+          label="Show hidden"
+          slotProps={{ typography: { variant: 'body2' } }}
+          sx={{ mb: 1, display: 'block' }}
+        />
+      )}
+      {(tags ?? []).length > 0 && (
+        <TextField
+          size="small"
+          fullWidth
+          placeholder="Filter tags…"
+          value={tagFilter}
+          onChange={(e) => setTagFilter(e.target.value)}
+          sx={{ mb: 1.5 }}
+        />
+      )}
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+        {(tags ?? [])
+          .filter((tag) => {
+            const q = tagFilter.trim().toLowerCase()
+            // Keep an active chip visible even when it falls outside the filter,
+            // so a selection never silently disappears as you type.
+            return !q || tag.name.toLowerCase().includes(q) || activeTags.includes(tag.name)
+          })
+          .map((tag) => {
+            const active = activeTags.includes(tag.name)
+            return (
+              <Chip
+                key={tag.id}
+                label={`${tag.name} (${tag.model_count})`}
+                size="small"
+                color={active ? 'primary' : 'default'}
+                variant={active ? 'filled' : 'outlined'}
+                onClick={() => toggle('tags', activeTags, tag.name)}
+                // Hidden tags only ever surface here for an admin with "Show
+                // hidden" on; a dashed outline flags them as not publicly visible.
+                sx={{
+                  opacity: tag.model_count === 0 && !active ? 0.1 : 1,
+                  ...(tag.hidden ? { borderStyle: 'dashed' } : {}),
+                }}
+              />
+            )
+          })}
         {tags?.length === 0 && (
           <Typography variant="body2" color="text.secondary">
             No tags yet

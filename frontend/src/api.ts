@@ -121,6 +121,8 @@ export interface Tag {
   id: string
   name: string
   model_count: number
+  /** Admin-hidden from browsing/search. Only ever true in the admin manage list. */
+  hidden: boolean
 }
 
 export interface ModelSummary {
@@ -670,6 +672,8 @@ export interface TagFilter {
   tags?: string[]
   vtags?: string[]
   q?: string
+  /** Admin "Show hidden" toggle: also surface hidden tags and count hidden items. */
+  showHidden?: boolean
 }
 
 const tagSelectionQuery = (sel: TagFilter): string => {
@@ -677,6 +681,7 @@ const tagSelectionQuery = (sel: TagFilter): string => {
   if (sel.tags?.length) p.set('sel_tags', sel.tags.join(','))
   if (sel.vtags?.length) p.set('sel_vtags', sel.vtags.join(','))
   if (sel.q?.trim()) p.set('sel_q', sel.q.trim())
+  if (sel.showHidden) p.set('show_hidden', '1')
   const qs = p.toString()
   return qs ? `?${qs}` : ''
 }
@@ -902,6 +907,11 @@ export const api = {
   tags: (sel: TagFilter = {}) => request<Tag[]>(`/api/tags${tagSelectionQuery(sel)}`),
   variantTags: (sel: TagFilter = {}) =>
     request<VariantTag[]>(`/api/variant-tags${tagSelectionQuery(sel)}`),
+
+  // Admin: every tag (hidden included) and the hide/unhide toggle.
+  manageTags: () => request<Tag[]>('/api/tags/manage'),
+  setTagHidden: (id: string, hidden: boolean) =>
+    request<Tag>(`/api/tags/${id}/hidden`, { ...json({ hidden }), method: 'PUT' }),
 
   jobs: (status = '') => request<Job[]>(`/api/jobs?status=${status}`),
   retryJob: (id: number) => request<void>(`/api/jobs/${id}/retry`, { method: 'POST' }),
