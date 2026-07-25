@@ -335,8 +335,12 @@ async fn create(
 async fn fetch_members(
     state: &AppState,
     bundle_id: Uuid,
-    viewer: Uuid,
+    user: &User,
 ) -> Result<Vec<ModelSummary>, ApiError> {
+    // A member carrying a hidden tag is dropped for non-admins — otherwise a
+    // model hidden from browse/search would still be reachable through its
+    // bundle. Admins ($3) keep seeing them, flagged via the `hidden` column so
+    // the UI can mark them as hidden-from-visitors.
     let rows = sqlx::query!(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?", m.updated_at,
                   model_preview_image(m.id) as primary_image_id,
@@ -345,12 +349,17 @@ async fn fetch_members(
                            WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as "liked!",
                   (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as "variant_count!",
                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
-                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as "tags!"
+                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as "tags!",
+                  EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id
+                           WHERE mh.model_id = m.id AND th.hidden) as "hidden!"
            FROM models m LEFT JOIN creators c ON c.id = m.creator_id
            WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)
+             AND ($3 OR NOT EXISTS (SELECT 1 FROM model_tags mx JOIN tags tx ON tx.id = mx.tag_id
+                                     WHERE mx.model_id = m.id AND tx.hidden))
            ORDER BY m.name"#,
         bundle_id,
-        viewer,
+        user.id,
+        user.is_admin(),
     )
     .fetch_all(&state.db)
     .await?;
@@ -368,6 +377,7 @@ async fn fetch_members(
             variant_count: r.variant_count,
             tags: r.tags,
             matched_variant_ids: None,
+            hidden: r.hidden,
             updated_at: r.updated_at,
         })
         .collect())
@@ -397,7 +407,7 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
     .fetch_all(&state.db)
     .await?;
 
-    let models = fetch_members(state, id, user.id).await?;
+    let models = fetch_members(state, id, user).await?;
     let custom_fields = fetch_values(state, ValueOwner::Bundle(id), user).await?;
 
     let categories: Vec<String> = sqlx::query_scalar!(

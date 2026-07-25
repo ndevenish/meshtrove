@@ -37,6 +37,9 @@ pub struct BrowseItem {
     pub creator_name: Option<String>,
     pub primary_image_id: Option<Uuid>,
     pub tags: Vec<String>,
+    /// Carries an admin-hidden tag. In normal browsing these are excluded, so
+    /// this is only ever true for an admin who turned on "Show hidden".
+    pub hidden: bool,
     pub like_count: i64,
     /// whether the *calling* user has liked it — what the heart button renders
     pub liked: bool,
@@ -65,6 +68,8 @@ pub fn push_model_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) {
            (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS count,
            coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                      JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
+           EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id
+                    WHERE mh.model_id = m.id AND th.hidden) AS hidden,
            m.updated_at, "#,
     );
 }
@@ -83,6 +88,8 @@ pub fn push_bundle_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) 
            (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS count,
            coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
                      JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags,
+           EXISTS (SELECT 1 FROM bundle_tags bh JOIN tags th ON th.id = bh.tag_id
+                    WHERE bh.bundle_id = b.id AND th.hidden) AS hidden,
            b.updated_at, "#,
     );
 }
@@ -97,6 +104,7 @@ pub fn decode_browse_item(row: &sqlx::postgres::PgRow) -> Result<BrowseItem, sql
         creator_name: row.try_get("creator_name")?,
         primary_image_id: row.try_get("primary_image_id")?,
         tags: row.try_get("tags")?,
+        hidden: row.try_get("hidden")?,
         like_count: row.try_get("like_count")?,
         liked: row.try_get("liked")?,
         count: row.try_get("count")?,

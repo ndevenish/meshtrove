@@ -78,6 +78,10 @@ pub struct ModelSummary {
     pub variant_count: i64,
     /// Variants satisfying the `vtags` filter (when one was given)
     pub matched_variant_ids: Option<Vec<Uuid>>,
+    /// Carries at least one admin-hidden tag. Non-admins never receive such a
+    /// model as a bundle member (it's filtered out); an admin does, and the UI
+    /// marks it as hidden-from-visitors.
+    pub hidden: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -196,6 +200,8 @@ async fn search(
               (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS variant_count,
               coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                         JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
+              EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id
+                       WHERE mh.model_id = m.id AND th.hidden) AS hidden,
               EXISTS (SELECT 1 FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = "#,
     );
     qb.push_bind(user.id).push(
@@ -232,6 +238,7 @@ async fn search(
                     variant_count: row.try_get("variant_count")?,
                     tags: row.try_get("tags")?,
                     matched_variant_ids: None,
+                    hidden: row.try_get("hidden")?,
                     updated_at: row.try_get("updated_at")?,
                 })
             },

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.id, m.name, m.slug, m.creator_id, c.name as \"creator_name?\", m.updated_at,\n                  model_preview_image(m.id) as primary_image_id,\n                  (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as \"like_count!\",\n                  EXISTS (SELECT 1 FROM user_model_marks k\n                           WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as \"liked!\",\n                  (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as \"variant_count!\",\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as \"tags!\"\n           FROM models m LEFT JOIN creators c ON c.id = m.creator_id\n           WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)\n           ORDER BY m.name",
+  "query": "SELECT m.id, m.name, m.slug, m.creator_id, c.name as \"creator_name?\", m.updated_at,\n                  model_preview_image(m.id) as primary_image_id,\n                  (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as \"like_count!\",\n                  EXISTS (SELECT 1 FROM user_model_marks k\n                           WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as \"liked!\",\n                  (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as \"variant_count!\",\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as \"tags!\",\n                  EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id\n                           WHERE mh.model_id = m.id AND th.hidden) as \"hidden!\"\n           FROM models m LEFT JOIN creators c ON c.id = m.creator_id\n           WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)\n             AND ($3 OR NOT EXISTS (SELECT 1 FROM model_tags mx JOIN tags tx ON tx.id = mx.tag_id\n                                     WHERE mx.model_id = m.id AND tx.hidden))\n           ORDER BY m.name",
   "describe": {
     "columns": [
       {
@@ -98,12 +98,19 @@
         "name": "tags!",
         "type_info": "TextArray",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "hidden!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid"
+        "Uuid",
+        "Bool"
       ]
     },
     "nullable": [
@@ -117,8 +124,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "ae805b1fb9068981e45ea058e5c72623d16ce265ed60daa7dff3a629ef2aaf37"
+  "hash": "b898034a0515c309d33a981f9e36bb86163e15a6123b3438a469dccb276e6b2d"
 }
