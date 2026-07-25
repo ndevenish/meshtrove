@@ -138,6 +138,9 @@ export interface ModelSummary {
   liked: boolean
   variant_count: number
   matched_variant_ids: string[] | null
+  /** Carries an admin-hidden tag: only ever true for an admin (non-admins never
+   *  receive such a model as a bundle member). The card marks it accordingly. */
+  hidden: boolean
   updated_at: string
 }
 
@@ -299,6 +302,8 @@ export interface BrowseItem {
   creator_name: string | null
   primary_image_id: string | null
   tags: string[]
+  /** Carries an admin-hidden tag; only ever true for an admin with "Show hidden" on. */
+  hidden: boolean
   like_count: number
   /** whether the *calling* user has liked it — what the heart button renders */
   liked: boolean

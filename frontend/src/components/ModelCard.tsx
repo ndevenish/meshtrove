@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Card, CardActionArea, CardContent, Typography, Box, Chip, Stack } from '@mui/material'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
 
 import { type ModelSummary, squareImageUrl } from '../api'
 import LikeButton from './LikeButton'
@@ -16,6 +17,27 @@ export default function ModelCard({
 }) {
   return (
     <Card variant="outlined" sx={{ height: '100%', position: 'relative' }}>
+      {/* Only ever present for an admin (non-admins never receive a hidden
+          member): flags that this model is hidden from browse/search for
+          visitors. Non-interactive so clicks still open the model. */}
+      {model.hidden && (
+        <Chip
+          icon={<VisibilityOffIcon />}
+          label="Hidden"
+          size="small"
+          color="default"
+          sx={{
+            position: 'absolute',
+            top: 8,
+            left: 8,
+            zIndex: 3,
+            pointerEvents: 'none',
+            bgcolor: 'rgba(0, 0, 0, 0.6)',
+            color: 'common.white',
+            '& .MuiChip-icon': { color: 'common.white' },
+          }}
+        />
+      )}
       <CardActionArea
         component={Link}
         to={`/models/${model.slug}`}
