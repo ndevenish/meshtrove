@@ -107,6 +107,12 @@ export default function BundleUnsortedSection({
     await invalidate()
   }
 
+  // Rename (or, with an empty path, strip) a folder across all its files.
+  const renameFolder = async (fileIds: string[], newPath: string) => {
+    await Promise.all(fileIds.map((id) => api.updateFile(id, { path: newPath })))
+    await invalidate()
+  }
+
   const removeFile = async (id: string) => {
     await api.deleteFile(id)
     setSelected((prev) => {
@@ -226,6 +232,7 @@ export default function BundleUnsortedSection({
             onToggle={toggle}
             onKindChange={editing ? setKind : undefined}
             onDelete={editing ? removeFile : undefined}
+            onFolderRename={editing ? renameFolder : undefined}
           />
         </>
       )}
