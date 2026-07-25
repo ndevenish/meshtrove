@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
-use crate::routes::bundles::push_bundle_filters;
-use crate::routes::models::{SearchQuery, parse_csv, push_filters};
+use crate::routes::bundles::{push_bundle_filters, push_bundle_hidden_exclude};
+use crate::routes::models::{SearchQuery, parse_csv, push_filters, push_model_hidden_exclude};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -152,6 +152,10 @@ async fn browse(
     let vtags = parse_csv(&query.vtags.unwrap_or_default());
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(30).clamp(1, 100);
+    // Hidden-tagged items stay out of browse and search unless an admin has
+    // flipped the "Show hidden" toggle. A non-admin passing show_hidden=1 is
+    // ignored — the toggle is only offered to admins, and this is the guard.
+    let show_hidden = query.show_hidden.unwrap_or(false) && user.is_admin();
 
     // Nobody is looking for anything in particular: the plain front page.
     let idle = q.is_empty() && tags.is_empty() && vtags.is_empty();
@@ -159,9 +163,11 @@ async fn browse(
     // Count over a lean union of just the matching ids.
     let mut cq = QueryBuilder::new("SELECT count(*) FROM (SELECT m.id FROM models m WHERE TRUE");
     push_filters(&mut cq, &q, &tags, &vtags);
+    push_model_hidden_exclude(&mut cq, show_hidden);
     push_member_collapse(&mut cq, idle);
     cq.push(" UNION ALL SELECT b.id FROM bundles b WHERE TRUE");
     push_bundle_where(&mut cq, &q, &tags, !vtags.is_empty());
+    push_bundle_hidden_exclude(&mut cq, show_hidden);
     cq.push(") x");
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -181,6 +187,7 @@ async fn browse(
     }
     qb.push(" FROM models m LEFT JOIN creators c ON c.id = m.creator_id WHERE TRUE");
     push_filters(&mut qb, &q, &tags, &vtags);
+    push_model_hidden_exclude(&mut qb, show_hidden);
     push_member_collapse(&mut qb, idle);
 
     qb.push(" UNION ALL SELECT ");
@@ -194,6 +201,7 @@ async fn browse(
     }
     qb.push(" FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id WHERE TRUE");
     push_bundle_where(&mut qb, &q, &tags, !vtags.is_empty());
+    push_bundle_hidden_exclude(&mut qb, show_hidden);
 
     qb.push(") x ORDER BY rank DESC, updated_at DESC LIMIT ")
         .push_bind(per_page as i64)

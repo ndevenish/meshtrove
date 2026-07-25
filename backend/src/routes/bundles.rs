@@ -97,6 +97,17 @@ pub fn push_bundle_filters(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str, tags:
     }
 }
 
+/// Exclude bundles (alias `b`) carrying any hidden tag, unless `show_hidden`.
+/// The bundle mirror of [`push_model_hidden_exclude`].
+pub fn push_bundle_hidden_exclude(qb: &mut QueryBuilder<sqlx::Postgres>, show_hidden: bool) {
+    if !show_hidden {
+        qb.push(
+            " AND NOT EXISTS (SELECT 1 FROM bundle_tags bt JOIN tags ft ON ft.id = bt.tag_id \
+             WHERE bt.bundle_id = b.id AND ft.hidden)",
+        );
+    }
+}
+
 /// The shared SELECT list producing a `BundleSummary` (alias `b` for bundles).
 const BUNDLE_SUMMARY_COLS: &str = r#"b.id, b.name, b.slug, b.creator_id,
     b.updated_at, c.name AS creator_name,

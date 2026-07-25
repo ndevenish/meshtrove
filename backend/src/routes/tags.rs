@@ -2,8 +2,8 @@
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
-    routing::get,
+    extract::{Path, Query, State},
+    routing::{get, put},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row};
@@ -13,12 +13,18 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::models::{
-    parse_csv, push_model_tag_filters, push_text_filter, push_variant_group,
+    parse_csv, push_model_hidden_exclude, push_model_tag_filters, push_text_filter,
+    push_variant_group,
 };
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/tags", get(list).post(create))
+    Router::new()
+        .route("/api/tags", get(list).post(create))
+        // Admin: every tag (hidden ones included) with its global usage count,
+        // and the toggle that hides/unhides one from browsing and search.
+        .route("/api/tags/manage", get(list_all))
+        .route("/api/tags/{id}/hidden", put(set_hidden))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -26,6 +32,10 @@ pub struct Tag {
     pub id: Uuid,
     pub name: String,
     pub model_count: i64,
+    /// Suppressed from the filter sidebar, model/bundle cards and detail pages,
+    /// and the search index. The public `list` never returns hidden tags, so
+    /// this is only ever `true` in the admin `list_all` view.
+    pub hidden: bool,
 }
 
 #[derive(Deserialize)]
@@ -39,27 +49,32 @@ pub struct ListQuery {
     pub sel_tags: Option<String>,
     pub sel_vtags: Option<String>,
     pub sel_q: Option<String>,
+    /// Admin-only: include hidden tags (and count hidden items), paired with the
+    /// browse "Show hidden" toggle. ANDed with the caller being an admin.
+    pub show_hidden: Option<bool>,
 }
 
 async fn list(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<Tag>>, ApiError> {
     let name = query.q.unwrap_or_default();
     let sel_tags = parse_csv(&query.sel_tags.unwrap_or_default());
     let sel_vtags = parse_csv(&query.sel_vtags.unwrap_or_default());
     let sel_q = query.sel_q.unwrap_or_default().trim().to_string();
+    let show_hidden = query.show_hidden.unwrap_or(false) && user.is_admin();
 
-    // model_count = models matching the current selection that also carry this
-    // tag `t`. The candidate clause correlates to the outer `t`; the selection's
-    // own filters use alias `ft` internally, so they don't shadow it.
+    // model_count = *visible* models matching the current selection that also
+    // carry this tag `t`. The candidate clause correlates to the outer `t`; the
+    // selection's own filters use alias `ft` internally, so they don't shadow it.
     let mut qb = QueryBuilder::new(
-        "SELECT t.id, t.name::text AS name, (SELECT count(*) FROM models m WHERE TRUE",
+        "SELECT t.id, t.name::text AS name, t.hidden, (SELECT count(*) FROM models m WHERE TRUE",
     );
     push_text_filter(&mut qb, &sel_q);
     push_model_tag_filters(&mut qb, &sel_tags);
     push_variant_group(&mut qb, &sel_vtags);
+    push_model_hidden_exclude(&mut qb, show_hidden);
     qb.push(
         " AND EXISTS (SELECT 1 FROM model_tags mt WHERE mt.model_id = m.id AND mt.tag_id = t.id)) \
          AS model_count FROM tags t WHERE (",
@@ -67,7 +82,19 @@ async fn list(
     qb.push_bind(name.clone())
         .push(" = '' OR t.name ILIKE '%' || ")
         .push_bind(name.clone())
-        .push(" || '%') ORDER BY model_count DESC, t.name");
+        .push(" || '%')");
+    if !show_hidden {
+        // Only surface a tag that at least one *visible* model carries. This
+        // drops hidden tags (all their models are hidden) and any tag whose only
+        // models are hidden — neither should appear or be filterable in browse.
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM model_tags mt JOIN models m ON m.id = mt.model_id \
+             WHERE mt.tag_id = t.id \
+               AND NOT EXISTS (SELECT 1 FROM model_tags mh JOIN tags ft ON ft.id = mh.tag_id \
+                               WHERE mh.model_id = m.id AND ft.hidden))",
+        );
+    }
+    qb.push(" ORDER BY model_count DESC, t.name");
 
     let rows = qb.build().fetch_all(&state.db).await?;
     let tags = rows
@@ -77,10 +104,70 @@ async fn list(
                 id: r.try_get("id")?,
                 name: r.try_get("name")?,
                 model_count: r.try_get("model_count")?,
+                hidden: r.try_get("hidden")?,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(tags))
+}
+
+/// Admin: the whole vocabulary, hidden tags included, each with its global model
+/// usage count. Powers the admin Tags panel; hidden tags sort last.
+async fn list_all(State(state): State<AppState>, user: User) -> Result<Json<Vec<Tag>>, ApiError> {
+    user.require_admin()?;
+    let rows = sqlx::query!(
+        r#"SELECT t.id, t.name::text AS "name!", t.hidden,
+                  (SELECT count(*) FROM model_tags mt WHERE mt.tag_id = t.id) AS "model_count!"
+             FROM tags t
+            ORDER BY t.hidden,
+                     (SELECT count(*) FROM model_tags mt WHERE mt.tag_id = t.id) DESC,
+                     t.name"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let tags = rows
+        .into_iter()
+        .map(|r| Tag {
+            id: r.id,
+            name: r.name,
+            model_count: r.model_count,
+            hidden: r.hidden,
+        })
+        .collect();
+    Ok(Json(tags))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct HiddenInput {
+    pub hidden: bool,
+}
+
+/// Admin: hide or unhide a tag. The DB triggers re-index every model and bundle
+/// carrying it, so the change reaches search immediately; the tag's association
+/// rows are left untouched, so unhiding restores it exactly as it was.
+async fn set_hidden(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<HiddenInput>,
+) -> Result<Json<Tag>, ApiError> {
+    user.require_admin()?;
+    let row = sqlx::query!(
+        r#"UPDATE tags SET hidden = $2 WHERE id = $1
+           RETURNING id, name::text AS "name!", hidden,
+                     (SELECT count(*) FROM model_tags mt WHERE mt.tag_id = $1) AS "model_count!""#,
+        id,
+        input.hidden,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(Tag {
+        id: row.id,
+        name: row.name,
+        model_count: row.model_count,
+        hidden: row.hidden,
+    }))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -135,5 +222,6 @@ pub async fn upsert_tag<'e>(
         id: tag.id,
         name: tag.name,
         model_count: 0,
+        hidden: false,
     })
 }

@@ -57,6 +57,10 @@ pub struct SearchQuery {
     pub vtags: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
+    /// Admin-only escape hatch: include hidden-tagged items in the results. The
+    /// handler ANDs this with the caller actually being an admin, so a forged
+    /// `show_hidden=1` from a non-admin does nothing.
+    pub show_hidden: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -131,6 +135,20 @@ pub fn push_model_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, tags: &[Str
         qb.push(" AND EXISTS (SELECT 1 FROM model_tags mt JOIN tags ft ON ft.id = mt.tag_id WHERE mt.model_id = m.id AND ft.name = ")
             .push_bind(tag.clone())
             .push(")");
+    }
+}
+
+/// Exclude models (alias `m`) that carry any hidden tag, unless `show_hidden`.
+/// This is what makes a hidden tag hide its items from browse and search; only
+/// an admin who asked to see them passes `show_hidden = true`.
+pub fn push_model_hidden_exclude(qb: &mut QueryBuilder<sqlx::Postgres>, show_hidden: bool) {
+    if !show_hidden {
+        // `ft` (not `t`) so a caller correlating to an outer `t` (the tag-cloud
+        // count) is not shadowed — same discipline as push_model_tag_filters.
+        qb.push(
+            " AND NOT EXISTS (SELECT 1 FROM model_tags mt JOIN tags ft ON ft.id = mt.tag_id \
+             WHERE mt.model_id = m.id AND ft.hidden)",
+        );
     }
 }
 

@@ -72,6 +72,12 @@ impl User {
         }
     }
 
+    /// Admins alone may reveal hidden-tagged content (the `show_hidden` browse
+    /// toggle). The `--anonymous` dev user is a synthetic admin, so it can.
+    pub fn is_admin(&self) -> bool {
+        self.role == UserRole::Admin
+    }
+
     pub fn require_admin(&self) -> Result<(), AuthError> {
         if self.role == UserRole::Admin {
             Ok(())
