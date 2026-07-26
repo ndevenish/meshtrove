@@ -372,8 +372,14 @@ export interface DropboxEntry {
 }
 
 export interface DropboxListing {
+  /** the dropbox's name — '' for the default `imports`, else the label from
+      `imports-<name>`; the handle the pickup/delete endpoints take */
+  name: string
   /** absolute path of the dropbox on the server, so an admin knows where to copy to */
   path: string
+  /** whether entries here can be deleted off disk — false for a read-only mount,
+      which still lists and imports fine but can't be deleted from */
+  writable: boolean
   entries: DropboxEntry[]
 }
 
@@ -888,14 +894,17 @@ export const api = {
       `/api/imports/${id}/plan`,
       json({ ...spec, target, bundle_id: bundleId, counts_only: countsOnly }),
     ),
-  /** contents of the server-side dropbox (admin only) */
-  dropbox: () => request<DropboxListing>('/api/dropbox'),
+  /** every server-side dropbox and its entries (admin only); the default leads */
+  dropbox: () => request<DropboxListing[]>('/api/dropbox'),
   /** stage one dropbox entry as an import; the copy itself runs as a job */
-  pickUpDropboxEntry: (entry: string) =>
-    request<ImportSummary>('/api/dropbox/import', json({ entry })),
+  pickUpDropboxEntry: (dropbox: string, entry: string) =>
+    request<ImportSummary>('/api/dropbox/import', json({ dropbox, entry })),
   /** delete a dropbox entry off the server's disk (admin only) */
-  deleteDropboxEntry: (entry: string) =>
-    request<void>(`/api/dropbox?entry=${encodeURIComponent(entry)}`, { method: 'DELETE' }),
+  deleteDropboxEntry: (dropbox: string, entry: string) =>
+    request<void>(
+      `/api/dropbox?dropbox=${encodeURIComponent(dropbox)}&entry=${encodeURIComponent(entry)}`,
+      { method: 'DELETE' },
+    ),
   importLayouts: () => request<ImportLayout[]>('/api/import-layouts'),
   createImportLayout: (body: { name: string; creator_id?: string | null } & LayoutSpec) =>
     request<ImportLayout>('/api/import-layouts', json(body)),

@@ -30,9 +30,11 @@ async fn main() -> Result<()> {
     tracing::info!(version = VERSION, "starting meshtrove");
 
     let state = AppState::new().await?;
-    // Create the dropbox eagerly: it is a folder a human is meant to find and
-    // drop files into, so it has to exist before anyone looks for it.
-    let dropbox = state.config.dropbox_dir();
+    // Create the default dropbox eagerly: it is a folder a human is meant to find
+    // and drop files into, so it has to exist before anyone looks for it. Named
+    // dropboxes (`imports-<name>`) are the admin's to create — their presence is
+    // what declares them, so we discover rather than conjure them.
+    let dropbox = state.config.dropbox_dir("");
     std::fs::create_dir_all(&dropbox)
         .with_context(|| format!("creating dropbox dir {}", dropbox.display()))?;
     sqlx::migrate!().run(&state.db).await?;

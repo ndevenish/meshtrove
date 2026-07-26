@@ -411,6 +411,10 @@ struct PickupPayload {
     import_id: Uuid,
     /// The entry's name in the dropbox, as `GET /api/dropbox` reported it.
     entry: String,
+    /// Which dropbox it came from ("" = the default `imports`). Absent on jobs
+    /// queued before multiple dropboxes existed, so it defaults to the default.
+    #[serde(default)]
+    dropbox: String,
 }
 
 /// `dropbox_import` job: read one dropbox entry into an already-created import.
@@ -439,7 +443,7 @@ pub async fn dropbox_import(state: &AppState, job_id: i64, payload: &Value) -> R
         return Err(anyhow!("import {} no longer exists", payload.import_id));
     }
 
-    let path = resolve(&state.config.dropbox_dir(), &payload.entry)?;
+    let path = resolve(&state.config.dropbox_dir(&payload.dropbox), &payload.entry)?;
     let scan_path = path.clone();
     let entries = tokio::task::spawn_blocking(move || scan(&scan_path))
         .await

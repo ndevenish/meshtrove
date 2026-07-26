@@ -21,40 +21,72 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, formatBytes, type DropboxEntry } from '../api'
+import { api, formatBytes, type DropboxEntry, type DropboxListing } from '../api'
 import { useAuth } from '../main'
 
-/// The other way in: a folder on the server (`<store>/imports`) that an admin
-/// fills over ssh or a file share, listed here with a button per entry. The
-/// browser is the wrong pipe for a 40GB box set that is already on the machine —
-/// uploading it would copy it back over the network to land where it started.
+/// The other way in: folders on the server (`<store>/imports`, plus any
+/// `<store>/imports-<name>` an admin adds) that get filled over ssh or a file
+/// share and listed here with a button per entry. The browser is the wrong pipe
+/// for a 40GB box set that is already on the machine — uploading it would copy
+/// it back over the network to land where it started.
 ///
 /// A pickup produces the same staged import a browser drop does, so the flow
 /// after pressing the button is the ordinary one: open the import, say what it
 /// is, commit. Admin-only, because it reads the server's filesystem; the panel is
-/// simply absent for everyone else.
+/// simply absent for everyone else. One section per dropbox, the default first.
 export default function DropboxPanel() {
   const { user } = useAuth()
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-  const [open, setOpen] = useState(false)
-  const [error, setError] = useState('')
-
   const isAdmin = user?.role === 'admin'
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['dropbox'],
     queryFn: () => api.dropbox(),
     enabled: isAdmin,
-    // Listing sizes a folder by walking it, so this is more expensive than the
-    // imports list beside it — poll gently, and slower still while collapsed.
-    // Not *never*, though: the header is what tells you whether there is
-    // anything in there, so it has to notice a file that arrives while you are
-    // sitting on the page.
-    refetchInterval: open ? 10_000 : 30_000,
+    // Listing sizes each folder by walking it, so this is more expensive than the
+    // imports list beside it — poll gently. Not *never*, though: a section header
+    // is what tells you whether there is anything in there, so it has to notice a
+    // file that arrives while you are sitting on the page.
+    refetchInterval: 20_000,
   })
 
+  if (!isAdmin) return null
+
+  const listings = data ?? []
+  return (
+    <>
+      {listings.map((listing) => (
+        <DropboxSection
+          key={listing.name}
+          listing={listing}
+          isLoading={isLoading}
+          isFetching={isFetching}
+          onRefresh={() => void refetch()}
+        />
+      ))}
+    </>
+  )
+}
+
+/// One dropbox: the default reads as "From the server", a named one as its name.
+/// Self-contained — its own open state, its own pickup/delete tied to this
+/// dropbox — so the sections don't fight over which entry is busy.
+function DropboxSection({
+  listing,
+  isLoading,
+  isFetching,
+  onRefresh,
+}: {
+  listing: DropboxListing
+  isLoading: boolean
+  isFetching: boolean
+  onRefresh: () => void
+}) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [error, setError] = useState('')
+
   const pickUp = useMutation({
-    mutationFn: (entry: string) => api.pickUpDropboxEntry(entry),
+    mutationFn: (entry: string) => api.pickUpDropboxEntry(listing.name, entry),
     onSuccess: async (staged) => {
       setError('')
       // The copy runs as a job; the import already exists, so go straight to it
@@ -67,7 +99,7 @@ export default function DropboxPanel() {
   })
 
   const del = useMutation({
-    mutationFn: (entry: string) => api.deleteDropboxEntry(entry),
+    mutationFn: (entry: string) => api.deleteDropboxEntry(listing.name, entry),
     onSuccess: async () => {
       setError('')
       await queryClient.invalidateQueries({ queryKey: ['dropbox'] })
@@ -75,22 +107,20 @@ export default function DropboxPanel() {
     onError: (e: Error) => setError(e.message),
   })
 
-  if (!isAdmin) return null
-
-  const entries = data?.entries ?? []
+  const entries = listing.entries
   // Nothing to expand into is nothing to offer: an empty dropbox collapses to a
   // single line saying where the folder is, with no button that pays out an
   // empty list. The count beside the title is then a promise — if there is no
   // "Show", there is nothing behind it.
   const hasEntries = entries.length > 0
+  const title = listing.name || 'From the server'
 
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
         <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Typography sx={{ fontWeight: 600 }}>
-            From the server{' '}
-            {hasEntries && <Chip size="small" label={entries.length} sx={{ ml: 0.5 }} />}
+            {title} {hasEntries && <Chip size="small" label={entries.length} sx={{ ml: 0.5 }} />}
             {!isLoading && !hasEntries && (
               <Typography component="span" variant="body2" color="text.secondary">
                 — nothing waiting
@@ -100,7 +130,7 @@ export default function DropboxPanel() {
           <Typography
             variant="body2"
             color="text.secondary"
-            title={data?.path}
+            title={listing.path}
             sx={{
               fontFamily: 'monospace',
               fontSize: 12,
@@ -109,12 +139,12 @@ export default function DropboxPanel() {
               whiteSpace: 'nowrap',
             }}
           >
-            {data?.path ?? '…'}
+            {listing.path}
           </Typography>
         </Box>
-        <Tooltip title="Rescan the folder">
+        <Tooltip title="Rescan the folders">
           <span>
-            <IconButton onClick={() => void refetch()} disabled={isFetching}>
+            <IconButton onClick={onRefresh} disabled={isFetching}>
               <RefreshIcon />
             </IconButton>
           </span>
@@ -147,6 +177,7 @@ export default function DropboxPanel() {
               <EntryRow
                 key={entry.name}
                 entry={entry}
+                writable={listing.writable}
                 busy={pickUp.isPending && pickUp.variables === entry.name}
                 deleting={del.isPending && del.variables === entry.name}
                 onImport={() => pickUp.mutate(entry.name)}
@@ -174,12 +205,14 @@ export default function DropboxPanel() {
 
 function EntryRow({
   entry,
+  writable,
   busy,
   deleting,
   onImport,
   onDelete,
 }: {
   entry: DropboxEntry
+  writable: boolean
   busy: boolean
   deleting: boolean
   onImport: () => void
@@ -227,10 +260,15 @@ function EntryRow({
       </Button>
       {/* Clearing the original off disk once it is safely in the library — the
           one step that used to need shell access. Barred mid-pickup, when the
-          files are still being read out of the dropbox. */}
-      <Tooltip title="Delete from the server">
+          files are still being read out of the dropbox, and on a read-only mount,
+          where the delete can't succeed. */}
+      <Tooltip title={writable ? 'Delete from the server' : 'Read-only — can’t delete here'}>
         <span>
-          <IconButton color="error" onClick={onDelete} disabled={entry.importing || deleting}>
+          <IconButton
+            color="error"
+            onClick={onDelete}
+            disabled={!writable || entry.importing || deleting}
+          >
             {deleting ? <CircularProgress size={20} /> : <DeleteOutlineIcon />}
           </IconButton>
         </span>

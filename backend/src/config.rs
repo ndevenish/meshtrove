@@ -118,13 +118,51 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    /// The dropbox: a plain folder an admin can copy archives and model folders
-    /// into, server-side, and stage as imports from the Importing page without
-    /// pushing gigabytes back through the browser. Inside the store so a
-    /// deployment still only has to mount one directory, and named so it can't
-    /// collide with the store's own `ab/cd` blob fan-out.
-    pub fn dropbox_dir(&self) -> PathBuf {
-        self.store_dir.join("imports")
+    /// A dropbox folder: a plain folder an admin copies archives and model
+    /// folders into, server-side, to stage as imports from the Importing page
+    /// without pushing gigabytes back through the browser. Inside the store so a
+    /// deployment still only has to mount one directory, and named `imports…` so
+    /// it can't collide with the store's own `ab/cd` blob fan-out (the store walk
+    /// only descends two-hex-char dirs, so it skips these regardless).
+    ///
+    /// The default dropbox (`name == ""`) is `<store>/imports`; a named one is
+    /// `<store>/imports-<name>`, its name the label the UI shows. `name` must be
+    /// a valid dropbox name (see [`is_valid_dropbox_name`]) — the caller checks
+    /// it, since it becomes a path segment.
+    pub fn dropbox_dir(&self, name: &str) -> PathBuf {
+        if name.is_empty() {
+            self.store_dir.join("imports")
+        } else {
+            self.store_dir.join(format!("imports-{name}"))
+        }
+    }
+
+    /// Every dropbox present: the default `imports` (always listed — it's created
+    /// at startup) plus any `imports-<name>` beside it. Returns `(name, path)`
+    /// with `name == ""` for the default, sorted so the default leads. A folder
+    /// with an unusable suffix is skipped rather than surfaced as a broken
+    /// dropbox; a symlink counts, so an admin can point one at a NAS share.
+    pub fn dropboxes(&self) -> Vec<(String, PathBuf)> {
+        let mut found = vec![(String::new(), self.dropbox_dir(""))];
+        if let Ok(read) = std::fs::read_dir(&self.store_dir) {
+            for entry in read.flatten() {
+                let is_dir = entry
+                    .file_type()
+                    .map(|t| t.is_dir() || t.is_symlink())
+                    .unwrap_or(false);
+                let Some(fname) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(name) = fname.strip_prefix("imports-")
+                    && is_dir
+                    && is_valid_dropbox_name(name)
+                {
+                    found.push((name.to_string(), entry.path()));
+                }
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     }
 
     pub fn load() -> Result<Configuration> {
@@ -165,6 +203,17 @@ impl Configuration {
             render_workers: args.render_workers,
         })
     }
+}
+
+/// A named dropbox's name becomes a path segment (`imports-<name>`), so it is
+/// held to the same slug rules as a custom-field key: letters, digits, `-`, `_`.
+/// This both filters discovery (an odd `imports-*` folder is ignored) and guards
+/// the API against a name that would climb out of the store with `..` or `/`.
+pub fn is_valid_dropbox_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn parse_url_strip_trailing_slash(value: &str) -> Result<Url, String> {

@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (COALESCE(payload->>'dropbox', ''), payload->>'entry')\n                  payload->>'entry' as \"entry!\",\n                  COALESCE(payload->>'dropbox', '') as \"dropbox!\",\n                  finished_at,\n                  (payload->>'file_count')::bigint as recorded_count,\n                  (payload->>'size')::bigint as recorded_size\n           FROM jobs\n           WHERE kind = 'dropbox_import' AND status = 'succeeded'\n             AND payload->>'entry' IS NOT NULL\n           ORDER BY COALESCE(payload->>'dropbox', ''), payload->>'entry', finished_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "dropbox!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "finished_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "recorded_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "recorded_size",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "682c9df6b9721a14569aac0a19592476d0ebdb236e294beb83fc029c38507428"
+}

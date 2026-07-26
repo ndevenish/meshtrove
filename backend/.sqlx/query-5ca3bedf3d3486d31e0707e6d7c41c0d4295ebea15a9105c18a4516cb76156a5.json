@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT payload->>'entry' as \"entry!\",\n                  COALESCE(payload->>'dropbox', '') as \"dropbox!\"\n           FROM jobs\n           WHERE kind = 'dropbox_import' AND status IN ('queued', 'running')\n             AND payload->>'entry' IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "dropbox!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "5ca3bedf3d3486d31e0707e6d7c41c0d4295ebea15a9105c18a4516cb76156a5"
+}
