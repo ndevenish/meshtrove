@@ -39,6 +39,7 @@ import DescriptionHistoryDialog from '../components/DescriptionHistoryDialog'
 import ModelDeleteDialog from '../components/ModelDeleteDialog'
 import ModelMergeDialog from '../components/ModelMergeDialog'
 import ModelPatchDialog from '../components/ModelPatchDialog'
+import ImageLightbox from '../components/ImageLightbox'
 import Dropzone from '../components/Dropzone'
 import { useSuppressGlobalDrop } from '../globalDrop'
 
@@ -62,6 +63,7 @@ export default function ModelPage() {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [mergeOpen, setMergeOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
   const [toast, setToast] = useState('')
   // Import scraped metadata: the inline drop box lives in edit mode, so the
   // app-wide drop overlay must stand aside while editing or it swallows the zip.
@@ -242,7 +244,8 @@ export default function ModelPage() {
                 component="img"
                 src={imageUrl(shownImage)}
                 alt={model.name}
-                sx={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                onClick={() => setLightboxOpen(true)}
+                sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
               />
             ) : (
               <Box sx={{ textAlign: 'center', px: 2 }}>
@@ -609,6 +612,12 @@ export default function ModelPage() {
           await queryClient.invalidateQueries()
           setToast(`Merged “${from.name}” in`)
         }}
+      />
+      <ImageLightbox
+        open={lightboxOpen}
+        src={shownImage ? imageUrl(shownImage) : null}
+        alt={model.name}
+        onClose={() => setLightboxOpen(false)}
       />
       <Snackbar
         open={!!toast}

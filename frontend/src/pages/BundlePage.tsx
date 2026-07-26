@@ -55,6 +55,7 @@ import BundleRetagDialog from '../components/BundleRetagDialog'
 import BundleDeleteDialog from '../components/BundleDeleteDialog'
 import BundleSplitDialog from '../components/BundleSplitDialog'
 import BundleMergeDialog from '../components/BundleMergeDialog'
+import ImageLightbox from '../components/ImageLightbox'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -89,6 +90,7 @@ export default function BundlePage() {
   useSuppressGlobalDrop(editing)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [toast, setToast] = useState('')
 
@@ -197,7 +199,8 @@ export default function BundlePage() {
                 component="img"
                 src={imageUrl(shownImage)}
                 alt={bundle.name}
-                sx={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                onClick={() => setLightboxOpen(true)}
+                sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
               />
             ) : (
               <Box sx={{ textAlign: 'center', px: 2 }}>
@@ -561,6 +564,12 @@ export default function BundlePage() {
         }}
       />
       <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
+      <ImageLightbox
+        open={lightboxOpen}
+        src={shownImage ? imageUrl(shownImage) : null}
+        alt={bundle.name}
+        onClose={() => setLightboxOpen(false)}
+      />
       <Snackbar
         open={!!toast}
         autoHideDuration={4000}
