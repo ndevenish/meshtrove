@@ -89,9 +89,7 @@ async fn list(
         // models are hidden — neither should appear or be filterable in browse.
         qb.push(
             " AND EXISTS (SELECT 1 FROM model_tags mt JOIN models m ON m.id = mt.model_id \
-             WHERE mt.tag_id = t.id \
-               AND NOT EXISTS (SELECT 1 FROM model_tags mh JOIN tags ft ON ft.id = mh.tag_id \
-                               WHERE mh.model_id = m.id AND ft.hidden))",
+             WHERE mt.tag_id = t.id AND NOT m.hidden)",
         );
     }
     qb.push(" ORDER BY model_count DESC, t.name");

@@ -152,7 +152,8 @@ async fn list(
     )
     .push_bind(user_id)
     .push(" UNION ALL SELECT ");
-    push_bundle_columns(&mut qb, user_id);
+    // No "show hidden" toggle here, so an admin's cards reflect full reality.
+    push_bundle_columns(&mut qb, user_id, user.is_admin());
     qb.push(
         "k.created_at AS liked_at FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id
              JOIN user_bundle_marks k ON k.bundle_id = b.id AND k.mark = 'liked' AND k.user_id = ",

@@ -68,30 +68,37 @@ pub fn push_model_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) {
            (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS count,
            coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                      JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
-           EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id
-                    WHERE mh.model_id = m.id AND th.hidden) AS hidden,
+           m.hidden AS hidden,
            m.updated_at, "#,
     );
 }
 
 /// The bundle half, column-for-column compatible with [`push_model_columns`].
-pub fn push_bundle_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) {
-    qb.push(
+/// `include_hidden` (pass `is_admin`) governs the member-derived preview image
+/// and count, so a visitor's card is never borrowed from — nor inflated by —
+/// members they can't open.
+pub fn push_bundle_columns(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    viewer: Uuid,
+    include_hidden: bool,
+) {
+    // `include_hidden` is a plain bool, safe to inline as a SQL literal.
+    qb.push(format!(
         r#"'bundle' AS item_type, b.id, b.name, b.slug, b.creator_id, c.name AS creator_name,
-           bundle_preview_image(b.id) AS primary_image_id,
+           bundle_preview_image(b.id, {include_hidden}) AS primary_image_id,
            (SELECT count(*) FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked') AS like_count,
-           EXISTS (SELECT 1 FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked' AND k.user_id = "#,
-    )
+           EXISTS (SELECT 1 FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked' AND k.user_id = "#
+    ))
     .push_bind(viewer)
-    .push(
+    .push(format!(
         r#") AS liked,
-           (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS count,
+           (SELECT count(*) FROM bundle_models bm JOIN models m ON m.id = bm.model_id
+             WHERE bm.bundle_id = b.id AND ({include_hidden} OR NOT m.hidden)) AS count,
            coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
-                     JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags,
-           EXISTS (SELECT 1 FROM bundle_tags bh JOIN tags th ON th.id = bh.tag_id
-                    WHERE bh.bundle_id = b.id AND th.hidden) AS hidden,
-           b.updated_at, "#,
-    );
+                     JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{{}}') AS tags,
+           b.hidden AS hidden,
+           b.updated_at, "#
+    ));
 }
 
 pub fn decode_browse_item(row: &sqlx::postgres::PgRow) -> Result<BrowseItem, sqlx::Error> {
@@ -199,7 +206,9 @@ async fn browse(
     push_member_collapse(&mut qb, idle);
 
     qb.push(" UNION ALL SELECT ");
-    push_bundle_columns(&mut qb, user.id);
+    // The same toggle that reveals hidden items also decides whether a bundle's
+    // preview/count may draw on hidden members: toggle off → visitor-accurate.
+    push_bundle_columns(&mut qb, user.id, show_hidden);
     if q.is_empty() {
         qb.push("0::float4 AS rank");
     } else {

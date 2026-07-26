@@ -98,23 +98,32 @@ pub fn push_bundle_filters(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str, tags:
 }
 
 /// Exclude bundles (alias `b`) carrying any hidden tag, unless `show_hidden`.
-/// The bundle mirror of [`push_model_hidden_exclude`].
+/// The bundle mirror of [`push_model_hidden_exclude`]; `b.hidden` is the
+/// trigger-maintained materialization of "carries a hidden tag" (0039).
 pub fn push_bundle_hidden_exclude(qb: &mut QueryBuilder<sqlx::Postgres>, show_hidden: bool) {
     if !show_hidden {
-        qb.push(
-            " AND NOT EXISTS (SELECT 1 FROM bundle_tags bt JOIN tags ft ON ft.id = bt.tag_id \
-             WHERE bt.bundle_id = b.id AND ft.hidden)",
-        );
+        qb.push(" AND NOT b.hidden");
     }
 }
 
 /// The shared SELECT list producing a `BundleSummary` (alias `b` for bundles).
-const BUNDLE_SUMMARY_COLS: &str = r#"b.id, b.name, b.slug, b.creator_id,
+/// `include_hidden` governs the two member-derived columns — the borrowed
+/// preview image and the member count — so a visitor never sees a thumbnail
+/// borrowed from, or a count inflated by, members they can't open. Pass
+/// `is_admin`: an admin sees hidden members on the bundle page, so their card
+/// should agree.
+fn bundle_summary_cols(include_hidden: bool) -> String {
+    // `include_hidden` is a plain bool, safe to inline as a SQL literal.
+    format!(
+        r#"b.id, b.name, b.slug, b.creator_id,
     b.updated_at, c.name AS creator_name,
-    bundle_preview_image(b.id) AS primary_image_id,
-    (SELECT count(*) FROM bundle_models bm WHERE bm.bundle_id = b.id) AS model_count,
+    bundle_preview_image(b.id, {include_hidden}) AS primary_image_id,
+    (SELECT count(*) FROM bundle_models bm JOIN models m ON m.id = bm.model_id
+     WHERE bm.bundle_id = b.id AND ({include_hidden} OR NOT m.hidden)) AS model_count,
     coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
-              JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{}') AS tags"#;
+              JOIN tags t ON t.id = bt.tag_id WHERE bt.bundle_id = b.id), '{{}}') AS tags"#
+    )
+}
 
 fn bundle_summary_from_row(row: &sqlx::postgres::PgRow) -> Result<BundleSummary, sqlx::Error> {
     Ok(BundleSummary {
@@ -132,7 +141,7 @@ fn bundle_summary_from_row(row: &sqlx::postgres::PgRow) -> Result<BundleSummary,
 
 async fn search(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<BundleResults>, ApiError> {
     let q = query.q.unwrap_or_default().trim().to_string();
@@ -152,7 +161,8 @@ async fn search(
     let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
 
     let mut qb = QueryBuilder::new(format!(
-        "SELECT {BUNDLE_SUMMARY_COLS} FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id WHERE TRUE"
+        "SELECT {} FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id WHERE TRUE",
+        bundle_summary_cols(user.is_admin())
     ));
     push_bundle_filters(&mut qb, &q, &tags);
     if q.is_empty() {
@@ -350,12 +360,10 @@ async fn fetch_members(
                   (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as "variant_count!",
                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                             JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as "tags!",
-                  EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id
-                           WHERE mh.model_id = m.id AND th.hidden) as "hidden!"
+                  m.hidden as "hidden!"
            FROM models m LEFT JOIN creators c ON c.id = m.creator_id
            WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)
-             AND ($3 OR NOT EXISTS (SELECT 1 FROM model_tags mx JOIN tags tx ON tx.id = mx.tag_id
-                                     WHERE mx.model_id = m.id AND tx.hidden))
+             AND ($3 OR NOT m.hidden)
            ORDER BY m.name"#,
         bundle_id,
         user.id,

@@ -144,15 +144,11 @@ pub fn push_model_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, tags: &[Str
 
 /// Exclude models (alias `m`) that carry any hidden tag, unless `show_hidden`.
 /// This is what makes a hidden tag hide its items from browse and search; only
-/// an admin who asked to see them passes `show_hidden = true`.
+/// an admin who asked to see them passes `show_hidden = true`. `m.hidden` is the
+/// trigger-maintained materialization of "carries a hidden tag" (0039).
 pub fn push_model_hidden_exclude(qb: &mut QueryBuilder<sqlx::Postgres>, show_hidden: bool) {
     if !show_hidden {
-        // `ft` (not `t`) so a caller correlating to an outer `t` (the tag-cloud
-        // count) is not shadowed — same discipline as push_model_tag_filters.
-        qb.push(
-            " AND NOT EXISTS (SELECT 1 FROM model_tags mt JOIN tags ft ON ft.id = mt.tag_id \
-             WHERE mt.model_id = m.id AND ft.hidden)",
-        );
+        qb.push(" AND NOT m.hidden");
     }
 }
 
@@ -200,8 +196,7 @@ async fn search(
               (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS variant_count,
               coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                         JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') AS tags,
-              EXISTS (SELECT 1 FROM model_tags mh JOIN tags th ON th.id = mh.tag_id
-                       WHERE mh.model_id = m.id AND th.hidden) AS hidden,
+              m.hidden AS hidden,
               EXISTS (SELECT 1 FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = "#,
     );
     qb.push_bind(user.id).push(
