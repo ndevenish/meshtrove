@@ -566,8 +566,13 @@ export default function BundlePage() {
       <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
       <ImageLightbox
         open={lightboxOpen}
-        src={shownImage ? imageUrl(shownImage) : null}
+        srcs={bundle.images.map((image) => imageUrl(image.id))}
+        index={Math.max(
+          0,
+          bundle.images.findIndex((image) => image.id === shownImage),
+        )}
         alt={bundle.name}
+        onNavigate={(i) => setSelectedImage(bundle.images[i]?.id ?? null)}
         onClose={() => setLightboxOpen(false)}
       />
       <Snackbar

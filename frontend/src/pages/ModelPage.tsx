@@ -622,8 +622,13 @@ export default function ModelPage() {
       />
       <ImageLightbox
         open={lightboxOpen}
-        src={shownImage ? imageUrl(shownImage) : null}
+        srcs={model.images.map((image) => imageUrl(image.id))}
+        index={Math.max(
+          0,
+          model.images.findIndex((image) => image.id === shownImage),
+        )}
         alt={model.name}
+        onNavigate={(i) => setSelectedImage(model.images[i]?.id ?? null)}
         onClose={() => setLightboxOpen(false)}
       />
       <Snackbar
