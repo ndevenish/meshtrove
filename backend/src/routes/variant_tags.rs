@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::{CfSide, parse_cf_filters};
 use crate::routes::models::{
     parse_csv, push_model_tag_filters, push_text_filter, push_variant_tag_filters,
 };
@@ -52,18 +53,23 @@ pub struct ListQuery {
     pub sel_tags: Option<String>,
     pub sel_vtags: Option<String>,
     pub sel_q: Option<String>,
+    /// The browse sidebar's custom-field filters (see `parse_cf_filters`), so a
+    /// variant tag's co-occurrence count reflects them too.
+    pub sel_cf: Option<String>,
 }
 
 async fn list(
     State(state): State<AppState>,
-    _user: User,
+    user: User,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<VariantTag>>, ApiError> {
     let name = query.q.unwrap_or_default();
     let sel_tags = parse_csv(&query.sel_tags.unwrap_or_default());
     let sel_vtags = parse_csv(&query.sel_vtags.unwrap_or_default());
     let sel_q = query.sel_q.unwrap_or_default().trim().to_string();
-    let has_selection = !sel_tags.is_empty() || !sel_vtags.is_empty() || !sel_q.is_empty();
+    let cf = parse_cf_filters(&state, &user, query.sel_cf.as_deref()).await?;
+    let has_selection =
+        !sel_tags.is_empty() || !sel_vtags.is_empty() || !sel_q.is_empty() || !cf.is_empty();
 
     let mut qb = QueryBuilder::new("SELECT t.id, t.name::text AS name, t.description, ");
     if has_selection {
@@ -72,6 +78,7 @@ async fn list(
         qb.push("(SELECT count(*) FROM models m WHERE TRUE");
         push_text_filter(&mut qb, &sel_q);
         push_model_tag_filters(&mut qb, &sel_tags);
+        cf.push(&mut qb, CfSide::Models);
         qb.push(
             " AND EXISTS (SELECT 1 FROM model_variants v WHERE v.model_id = m.id \
              AND EXISTS (SELECT 1 FROM variant_tag_assignments ca \

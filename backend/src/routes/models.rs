@@ -61,6 +61,9 @@ pub struct SearchQuery {
     /// handler ANDs this with the caller actually being an admin, so a forged
     /// `show_hidden=1` from a non-admin does nothing.
     pub show_hidden: Option<bool>,
+    /// Custom-field filters, as a JSON object of `field key → [selected tokens]`
+    /// (see `custom_fields::parse_cf_filters`). Only browse reads it.
+    pub cf: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]

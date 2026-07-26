@@ -1,9 +1,18 @@
 import { useState } from 'react'
-import { Box, Typography, Chip, Divider, TextField, FormControlLabel, Switch } from '@mui/material'
+import {
+  Box,
+  Typography,
+  Chip,
+  Divider,
+  TextField,
+  FormControlLabel,
+  Switch,
+  Checkbox,
+} from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 
-import { api } from '../api'
+import { api, decodeCustomFieldFilter, encodeCustomFieldFilter } from '../api'
 import { useAuth } from '../main'
 
 /// Sidebar filters: two chip clouds over two vocabularies — what a model IS
@@ -26,17 +35,27 @@ export default function FilterSidebar() {
   // admins — the toggle isn't even rendered otherwise, and the API re-checks.
   const showHidden = isAdmin && params.get('show_hidden') === '1'
 
+  // The browse sidebar's custom-field filters, kept in one `cf` URL param so
+  // they drive the grid (via the browse query) and the clouds alike.
+  const cf = decodeCustomFieldFilter(params.get('cf'))
+  const cfKey = params.get('cf') ?? ''
+
   // Counts reflect the current selection: each chip shows how many models would
   // remain if it were added, so narrowing filters the numbers down. The
   // selection is in the query key, so the clouds refetch as chips are toggled.
-  const selection = { tags: activeTags, vtags: activeVariantTags, q: search, showHidden }
+  const selection = { tags: activeTags, vtags: activeVariantTags, q: search, showHidden, cf }
   const { data: tags } = useQuery({
-    queryKey: ['tags', activeTags, activeVariantTags, search, showHidden],
+    queryKey: ['tags', activeTags, activeVariantTags, search, showHidden, cfKey],
     queryFn: () => api.tags(selection),
   })
   const { data: variantTags } = useQuery({
-    queryKey: ['variant-tags', activeTags, activeVariantTags, search],
+    queryKey: ['variant-tags', activeTags, activeVariantTags, search, cfKey],
     queryFn: () => api.variantTags(selection),
+  })
+  // The filterable custom-field vocabulary (visibility-gated server-side).
+  const { data: fields } = useQuery({
+    queryKey: ['filterable-cf'],
+    queryFn: () => api.filterableCustomFields(),
   })
 
   const update = (mutate: (next: URLSearchParams) => void) => {
@@ -54,6 +73,25 @@ export default function FilterSidebar() {
       if (set.size) next.set(key, [...set].join(','))
       else next.delete(key)
     })
+
+  // Replace one field's selected tokens, re-encoding the whole `cf` param (or
+  // dropping it when nothing is left, so the URL and cache key stay clean).
+  const setCf = (fieldKey: string, tokens: string[]) =>
+    update((next) => {
+      const nextCf = { ...cf, [fieldKey]: tokens }
+      if (!tokens.length) delete nextCf[fieldKey]
+      const encoded = encodeCustomFieldFilter(nextCf)
+      if (encoded) next.set('cf', encoded)
+      else next.delete('cf')
+    })
+
+  // Add/remove one token from a multi-select field (choice, rating).
+  const toggleCf = (fieldKey: string, token: string) => {
+    const set = new Set(cf[fieldKey] ?? [])
+    if (set.has(token)) set.delete(token)
+    else set.add(token)
+    setCf(fieldKey, [...set])
+  }
 
   return (
     <Box sx={{ width: 240, flexShrink: 0, pr: 3 }}>
@@ -87,6 +125,69 @@ export default function FilterSidebar() {
           <Divider sx={{ my: 2 }} />
         </>
       )}
+      {(fields ?? []).map((field) => {
+        const selected = cf[field.key] ?? []
+        // Checkbox and file are a single on/off: a ticked custom checkbox, or
+        // "has a file". Both carry the sentinel token ['1'] when on.
+        if (field.kind === 'checkbox' || field.kind === 'file') {
+          return (
+            <FormControlLabel
+              key={field.id}
+              control={
+                <Checkbox
+                  size="small"
+                  checked={selected.length > 0}
+                  onChange={() => setCf(field.key, selected.length ? [] : ['1'])}
+                />
+              }
+              label={field.kind === 'file' ? `Has ${field.name}` : field.name}
+              slotProps={{ typography: { variant: 'body2' } }}
+              sx={{ mb: 1, display: 'block' }}
+            />
+          )
+        }
+        // Choice and rating are chip clouds, multi-select (OR), with an explicit
+        // unset option carried as the empty-string token.
+        const options: { token: string; label: string }[] =
+          field.kind === 'choice'
+            ? [
+                ...(field.options.choices ?? []).map((c) => ({ token: c, label: c })),
+                { token: '', label: 'No choice' },
+              ]
+            : [
+                ...Array.from({ length: field.options.max ?? 5 }, (_, i) => ({
+                  token: String(i + 1),
+                  label: `${i + 1}★`,
+                })),
+                { token: '', label: 'No rating' },
+              ]
+        return (
+          <Box key={field.id} sx={{ mb: 2 }}>
+            <Typography
+              variant="subtitle2"
+              sx={{ mb: 1, textTransform: 'uppercase', opacity: 0.7 }}
+            >
+              {field.name}
+            </Typography>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+              {options.map((o) => {
+                const active = selected.includes(o.token)
+                return (
+                  <Chip
+                    key={o.token || '∅'}
+                    label={o.label}
+                    size="small"
+                    color={active ? 'primary' : 'default'}
+                    variant={active ? 'filled' : 'outlined'}
+                    onClick={() => toggleCf(field.key, o.token)}
+                  />
+                )
+              })}
+            </Box>
+          </Box>
+        )
+      })}
+      {(fields ?? []).length > 0 && <Divider sx={{ my: 2 }} />}
       <Typography variant="subtitle2" sx={{ mb: 1.5, textTransform: 'uppercase', opacity: 0.7 }}>
         Tags
       </Typography>

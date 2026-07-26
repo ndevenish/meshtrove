@@ -50,6 +50,7 @@ export default function BrowsePage() {
     !params.get('q') &&
     !params.get('tags') &&
     !params.get('vtags') &&
+    !params.get('cf') &&
     !showHidden
 
   // One row's worth is a viewport-dependent number; ask for enough to fill the

@@ -673,12 +673,36 @@ export function uploadWithProgress<T>(
 /// listings so their counts read as "how many models match this selection *and*
 /// this tag" — the numbers filter down as you narrow. Omit it (the autocomplete
 /// pickers do) for plain global counts.
+/** The browse sidebar's custom-field filters: field key → selected tokens.
+    The empty string `''` is the "unset" token ("No choice"/"No rating"); a
+    checkbox/file filter is on when its array is non-empty (`['1']`). */
+export type CustomFieldFilter = Record<string, string[]>
+
+/** Drop empty selections, then JSON-encode — or `null` when nothing is set, so
+    callers can omit the param entirely and keep clean URLs and cache keys. */
+export const encodeCustomFieldFilter = (cf: CustomFieldFilter): string | null => {
+  const live = Object.fromEntries(Object.entries(cf).filter(([, v]) => v.length))
+  return Object.keys(live).length ? JSON.stringify(live) : null
+}
+
+export const decodeCustomFieldFilter = (raw: string | null): CustomFieldFilter => {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as CustomFieldFilter) : {}
+  } catch {
+    return {}
+  }
+}
+
 export interface TagFilter {
   tags?: string[]
   vtags?: string[]
   q?: string
   /** Admin "Show hidden" toggle: also surface hidden tags and count hidden items. */
   showHidden?: boolean
+  /** Custom-field filters, so co-occurrence counts reflect them too. */
+  cf?: CustomFieldFilter
 }
 
 const tagSelectionQuery = (sel: TagFilter): string => {
@@ -687,6 +711,8 @@ const tagSelectionQuery = (sel: TagFilter): string => {
   if (sel.vtags?.length) p.set('sel_vtags', sel.vtags.join(','))
   if (sel.q?.trim()) p.set('sel_q', sel.q.trim())
   if (sel.showHidden) p.set('show_hidden', '1')
+  const cf = sel.cf && encodeCustomFieldFilter(sel.cf)
+  if (cf) p.set('sel_cf', cf)
   const qs = p.toString()
   return qs ? `?${qs}` : ''
 }
@@ -724,6 +750,9 @@ export const api = {
   // Custom field definitions: readable by editors (they drive the edit forms),
   // writable by admins only.
   customFields: () => request<CustomFieldDef[]>('/api/custom-fields'),
+  /** The filterable fields (everything but free text) the caller may see, for
+      the browse sidebar. Visibility-gated, so anonymous visitors get a subset. */
+  filterableCustomFields: () => request<CustomFieldDef[]>('/api/custom-fields/filterable'),
   createCustomField: (body: CustomFieldInput) =>
     request<CustomFieldDef>('/api/custom-fields', json(body)),
   updateCustomField: (id: string, body: CustomFieldInput) =>

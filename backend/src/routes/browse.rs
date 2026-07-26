@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::bundles::{push_bundle_filters, push_bundle_hidden_exclude};
+use crate::routes::custom_fields::{CfSide, parse_cf_filters};
 use crate::routes::models::{SearchQuery, parse_csv, push_filters, push_model_hidden_exclude};
 use crate::state::AppState;
 
@@ -171,21 +172,26 @@ async fn browse(
     // flipped the "Show hidden" toggle. A non-admin passing show_hidden=1 is
     // ignored — the toggle is only offered to admins, and this is the guard.
     let show_hidden = query.show_hidden.unwrap_or(false) && user.is_admin();
+    // Custom-field filters from the sidebar, resolved against the vocabulary and
+    // the caller's visibility once, then spliced into every query below.
+    let cf = parse_cf_filters(&state, &user, query.cf.as_deref()).await?;
 
     // Nobody is looking for anything in particular: the plain front page.
     // "Show hidden" counts as looking — an admin flips it to audit hidden
     // content, most of which is member models a collapsed front page would fold
     // back into their bundles, so treat it as a search: members uncollapse.
-    let idle = q.is_empty() && tags.is_empty() && vtags.is_empty() && !show_hidden;
+    let idle = q.is_empty() && tags.is_empty() && vtags.is_empty() && !show_hidden && cf.is_empty();
 
     // Count over a lean union of just the matching ids.
     let mut cq = QueryBuilder::new("SELECT count(*) FROM (SELECT m.id FROM models m WHERE TRUE");
     push_filters(&mut cq, &q, &tags, &vtags);
     push_model_hidden_exclude(&mut cq, show_hidden);
     push_member_collapse(&mut cq, idle);
+    cf.push(&mut cq, CfSide::Models);
     cq.push(" UNION ALL SELECT b.id FROM bundles b WHERE TRUE");
     push_bundle_where(&mut cq, &q, &tags, !vtags.is_empty());
     push_bundle_hidden_exclude(&mut cq, show_hidden);
+    cf.push(&mut cq, CfSide::Bundles);
     cq.push(") x");
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -207,6 +213,7 @@ async fn browse(
     push_filters(&mut qb, &q, &tags, &vtags);
     push_model_hidden_exclude(&mut qb, show_hidden);
     push_member_collapse(&mut qb, idle);
+    cf.push(&mut qb, CfSide::Models);
 
     qb.push(" UNION ALL SELECT ");
     // The same toggle that reveals hidden items also decides whether a bundle's
@@ -222,6 +229,7 @@ async fn browse(
     qb.push(" FROM bundles b LEFT JOIN creators c ON c.id = b.creator_id WHERE TRUE");
     push_bundle_where(&mut qb, &q, &tags, !vtags.is_empty());
     push_bundle_hidden_exclude(&mut qb, show_hidden);
+    cf.push(&mut qb, CfSide::Bundles);
 
     qb.push(") x ORDER BY rank DESC, updated_at DESC LIMIT ")
         .push_bind(per_page as i64)

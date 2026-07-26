@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
+use crate::routes::custom_fields::{CfSide, parse_cf_filters};
 use crate::routes::models::{
     parse_csv, push_model_hidden_exclude, push_model_tag_filters, push_text_filter,
     push_variant_group,
@@ -49,6 +50,9 @@ pub struct ListQuery {
     pub sel_tags: Option<String>,
     pub sel_vtags: Option<String>,
     pub sel_q: Option<String>,
+    /// The browse sidebar's custom-field filters (see `parse_cf_filters`), so a
+    /// tag's co-occurrence count reflects them too.
+    pub sel_cf: Option<String>,
     /// Admin-only: include hidden tags (and count hidden items), paired with the
     /// browse "Show hidden" toggle. ANDed with the caller being an admin.
     pub show_hidden: Option<bool>,
@@ -63,6 +67,7 @@ async fn list(
     let sel_tags = parse_csv(&query.sel_tags.unwrap_or_default());
     let sel_vtags = parse_csv(&query.sel_vtags.unwrap_or_default());
     let sel_q = query.sel_q.unwrap_or_default().trim().to_string();
+    let cf = parse_cf_filters(&state, &user, query.sel_cf.as_deref()).await?;
     let show_hidden = query.show_hidden.unwrap_or(false) && user.is_admin();
 
     // model_count = *visible* models matching the current selection that also
@@ -86,6 +91,7 @@ async fn list(
     push_model_tag_filters(&mut qb, &sel_tags);
     push_variant_group(&mut qb, &sel_vtags);
     push_model_hidden_exclude(&mut qb, show_hidden);
+    cf.push(&mut qb, CfSide::Models);
     qb.push(" GROUP BY t.id, t.name, t.hidden ORDER BY model_count DESC, t.name");
 
     let rows = qb.build().fetch_all(&state.db).await?;

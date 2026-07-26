@@ -16,6 +16,7 @@ use axum::{
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::QueryBuilder;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -27,6 +28,9 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/custom-fields", get(list).post(create))
+        // The filter vocabulary for the browse sidebar: visibility-gated, not
+        // role-gated, so a visitor gets the anonymous fields to filter by.
+        .route("/api/custom-fields/filterable", get(filterable))
         .route(
             "/api/custom-fields/{id}",
             axum::routing::put(update).delete(remove),
@@ -272,6 +276,24 @@ async fn list(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(rows))
+}
+
+/// The fields the browse sidebar can offer a filter control for: every
+/// filterable kind (everything but free text) the caller is allowed to see, in
+/// display order. Gated on visibility rather than role — an anonymous visitor
+/// gets the anonymous fields — so it is safe to expose more widely than `list`.
+async fn filterable(
+    State(state): State<AppState>,
+    user: User,
+) -> Result<Json<Vec<CustomField>>, ApiError> {
+    let mut conn = state.db.acquire().await?;
+    let fields = all_fields(&mut conn).await?;
+    Ok(Json(
+        fields
+            .into_iter()
+            .filter(|f| !matches!(f.kind, CustomFieldKind::Text) && user.can_see(f.visibility))
+            .collect(),
+    ))
 }
 
 async fn create(
@@ -801,6 +823,229 @@ pub async fn all_fields(db: &mut sqlx::PgConnection) -> Result<Vec<CustomField>,
     .fetch_all(&mut *db)
     .await?;
     Ok(fields)
+}
+
+// ---------------------------------------------------------------------------
+// browse filters
+//
+// The browse sidebar filters models and bundles by their custom-field values.
+// The selection arrives as one `cf` query param — a JSON object of
+// `field key → [selected tokens]` — which parses into SQL-ready predicates that
+// the browse, tag-cloud and variant-cloud queries all splice in.
+// ---------------------------------------------------------------------------
+
+/// Which side of the browse union a filter is being applied to. A field that
+/// does not apply to this side matches nothing here (the "exclude the other
+/// type" rule): filtering by a models-only field drops every bundle, and vice
+/// versa.
+#[derive(Clone, Copy)]
+pub enum CfSide {
+    Models,
+    Bundles,
+}
+
+impl CfSide {
+    /// The row alias and value-owner column for this side's query.
+    fn alias_col(self) -> (&'static str, &'static str) {
+        match self {
+            CfSide::Models => ("m", "model_id"),
+            CfSide::Bundles => ("b", "bundle_id"),
+        }
+    }
+
+    fn applies(self, f: &CfFilter) -> bool {
+        match self {
+            CfSide::Models => f.applies_to_models,
+            CfSide::Bundles => f.applies_to_bundles,
+        }
+    }
+}
+
+/// One parsed custom-field filter, pre-interpreted for its kind so pushing it is
+/// pure SQL assembly.
+struct CfFilter {
+    field_id: Uuid,
+    kind: CustomFieldKind,
+    applies_to_models: bool,
+    applies_to_bundles: bool,
+    /// choice: the selected choice strings (rating: unused).
+    choices: Vec<String>,
+    /// rating: the selected star counts (choice: unused).
+    ratings: Vec<i64>,
+    /// choice/rating: the explicit "unset" option — "No choice" / "No rating".
+    include_unset: bool,
+}
+
+impl CfFilter {
+    fn push(&self, qb: &mut QueryBuilder<sqlx::Postgres>, side: CfSide) {
+        if !side.applies(self) {
+            qb.push(" AND FALSE");
+            return;
+        }
+        let (alias, col) = side.alias_col();
+        match self.kind {
+            // "matches things with that set" — the box ticked, i.e. value true.
+            CustomFieldKind::Checkbox => {
+                qb.push(" AND EXISTS (SELECT 1 FROM custom_field_values v WHERE v.field_id = ")
+                    .push_bind(self.field_id)
+                    .push(format!(
+                        " AND v.{col} = {alias}.id AND v.value = 'true'::jsonb)"
+                    ));
+            }
+            // "has file": a value row that owns a `files` row.
+            CustomFieldKind::File => {
+                qb.push(
+                    " AND EXISTS (SELECT 1 FROM custom_field_values v \
+                     JOIN files f ON f.custom_field_value_id = v.id WHERE v.field_id = ",
+                )
+                .push_bind(self.field_id)
+                .push(format!(" AND v.{col} = {alias}.id)"));
+            }
+            CustomFieldKind::Choice | CustomFieldKind::Rating => self.push_membership(qb, side),
+            CustomFieldKind::Text => {}
+        }
+    }
+
+    /// The choice/rating shape: the value is one of the selected set, OR (if the
+    /// "No …" option is picked) there is no value at all. At least one side is
+    /// always present — a filter with neither is dropped at parse.
+    fn push_membership(&self, qb: &mut QueryBuilder<sqlx::Postgres>, side: CfSide) {
+        let (alias, col) = side.alias_col();
+        let rating = matches!(self.kind, CustomFieldKind::Rating);
+        let has_concrete = if rating {
+            !self.ratings.is_empty()
+        } else {
+            !self.choices.is_empty()
+        };
+        qb.push(" AND (");
+        if has_concrete {
+            qb.push("EXISTS (SELECT 1 FROM custom_field_values v WHERE v.field_id = ")
+                .push_bind(self.field_id)
+                .push(format!(" AND v.{col} = {alias}.id AND v.value IN ("));
+            if rating {
+                for (i, r) in self.ratings.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(", ");
+                    }
+                    qb.push("to_jsonb(").push_bind(*r).push("::bigint)");
+                }
+            } else {
+                for (i, c) in self.choices.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(", ");
+                    }
+                    qb.push("to_jsonb(").push_bind(c.clone()).push("::text)");
+                }
+            }
+            qb.push("))");
+        }
+        if self.include_unset {
+            if has_concrete {
+                qb.push(" OR ");
+            }
+            qb.push("NOT EXISTS (SELECT 1 FROM custom_field_values v WHERE v.field_id = ")
+                .push_bind(self.field_id)
+                .push(format!(" AND v.{col} = {alias}.id)"));
+        }
+        qb.push(")");
+    }
+}
+
+/// A parsed set of browse custom-field filters, ready to splice into a query.
+pub struct CfFilters {
+    filters: Vec<CfFilter>,
+}
+
+impl CfFilters {
+    pub fn is_empty(&self) -> bool {
+        self.filters.is_empty()
+    }
+
+    /// Append every filter's predicate to `qb`, correlated to `side`'s rows.
+    pub fn push(&self, qb: &mut QueryBuilder<sqlx::Postgres>, side: CfSide) {
+        for f in &self.filters {
+            f.push(qb, side);
+        }
+    }
+}
+
+/// Parse the browse `cf` param — a JSON object of `field key → [tokens]` — into
+/// SQL-ready filters. Keys that name no field, fields the caller may not see,
+/// and free-text fields are dropped silently; only malformed JSON is an error.
+/// The empty string is the "unset" token ("No choice"/"No rating"); a real
+/// choice can never be empty (they are trimmed non-empty at definition), so the
+/// sentinel is unambiguous.
+pub async fn parse_cf_filters(
+    state: &AppState,
+    user: &User,
+    raw: Option<&str>,
+) -> Result<CfFilters, ApiError> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(CfFilters {
+            filters: Vec::new(),
+        });
+    };
+    let parsed: std::collections::HashMap<String, Vec<String>> = serde_json::from_str(raw)
+        .map_err(|_| {
+            ApiError::BadRequest("cf filter must be a JSON object of key → values".into())
+        })?;
+    if parsed.is_empty() {
+        return Ok(CfFilters {
+            filters: Vec::new(),
+        });
+    }
+
+    let mut conn = state.db.acquire().await?;
+    let by_key: std::collections::HashMap<String, CustomField> = all_fields(&mut conn)
+        .await?
+        .into_iter()
+        .map(|f| (f.key.to_lowercase(), f))
+        .collect();
+
+    let mut filters = Vec::new();
+    for (key, tokens) in parsed {
+        let Some(field) = by_key.get(key.trim().to_lowercase().as_str()) else {
+            continue;
+        };
+        if matches!(field.kind, CustomFieldKind::Text) || !user.can_see(field.visibility) {
+            continue;
+        }
+        let include_unset = tokens.iter().any(|t| t.is_empty());
+        let concrete: Vec<String> = tokens.into_iter().filter(|t| !t.is_empty()).collect();
+        let ratings: Vec<i64> = if matches!(field.kind, CustomFieldKind::Rating) {
+            concrete
+                .iter()
+                .filter_map(|t| t.parse::<i64>().ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // A control the user touched but left with nothing selected is not a
+        // filter. Checkbox/file are "on" whenever a token is present.
+        let active = match field.kind {
+            CustomFieldKind::Checkbox | CustomFieldKind::File => !concrete.is_empty(),
+            CustomFieldKind::Choice => !concrete.is_empty() || include_unset,
+            CustomFieldKind::Rating => !ratings.is_empty() || include_unset,
+            CustomFieldKind::Text => false,
+        };
+        if !active {
+            continue;
+        }
+        filters.push(CfFilter {
+            field_id: field.id,
+            kind: field.kind,
+            applies_to_models: field.applies_to_models,
+            applies_to_bundles: field.applies_to_bundles,
+            choices: if matches!(field.kind, CustomFieldKind::Choice) {
+                concrete
+            } else {
+                Vec::new()
+            },
+            ratings,
+            include_unset,
+        });
+    }
+    Ok(CfFilters { filters })
 }
 
 /// What one scraped `key: value` pair turns out to be.
