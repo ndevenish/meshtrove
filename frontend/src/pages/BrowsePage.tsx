@@ -41,9 +41,16 @@ export default function BrowsePage() {
   // The liked row is a *shortcut back to your own things*, which only makes
   // sense on the plain front page: once there is a query or a filter, the page
   // is answering a question, and a fixed row of favourites on top of the answer
-  // is noise. Same reason it stays on page 1 only.
+  // is noise. Same reason it stays on page 1 only. "Show hidden" is such a
+  // filter — an admin auditing hidden content, not browsing favourites.
+  const showHidden = user?.role === 'admin' && params.get('show_hidden') === '1'
   const showLiked =
-    !!user && page === 1 && !params.get('q') && !params.get('tags') && !params.get('vtags')
+    !!user &&
+    page === 1 &&
+    !params.get('q') &&
+    !params.get('tags') &&
+    !params.get('vtags') &&
+    !showHidden
 
   // One row's worth is a viewport-dependent number; ask for enough to fill the
   // widest plausible one and let the grid clip the rest.

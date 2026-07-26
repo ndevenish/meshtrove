@@ -173,7 +173,10 @@ async fn browse(
     let show_hidden = query.show_hidden.unwrap_or(false) && user.is_admin();
 
     // Nobody is looking for anything in particular: the plain front page.
-    let idle = q.is_empty() && tags.is_empty() && vtags.is_empty();
+    // "Show hidden" counts as looking — an admin flips it to audit hidden
+    // content, most of which is member models a collapsed front page would fold
+    // back into their bundles, so treat it as a search: members uncollapse.
+    let idle = q.is_empty() && tags.is_empty() && vtags.is_empty() && !show_hidden;
 
     // Count over a lean union of just the matching ids.
     let mut cq = QueryBuilder::new("SELECT count(*) FROM (SELECT m.id FROM models m WHERE TRUE");
