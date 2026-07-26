@@ -31,6 +31,7 @@ import { CustomFieldReadout } from '../components/CustomFieldControl'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
 import { usePasteImage, useDropImage } from '../imageGestures'
+import { useDocumentTitle } from '../documentTitle'
 import ModelDetailsEditor, { type DetailsEditorHandle } from '../components/ModelDetailsEditor'
 import VariantSection from '../components/VariantSection'
 import UnsortedSection from '../components/UnsortedSection'
@@ -87,6 +88,8 @@ export default function ModelPage() {
       navigate(`/models/${model.slug}`, { replace: true })
     }
   }, [model, id, navigate, queryClient])
+
+  useDocumentTitle(model?.name)
 
   // A render finishing adds a picture to this page, and the page has no way to
   // know: the job writes the image straight to the database. So watch the queue.

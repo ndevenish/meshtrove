@@ -40,6 +40,7 @@ import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
 import { usePasteImage, useDropImage } from '../imageGestures'
 import { useSuppressGlobalDrop } from '../globalDrop'
+import { useDocumentTitle } from '../documentTitle'
 import { startImport } from '../upload'
 import Dropzone from '../components/Dropzone'
 import ModelCard from '../components/ModelCard'
@@ -105,6 +106,8 @@ export default function BundlePage() {
       navigate(`/bundles/${bundle.slug}`, { replace: true })
     }
   }, [bundle, id, navigate, queryClient])
+
+  useDocumentTitle(bundle?.name)
 
   // One BundlePage serves every bundle, so a navigation between two of them
   // keeps this component (and its state) mounted. Edit mode is about the bundle
