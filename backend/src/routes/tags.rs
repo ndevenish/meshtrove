@@ -66,30 +66,27 @@ async fn list(
     let show_hidden = query.show_hidden.unwrap_or(false) && user.is_admin();
 
     // model_count = *visible* models matching the current selection that also
-    // carry this tag `t`. The candidate clause correlates to the outer `t`; the
-    // selection's own filters use alias `ft` internally, so they don't shadow it.
-    //
-    // Computed once in an inner select, then the outer `model_count > 0` drops
-    // any tag with nothing behind it: while filtering, a tag that no model in
-    // the current selection carries; and always, hidden tags (their models are
-    // all hidden, so the visible count is 0), orphan tags, and any tag whose
-    // only models are hidden — none should appear or be filterable in browse.
+    // carry this tag `t`. Joining tags → model_tags → models and grouping counts
+    // every tag in one aggregate pass; the INNER joins mean a tag with no
+    // matching model produces no row, so `count > 0` is automatic — that alone
+    // drops hidden tags (their models are all hidden, so nothing survives
+    // `NOT m.hidden`), orphan tags, and, while filtering, any tag no selected
+    // model carries. The selection's own filters use alias `ft`/`mt` internally,
+    // so the join alias is `l` to avoid shadowing them.
     let mut qb = QueryBuilder::new(
-        "SELECT * FROM (SELECT t.id, t.name::text AS name, t.hidden, \
-         (SELECT count(*) FROM models m WHERE TRUE",
-    );
-    push_text_filter(&mut qb, &sel_q);
-    push_model_tag_filters(&mut qb, &sel_tags);
-    push_variant_group(&mut qb, &sel_vtags);
-    push_model_hidden_exclude(&mut qb, show_hidden);
-    qb.push(
-        " AND EXISTS (SELECT 1 FROM model_tags mt WHERE mt.model_id = m.id AND mt.tag_id = t.id)) \
-         AS model_count FROM tags t WHERE (",
+        "SELECT t.id, t.name::text AS name, t.hidden, count(*) AS model_count \
+         FROM tags t JOIN model_tags l ON l.tag_id = t.id \
+         JOIN models m ON m.id = l.model_id WHERE (",
     );
     qb.push_bind(name.clone())
         .push(" = '' OR t.name ILIKE '%' || ")
         .push_bind(name.clone())
-        .push(" || '%')) x WHERE model_count > 0 ORDER BY model_count DESC, name");
+        .push(" || '%')");
+    push_text_filter(&mut qb, &sel_q);
+    push_model_tag_filters(&mut qb, &sel_tags);
+    push_variant_group(&mut qb, &sel_vtags);
+    push_model_hidden_exclude(&mut qb, show_hidden);
+    qb.push(" GROUP BY t.id, t.name, t.hidden ORDER BY model_count DESC, t.name");
 
     let rows = qb.build().fetch_all(&state.db).await?;
     let tags = rows
