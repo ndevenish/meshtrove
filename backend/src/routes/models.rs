@@ -321,6 +321,9 @@ pub struct ModelDetail {
     /// Bundles this model is a member of (so the UI can link, and avoid
     /// promoting the same model into a duplicate bundle).
     pub bundles: Vec<BundleRef>,
+    pub like_count: i64,
+    /// whether the *calling* user has liked it — what the heart button renders
+    pub liked: bool,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -464,11 +467,16 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<ModelDe
                   m.purchase_date, m.order_ref, m.created_by, m.created_at, m.updated_at,
                   (SELECT r.body_md FROM model_description_revisions r
                     WHERE r.model_id = m.id ORDER BY r.created_at DESC LIMIT 1) as description_md,
+                  (SELECT count(*) FROM user_model_marks k
+                    WHERE k.model_id = m.id AND k.mark = 'liked') as "like_count!",
+                  EXISTS (SELECT 1 FROM user_model_marks k
+                    WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as "liked!",
                   coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
                             JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as "tags!"
            FROM models m LEFT JOIN creators c ON c.id = m.creator_id
            WHERE m.id = $1"#,
         id,
+        user.id,
     )
     .fetch_optional(&state.db)
     .await?
@@ -540,6 +548,8 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<ModelDe
         custom_fields,
         variants,
         bundles,
+        like_count: row.like_count,
+        liked: row.liked,
         images: images
             .into_iter()
             .map(|i| ImageSummary {

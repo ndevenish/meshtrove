@@ -40,6 +40,7 @@ import ModelDeleteDialog from '../components/ModelDeleteDialog'
 import ModelMergeDialog from '../components/ModelMergeDialog'
 import ModelPatchDialog from '../components/ModelPatchDialog'
 import ImageLightbox from '../components/ImageLightbox'
+import LikeButton from '../components/LikeButton'
 import Dropzone from '../components/Dropzone'
 import { useSuppressGlobalDrop } from '../globalDrop'
 
@@ -369,6 +370,12 @@ export default function ModelPage() {
             <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>
               {model.name}
             </Typography>
+            <LikeButton
+              kind="model"
+              id={model.id}
+              liked={model.liked}
+              likeCount={model.like_count}
+            />
             {canEdit && !editing && (
               <>
                 <Button startIcon={<DownloadIcon />} onClick={() => setExportOpen(true)}>

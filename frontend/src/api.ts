@@ -210,6 +210,9 @@ export interface ModelDetail {
   images: ImageRecord[]
   /** bundles this model belongs to */
   bundles: BundleRef[]
+  like_count: number
+  /** whether the *calling* user has liked it — what the heart button renders */
+  liked: boolean
   created_by: string
 }
 

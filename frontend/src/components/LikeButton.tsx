@@ -46,6 +46,11 @@ export default function LikeButton({
       void queryClient.invalidateQueries({ queryKey: ['likes'] })
       void queryClient.invalidateQueries({ queryKey: ['bundle'] })
       void queryClient.invalidateQueries({ queryKey: ['models'] })
+      // The model detail page carries its own `liked`/`like_count` under a
+      // singular ['model', id] key, so its heart would revert to a stale value
+      // once the optimistic state settles unless that query refetches too.
+      // (The bundle detail page's ['bundle', id] is already covered above.)
+      void queryClient.invalidateQueries({ queryKey: ['model'] })
     },
   })
 
