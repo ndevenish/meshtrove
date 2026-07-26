@@ -50,6 +50,21 @@ export default function DropboxPanel() {
 
   if (!isAdmin) return null
 
+  // The first load walks every dropbox folder to size its entries, which can
+  // take many seconds on a big share — so stand in a spinner rather than a blank
+  // gap until the first listing arrives. `isLoading` is only the initial fetch;
+  // later background refetches keep the existing sections on screen.
+  if (isLoading) {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
+          <CircularProgress size={18} />
+          <Typography color="text.secondary">Reading the server import folders…</Typography>
+        </Stack>
+      </Paper>
+    )
+  }
+
   const listings = data ?? []
   return (
     <>
