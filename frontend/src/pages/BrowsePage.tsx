@@ -162,6 +162,10 @@ export default function BrowsePage() {
                 const next = new URLSearchParams(params)
                 next.set('page', String(value))
                 setParams(next)
+                // The new page's items land wherever the old scroll left us —
+                // usually off the top of the screen. Reset to the top so the
+                // page reads from its first result.
+                window.scrollTo({ top: 0 })
               }}
             />
           </Box>
