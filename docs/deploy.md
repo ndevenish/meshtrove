@@ -121,14 +121,136 @@ hints are already in the file) and delete the bottom `volumes:` block:
 ```yaml
   postgres:
     volumes:
-      - /srv/meshtrove/pgdata:/var/lib/postgresql/data
+      - type: bind
+        source: /srv/meshtrove/pgdata
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
   app:
     volumes:
-      - /srv/meshtrove/store:/app/store
+      - type: bind
+        source: /srv/meshtrove/store
+        target: /app/store
+        bind:
+          create_host_path: false
 ```
 
 Bind mounts are the simplest, most robust way to land the containers on ZFS — no
-ZFS Docker volume driver required.
+ZFS Docker volume driver required. Use the long syntax above rather than the
+one-line `src:dst` form: see the next section for why.
+
+### When the pool is not mounted at boot
+
+A bind mount onto a dataset mountpoint is only as good as the mount. If the
+machine boots and Docker starts before the pool is imported and mounted —
+encrypted pool, `zfs-import-cache` racing `docker.service`, a manual `zpool
+import` — then `/srv/meshtrove/pgdata` is just an empty directory on the root
+filesystem, and the failure is silent and expensive:
+
+1. Docker's one-line bind syntax **creates the missing host directory for you**.
+2. Postgres finds it empty, runs `initdb`, and comes up as a brand-new, empty
+   database. The healthcheck passes; the app migrates it and serves an empty
+   archive. Nothing is broken enough to notice from the outside.
+3. The real cluster is still sitting on the unmounted dataset. When the pool does
+   mount, ZFS mounts *over* the stale directory (`overlay=on` is the Linux
+   default), so the bogus cluster becomes invisible — but the running container
+   holds the pre-mount directory open and keeps writing to it. Only a restart
+   picks up the real data.
+
+Three defences, cheapest first — apply all three:
+
+**1. Make Docker fail instead of creating the path.** `create_host_path: false`
+in the long-syntax mount above. If the dataset is unmounted *and* nothing has
+already created the directory, the container refuses to start with `bind source
+path does not exist`.
+
+**2. Make Postgres refuse to initialise a cluster it did not expect.** Defence 1
+does not cover a directory that already exists (a previous boot created it, or
+the mountpoint dir is left behind). So gate the entrypoint on `PG_VERSION`, the
+file every real cluster has:
+
+```yaml
+  postgres:
+    environment:
+      ALLOW_DB_INIT: ${ALLOW_DB_INIT:-0}
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        if [ ! -s /var/lib/postgresql/data/PG_VERSION ] && [ "$${ALLOW_DB_INIT:-0}" != 1 ]; then
+          echo "FATAL: no Postgres cluster in /var/lib/postgresql/data (PG_VERSION missing)." >&2
+          echo "       Is the ZFS dataset mounted? Refusing to initdb over it." >&2
+          echo "       Genuine first start: re-run with ALLOW_DB_INIT=1." >&2
+          exit 1
+        fi
+        exec docker-entrypoint.sh postgres
+```
+
+With `restart: unless-stopped` this crash-loops (Docker backs the retries off to
+60s) until the pool is mounted, then starts normally against the real cluster —
+so the stack recovers on its own instead of needing a restart. `$$` escapes the
+variable past Compose's own interpolation. The **first** real deployment needs
+`ALLOW_DB_INIT=1 docker compose --env-file .env.prod up -d`; unset it afterwards.
+
+`pgdata` and `store` are separate datasets, so the store can be missing while the
+DB is fine — and blobs then land on the root filesystem while DB rows record
+them, which after a remount is a set of models with missing files. Guard it with a
+marker file created on the dataset while it *is* mounted (`touch
+/srv/meshtrove/store/.dataset-ok`):
+
+```yaml
+  app:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -e /app/store/.dataset-ok ]; then
+          echo "FATAL: /app/store/.dataset-ok missing — is the ZFS store dataset mounted?" >&2
+          echo "       Refusing to write blobs onto the root filesystem." >&2
+          exit 1
+        fi
+        exec meshtrove
+```
+
+**3. Order Docker after the ZFS mounts.** The above turns a silent wrong start
+into a loud retry; this stops the race happening at all:
+
+```bash
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/zfs.conf >/dev/null <<'EOF'
+[Unit]
+# Containers bind-mount onto /srv/meshtrove — don't start the daemon (which
+# auto-restarts `restart: unless-stopped` containers) until ZFS has mounted.
+After=zfs-mount.service
+Wants=zfs-mount.service
+EOF
+sudo systemctl daemon-reload
+```
+
+`Wants` rather than `Requires` deliberately: a pool that fails to mount should
+not also prevent Docker from starting, since defences 1 and 2 already stop the
+stack from doing damage. If `zfs-mount-generator` is set up on the host (i.e.
+`/etc/zfs/zfs-list.cache` is populated, so real `.mount` units exist), prefer
+`RequiresMountsFor=/srv/meshtrove` — it waits for those specific datasets rather
+than the whole `zfs-mount.service` batch.
+
+### Cleaning up a stale pre-mount directory
+
+If a boot already created a bogus cluster, it is hidden underneath the live
+mountpoint and still consuming root-filesystem space. Bind-mount the root
+filesystem somewhere else to see under the mount:
+
+```bash
+sudo mkdir -p /mnt/rootfs
+sudo mount --bind / /mnt/rootfs
+sudo du -sh /mnt/rootfs/srv/meshtrove/*      # the stale copy, if any
+sudo rm -rf /mnt/rootfs/srv/meshtrove        # only after confirming it's the bogus one
+sudo umount /mnt/rootfs
+```
+
+Check the contents before deleting — compare `pg_controldata` output or just the
+row counts against the live database. The live datasets are not reachable through
+`/mnt/rootfs`, so what you see there is only ever the pre-mount leftovers.
 
 ### Snapshots and backups
 

@@ -17,8 +17,16 @@ services:
       POSTGRES_DB: meshtrove
     volumes:
       # Named volume by default. To back this with a ZFS dataset instead, replace
-      # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
-      #   - /srv/meshtrove/pgdata:/var/lib/postgresql/data
+      # with a bind mount onto the dataset mountpoint — and use the long syntax so
+      # Docker refuses to invent the directory on the root filesystem when the
+      # pool is not mounted. Pair it with the initdb guard in docs/deploy.md →
+      # "When the pool is not mounted at boot", or a boot before `zfs mount`
+      # silently gets you a second, empty database:
+      #   - type: bind
+      #     source: /srv/meshtrove/pgdata
+      #     target: /var/lib/postgresql/data
+      #     bind:
+      #       create_host_path: false
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U meshtrove"]
@@ -53,7 +61,11 @@ services:
     volumes:
       # Named volume by default. To back this with a ZFS dataset instead, replace
       # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
-      #   - /srv/meshtrove/store:/app/store
+      #   - type: bind
+      #     source: /srv/meshtrove/store
+      #     target: /app/store
+      #     bind:
+      #       create_host_path: false
       - store:/app/store
     labels:
       # Marks this container as the one Watchtower may update (below). Postgres is

@@ -13,8 +13,37 @@ services:
       POSTGRES_USER: meshtrove
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
       POSTGRES_DB: meshtrove
+      # Escape hatch for a genuine first start (empty dataset): ALLOW_DB_INIT=1
+      # docker compose --env-file .env.prod up -d. Leave it unset afterwards.
+      ALLOW_DB_INIT: ${ALLOW_DB_INIT:-0}
+    # Never initialise a cluster we did not mean to initialise. If the machine
+    # boots before the ZFS pool is mounted, the bind mount below lands on an
+    # empty directory and stock postgres runs initdb there: a second, empty
+    # database that then looks perfectly healthy, while the real one sits
+    # unmounted. Bail out instead — `restart: unless-stopped` keeps retrying
+    # (Docker backs off to 60s), so the stack heals itself the moment the pool
+    # appears, with no manual restart. `$$` is escaped so Compose leaves the
+    # variable for the container's shell.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        if [ ! -s /var/lib/postgresql/data/PG_VERSION ] && [ "$${ALLOW_DB_INIT:-0}" != 1 ]; then
+          echo "FATAL: no Postgres cluster in /var/lib/postgresql/data (PG_VERSION missing)." >&2
+          echo "       Is the ZFS dataset mounted? Refusing to initdb over it." >&2
+          echo "       Genuine first start: re-run with ALLOW_DB_INIT=1." >&2
+          exit 1
+        fi
+        exec docker-entrypoint.sh postgres
     volumes:
-      - /tank/meshtrove/pgdata:/var/lib/postgresql/data
+      # Long syntax with create_host_path: false — if the pool is not mounted the
+      # path does not exist, and Docker must fail the container rather than
+      # helpfully creating the directory on the root filesystem.
+      - type: bind
+        source: /tank/meshtrove/pgdata
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U meshtrove"]
       interval: 5s
@@ -29,6 +58,23 @@ services:
       postgres:
         condition: service_healthy
     user: "${MESHTROVE_UID:-10001}:${MESHTROVE_GID:-10001}"
+    # Same reasoning as the Postgres guard: pgdata and store are separate
+    # datasets, so the store can be missing while the DB is fine — and then the
+    # app writes blobs to the root filesystem and the DB ends up with rows
+    # pointing at files that vanish under the mount. `.dataset-ok` is an empty
+    # marker file committed to the dataset itself (`touch
+    # /tank/meshtrove/store/.dataset-ok` while it IS mounted), so it is present
+    # only when the real store is in place.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -e /app/store/.dataset-ok ]; then
+          echo "FATAL: /app/store/.dataset-ok missing — is the ZFS store dataset mounted?" >&2
+          echo "       Refusing to write blobs onto the root filesystem." >&2
+          exit 1
+        fi
+        exec meshtrove
     environment:
       # The app applies migrations itself at startup (sqlx::migrate!).
       DATABASE_URL: postgres://meshtrove:${POSTGRES_PASSWORD}@postgres:5432/meshtrove
@@ -42,10 +88,11 @@ services:
     ports:
       - "${MESHTROVE_PORT:-3000}:3000"
     volumes:
-      # Named volume by default. To back this with a ZFS dataset instead, replace
-      # with a bind mount onto the dataset mountpoint (see docs/deploy.md):
-      #   - /srv/meshtrove/store:/app/store
-      - /tank/meshtrove/store:/app/store
+      - type: bind
+        source: /tank/meshtrove/store
+        target: /app/store
+        bind:
+          create_host_path: false
     restart: unless-stopped
 
   # Optional: webhook-driven redeploy. Watchtower pulls the newest image and
