@@ -236,21 +236,64 @@ than the whole `zfs-mount.service` batch.
 
 ### Cleaning up a stale pre-mount directory
 
-If a boot already created a bogus cluster, it is hidden underneath the live
-mountpoint and still consuming root-filesystem space. Bind-mount the root
-filesystem somewhere else to see under the mount:
+A mount shadows whatever is already in the directory it mounts over, so once the
+pool is up, `ls` on the mountpoint can never show you the bogus cluster — it is
+still there, on the filesystem *below*, holding disk space. To see under a mount,
+bind-mount the filesystem that owns it somewhere else: `mount --bind` (unlike
+`--rbind`) does not carry nested mounts along, so the copy shows you that
+filesystem's own contents with the child mounts peeled away.
+
+There are two hiding places, because the datasets nest. Substitute your pool name
+and mountpoint (`/srv/meshtrove` here, `/tank/meshtrove` in
+`remote-docker-compose.yaml`):
+
+**1. The pool was not imported at all** → Docker created the directories on the
+root filesystem, and the whole subtree is now shadowed by the pool mount:
 
 ```bash
-sudo mkdir -p /mnt/rootfs
-sudo mount --bind / /mnt/rootfs
-sudo du -sh /mnt/rootfs/srv/meshtrove/*      # the stale copy, if any
-sudo rm -rf /mnt/rootfs/srv/meshtrove        # only after confirming it's the bogus one
-sudo umount /mnt/rootfs
+sudo mkdir -p /mnt/under
+sudo mount --bind / /mnt/under
+sudo du -sh /mnt/under/srv/meshtrove/* 2>/dev/null   # stale copies, if any
 ```
 
-Check the contents before deleting — compare `pg_controldata` output or just the
-row counts against the live database. The live datasets are not reachable through
-`/mnt/rootfs`, so what you see there is only ever the pre-mount leftovers.
+**2. The pool mounted but a child dataset did not** → the directories were
+created on the *parent* dataset, shadowed by the child mount. Bind the parent
+mountpoint instead (with `canmount=off` on `tank/meshtrove`, that parent is the
+pool root):
+
+```bash
+sudo umount /mnt/under
+sudo mount --bind /srv /mnt/under     # or /tank — wherever the parent is mounted
+sudo du -sh /mnt/under/meshtrove/* 2>/dev/null
+```
+
+Either way, an empty stale cluster is roughly 40–50 MB with the usual Postgres
+layout (`PG_VERSION`, `base/`, `global/`, `pg_wal/`). Date it — the last
+checkpoint tells you which boot created it — without starting it:
+
+```bash
+sudo docker run --rm -v /mnt/under/srv/meshtrove/pgdata:/d:ro postgres:17 \
+     pg_controldata -D /d | grep -E 'cluster state|checkpoint time|identifier'
+```
+
+Before deleting anything, confirm the path really is on the lower filesystem and
+not the live dataset — this is the check that matters:
+
+```bash
+findmnt -T /mnt/under/srv/meshtrove/pgdata
+```
+
+It must report the **root filesystem** (case 1: `ext4`/`xfs`/`btrfs`) or the
+parent dataset (case 2), *never* the `tank/meshtrove/pgdata` dataset. Then:
+
+```bash
+sudo rm -rf /mnt/under/srv/meshtrove
+sudo umount /mnt/under
+df -h /                              # confirm the space came back (case 1)
+```
+
+The live datasets are not reachable through the bind mount, so what you delete
+there cannot be the real data — provided `findmnt` agreed.
 
 ### Snapshots and backups
 
