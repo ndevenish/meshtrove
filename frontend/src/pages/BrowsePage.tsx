@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import {
+  Alert,
+  AlertTitle,
   Box,
+  CircularProgress,
   Container,
   Typography,
   Pagination,
@@ -15,12 +18,19 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 
-import { api } from '../api'
+import { api, ApiError } from '../api'
 import ItemGrid from '../components/ItemGrid'
 import FilterSidebar from '../components/FilterSidebar'
 import ModelEditDialog from '../components/ModelEditDialog'
 import BundleEditDialog from '../components/BundleEditDialog'
 import { useAuth } from '../main'
+
+/// How much of the library one page is worth. The API's own default is smaller;
+/// how many rows are a comfortable read is a decision belonging to this page,
+/// not to everything that calls the endpoint. Asked for on the request only —
+/// it stays out of the address bar, so links keep whatever this is when they are
+/// opened rather than pinning today's number for good.
+const PER_PAGE = 60
 
 export default function BrowsePage() {
   const [params, setParams] = useSearchParams()
@@ -29,9 +39,13 @@ export default function BrowsePage() {
   const [createBundleOpen, setCreateBundleOpen] = useState(false)
   const [createAnchor, setCreateAnchor] = useState<HTMLElement | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['browse', params.toString()],
-    queryFn: () => api.browse(new URLSearchParams(params)),
+    queryFn: () => {
+      const query = new URLSearchParams(params)
+      if (!query.has('per_page')) query.set('per_page', String(PER_PAGE))
+      return api.browse(query)
+    },
   })
 
   const page = Number(params.get('page') ?? '1')
@@ -144,12 +158,41 @@ export default function BrowsePage() {
           </>
         )}
 
-        <ItemGrid items={data?.items ?? []} />
+        {/* Three ways this can go, and until now two of them looked the same:
+            an empty page. A library that is still arriving says so, and one that
+            could not be reached says *that* — with the way to try again, since
+            "no connection" is usually a passing state. */}
+        {isLoading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
+            <CircularProgress aria-label="Loading models" />
+          </Box>
+        ) : isError ? (
+          <Alert
+            severity="error"
+            sx={{ mt: 2 }}
+            action={
+              <Button color="inherit" size="small" disabled={isFetching} onClick={() => refetch()}>
+                {isFetching ? 'Retrying…' : 'Retry'}
+              </Button>
+            }
+          >
+            <AlertTitle>Couldn’t load the library</AlertTitle>
+            {/* A dropped connection throws before there is any response to
+                quote, and "Failed to fetch" explains nothing on its own. */}
+            {error instanceof ApiError
+              ? `The server said: ${error.message}`
+              : 'The server could not be reached. It may be down, or this device may be offline.'}
+          </Alert>
+        ) : (
+          <>
+            <ItemGrid items={data?.items ?? []} />
 
-        {!isLoading && data?.items.length === 0 && (
-          <Typography color="text.secondary" sx={{ mt: 6, textAlign: 'center' }}>
-            Nothing matches. Try clearing filters{canEdit ? ' or add your first model' : ''}.
-          </Typography>
+            {data?.items.length === 0 && (
+              <Typography color="text.secondary" sx={{ mt: 6, textAlign: 'center' }}>
+                Nothing matches. Try clearing filters{canEdit ? ' or add your first model' : ''}.
+              </Typography>
+            )}
+          </>
         )}
 
         {pageCount > 1 && (
