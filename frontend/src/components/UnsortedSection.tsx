@@ -28,6 +28,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   api,
   variantLabel,
+  waitForJob,
   type BundleRef,
   type FileRecord,
   type Job,
@@ -58,6 +59,10 @@ export default function UnsortedSection({
   const [showArchive, setShowArchive] = useState(false)
   const [moveOpen, setMoveOpen] = useState(false)
   const [toBundleOpen, setToBundleOpen] = useState(false)
+  // Declared up here with the rest: this component returns early when there is
+  // nothing to show, and a hook below those returns is a hook React sometimes
+  // doesn't see.
+  const [rendering, setRendering] = useState(false)
 
   const { data: files } = useQuery({
     queryKey: ['model-files', model.id],
@@ -120,6 +125,25 @@ export default function UnsortedSection({
   const renameFolder = async (fileIds: string[], newPath: string) => {
     await Promise.all(fileIds.map((id) => api.updateFile(id, { path: newPath })))
     await invalidate()
+  }
+
+  // An unsorted model file can be rendered too. It was only ever the variants
+  // that offered this, but the file that best pictures a model is quite often
+  // sitting here unclassified — and a model with nothing but unsorted files has
+  // no other way to get a picture at all. The image lands on the model, since
+  // that is what owns the file.
+  const renderFile = async (fileId: string) => {
+    setRendering(true)
+    try {
+      // Wait for *this* job rather than for the queue to fall quiet: a render
+      // takes about a second and can be over before a queue-watcher looks.
+      const { job_id } = await api.renderFile(fileId)
+      await waitForJob(job_id)
+    } finally {
+      setRendering(false)
+      await invalidate()
+      onChange()
+    }
   }
 
   const removeFile = async (id: string) => {
@@ -244,6 +268,7 @@ export default function UnsortedSection({
             </Stack>
           )}
 
+          {rendering && <LinearProgress sx={{ mb: 1 }} />}
           <FileTree
             files={visible}
             selectable={editing}
@@ -252,6 +277,7 @@ export default function UnsortedSection({
             onKindChange={editing ? setKind : undefined}
             onDelete={editing ? removeFile : undefined}
             onFolderRename={editing ? renameFolder : undefined}
+            onRender={canEdit ? renderFile : undefined}
           />
         </>
       )}

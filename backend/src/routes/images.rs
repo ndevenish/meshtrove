@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use chrono::{DateTime, Utc};
@@ -363,6 +363,9 @@ async fn serve_image(
 #[derive(Deserialize)]
 struct SquareQuery {
     size: Option<u32>,
+    /// The blob the caller means, when it knows it. Never read as a value — its
+    /// presence is what says the URL names fixed bytes and may be cached hard.
+    v: Option<String>,
 }
 
 /// Serve a square version of an image, seam-carved from the original so a
@@ -374,9 +377,13 @@ struct SquareQuery {
 /// itself, so it is streamed as-is. Anything we cannot decode falls back to the
 /// original too — a broken card is worse than an uncarved one.
 ///
-/// The URL is content-addressed in spirit — an image id names one immutable
-/// blob — so the response is marked immutable and cached hard by the browser,
-/// which is what keeps the server from re-deciding squareness on every card.
+/// Caching: an image id used to name one blob for good, so this was marked
+/// immutable and never asked for again. A re-render rewrites the row in place —
+/// same id, different bytes — so that promise only holds for a caller that says
+/// which bytes it means, by passing the blob as `v` (the gallery does; a card
+/// working from a summary does not). Everything else gets an ETag and a short
+/// life, so a corrected render reaches the cards instead of being cached over
+/// them for a year.
 async fn serve_square(
     State(state): State<AppState>,
     _user: User,
@@ -394,12 +401,28 @@ async fn serve_square(
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    // The bytes *and* the edge they were carved to: the same blob at two sizes
+    // is two different pictures.
+    let cache = CacheMarks {
+        etag: format!("\"{}-{size}\"", row.blob_sha256),
+        versioned: query.v.is_some(),
+    };
+    // A client that already holds these exact bytes needs neither the carve nor
+    // the read.
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|tag| tag.trim() == cache.etag))
+    {
+        return Ok(cache.apply(StatusCode::NOT_MODIFIED.into_response()));
+    }
+
     let store_dir = state.config.store_dir.clone();
     let sha = row.blob_sha256.clone();
 
     // A carve already on disk needs no source and no CPU.
     if let Some(preview) = squares::cached(&store_dir, &sha, size) {
-        return serve_square_file(&preview.path, preview.mime, &headers).await;
+        return serve_square_file(&preview.path, preview.mime, &headers, &cache).await;
     }
 
     let source = state.store.path_for(&sha);
@@ -409,7 +432,7 @@ async fn serve_square(
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("carve task panicked: {e}")))?;
 
     match built {
-        Ok(Some(preview)) => serve_square_file(&preview.path, preview.mime, &headers).await,
+        Ok(Some(preview)) => serve_square_file(&preview.path, preview.mime, &headers, &cache).await,
         // Already square, or undecodable: serve the stored bytes unchanged.
         Ok(None) => stream_blob(
             &state,
@@ -419,7 +442,7 @@ async fn serve_square(
             headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
         )
         .await
-        .map(with_immutable_cache),
+        .map(|r| cache.apply(r)),
         Err(error) => {
             tracing::warn!(image = %id, %error, "square carve failed; serving original");
             stream_blob(
@@ -430,25 +453,50 @@ async fn serve_square(
                 headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
             )
             .await
-            .map(with_immutable_cache)
+            .map(|r| cache.apply(r))
         }
     }
 }
 
-/// Long, immutable browser caching: the id names one blob for good, so a client
-/// that has the carve never needs to ask again.
-fn with_immutable_cache(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("public, max-age=31536000, immutable"),
-    );
-    response
+/// How long a client may hold this picture, and how to ask whether it still
+/// stands.
+struct CacheMarks {
+    /// The blob and the edge, so a changed render is a changed tag.
+    etag: String,
+    /// The caller named the bytes it wanted (`?v=`), so the answer can never go
+    /// out of date under it.
+    versioned: bool,
+}
+
+impl CacheMarks {
+    /// Five minutes for an unversioned URL: long enough that a browse page full
+    /// of cards is not re-asking constantly, short enough that a picture
+    /// corrected in the gallery reaches the cards while you are still looking
+    /// for it. The revalidation that follows is a 304 against the ETag, not the
+    /// image again.
+    fn apply(&self, mut response: Response) -> Response {
+        let control = if self.versioned {
+            "public, max-age=31536000, immutable"
+        } else {
+            "public, max-age=300"
+        };
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static(control),
+        );
+        if let Ok(etag) = header::HeaderValue::from_str(&self.etag) {
+            headers.insert(header::ETAG, etag);
+        }
+        response
+    }
 }
 
 async fn serve_square_file(
     path: &std::path::Path,
     mime: &'static str,
     headers: &HeaderMap,
+    cache: &CacheMarks,
 ) -> Result<Response, ApiError> {
     let file = tokio::fs::File::open(path)
         .await
@@ -461,7 +509,7 @@ async fn serve_square_file(
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     serve_file(file, size, mime, None, range)
         .await
-        .map(with_immutable_cache)
+        .map(|r| cache.apply(r))
 }
 
 async fn image_owner(state: &AppState, id: Uuid) -> Result<(Owner, Uuid), ApiError> {

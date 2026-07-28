@@ -40,6 +40,7 @@ import ModelDeleteDialog from '../components/ModelDeleteDialog'
 import ModelMergeDialog from '../components/ModelMergeDialog'
 import ModelPatchDialog from '../components/ModelPatchDialog'
 import ImageLightbox from '../components/ImageLightbox'
+import RenderOrientation, { canReorient } from '../components/RenderOrientation'
 import LikeButton from '../components/LikeButton'
 import Dropzone from '../components/Dropzone'
 import { useSuppressGlobalDrop } from '../globalDrop'
@@ -191,6 +192,7 @@ export default function ModelPage() {
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['model', id] })
 
   const shownImage = selectedImage ?? model.images[0]?.id ?? null
+  const shownRecord = model.images.find((image) => image.id === shownImage) ?? null
 
   const uploadImage = async (file: File) => {
     const form = new FormData()
@@ -241,13 +243,22 @@ export default function ModelPage() {
               </Stack>
             )}
             {shownImage ? (
-              <Box
-                component="img"
-                src={imageUrl(shownImage)}
-                alt={model.name}
-                onClick={() => setLightboxOpen(true)}
-                sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
-              />
+              <>
+                <Box
+                  component="img"
+                  src={imageUrl(shownImage, shownRecord?.blob_sha256)}
+                  alt={model.name}
+                  onClick={() => setLightboxOpen(true)}
+                  sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
+                />
+                {/* Orientation belongs where the picture is big enough to judge
+                    it: a render that came out on its side is obvious here and a
+                    guess at 72px. The thumbnails carry the same control for the
+                    ones you are not currently looking at. */}
+                {canEdit && shownRecord && canReorient(shownRecord) && (
+                  <RenderOrientation image={shownRecord} onRendered={refresh} edge />
+                )}
+              </>
             ) : (
               <Box sx={{ textAlign: 'center', px: 2 }}>
                 {/* A Box wrapping two Typographies, not a Typography wrapping
@@ -272,7 +283,7 @@ export default function ModelPage() {
                 <Box key={image.id} sx={{ position: 'relative' }}>
                   <Box
                     component="img"
-                    src={imageUrl(image.id)}
+                    src={imageUrl(image.id, image.blob_sha256)}
                     onClick={() => setSelectedImage(image.id)}
                     sx={{
                       width: 72,
@@ -316,6 +327,12 @@ export default function ModelPage() {
                           )}
                         </IconButton>
                       </Tooltip>
+                      {/* Same tier as the star: it adjusts the picture rather
+                        than removing it, and anything it does can be undone by
+                        setting the axis back. */}
+                      {canReorient(image) && (
+                        <RenderOrientation image={image} onRendered={refresh} />
+                      )}
                       {/* Choosing the favourite is safe and stays; deleting the
                         picture is not, and waits for edit mode. */}
                       {editing && (
@@ -622,7 +639,7 @@ export default function ModelPage() {
       />
       <ImageLightbox
         open={lightboxOpen}
-        srcs={model.images.map((image) => imageUrl(image.id))}
+        srcs={model.images.map((image) => imageUrl(image.id, image.blob_sha256))}
         index={Math.max(
           0,
           model.images.findIndex((image) => image.id === shownImage),

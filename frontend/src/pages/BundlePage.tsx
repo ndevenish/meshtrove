@@ -56,6 +56,7 @@ import BundleDeleteDialog from '../components/BundleDeleteDialog'
 import BundleSplitDialog from '../components/BundleSplitDialog'
 import BundleMergeDialog from '../components/BundleMergeDialog'
 import ImageLightbox from '../components/ImageLightbox'
+import RenderOrientation, { canReorient } from '../components/RenderOrientation'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -146,6 +147,7 @@ export default function BundlePage() {
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['bundle', id] })
 
   const shownImage = selectedImage ?? bundle.images[0]?.id ?? null
+  const shownRecord = bundle.images.find((image) => image.id === shownImage) ?? null
 
   const uploadImage = async (file: File) => {
     const form = new FormData()
@@ -195,13 +197,18 @@ export default function BundlePage() {
               </Stack>
             )}
             {shownImage ? (
-              <Box
-                component="img"
-                src={imageUrl(shownImage)}
-                alt={bundle.name}
-                onClick={() => setLightboxOpen(true)}
-                sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
-              />
+              <>
+                <Box
+                  component="img"
+                  src={imageUrl(shownImage, shownRecord?.blob_sha256)}
+                  alt={bundle.name}
+                  onClick={() => setLightboxOpen(true)}
+                  sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
+                />
+                {canEdit && shownRecord && canReorient(shownRecord) && (
+                  <RenderOrientation image={shownRecord} onRendered={refresh} edge />
+                )}
+              </>
             ) : (
               <Box sx={{ textAlign: 'center', px: 2 }}>
                 {/* A Box wrapping two Typographies, not a Typography wrapping
@@ -221,7 +228,7 @@ export default function BundlePage() {
               <Box key={image.id} sx={{ position: 'relative' }}>
                 <Box
                   component="img"
-                  src={imageUrl(image.id)}
+                  src={imageUrl(image.id, image.blob_sha256)}
                   onClick={() => setSelectedImage(image.id)}
                   sx={{
                     width: 72,
@@ -253,6 +260,7 @@ export default function BundlePage() {
                         )}
                       </IconButton>
                     </Tooltip>
+                    {canReorient(image) && <RenderOrientation image={image} onRendered={refresh} />}
                     {/* Picking the favourite is safe; deleting the picture waits
                         for edit mode. */}
                     {editing && (
@@ -566,7 +574,7 @@ export default function BundlePage() {
       <ImportErrorDialog error={uploadError} onClose={() => setUploadError('')} />
       <ImageLightbox
         open={lightboxOpen}
-        srcs={bundle.images.map((image) => imageUrl(image.id))}
+        srcs={bundle.images.map((image) => imageUrl(image.id, image.blob_sha256))}
         index={Math.max(
           0,
           bundle.images.findIndex((image) => image.id === shownImage),

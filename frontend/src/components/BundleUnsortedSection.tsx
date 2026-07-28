@@ -22,7 +22,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, type BundleDetail, type FileRecord, type Job } from '../api'
+import { api, waitForJob, type BundleDetail, type FileRecord, type Job } from '../api'
 import { FileTree } from './VariantSection'
 
 const isActive = (j: Job) => j.status === 'queued' || j.status === 'running'
@@ -51,6 +51,9 @@ export default function BundleUnsortedSection({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [showArchive, setShowArchive] = useState(false)
   const [moveOpen, setMoveOpen] = useState(false)
+  // Above the early returns below, or React sees a different set of hooks
+  // depending on whether the bucket has anything in it.
+  const [rendering, setRendering] = useState(false)
 
   const { data: files } = useQuery({
     queryKey: ['bundle-files', bundle.id],
@@ -111,6 +114,20 @@ export default function BundleUnsortedSection({
   const renameFolder = async (fileIds: string[], newPath: string) => {
     await Promise.all(fileIds.map((id) => api.updateFile(id, { path: newPath })))
     await invalidate()
+  }
+
+  // Same as the model's unsorted bucket: a staged model file can be rendered
+  // where it stands, and the picture lands on the bundle that owns it.
+  const renderFile = async (fileId: string) => {
+    setRendering(true)
+    try {
+      const { job_id } = await api.renderFile(fileId)
+      await waitForJob(job_id)
+    } finally {
+      setRendering(false)
+      await invalidate()
+      onChange()
+    }
   }
 
   const removeFile = async (id: string) => {
@@ -225,6 +242,7 @@ export default function BundleUnsortedSection({
             </Stack>
           )}
 
+          {rendering && <LinearProgress sx={{ mb: 1 }} />}
           <FileTree
             files={visible}
             selectable={editing}
@@ -233,6 +251,7 @@ export default function BundleUnsortedSection({
             onKindChange={editing ? setKind : undefined}
             onDelete={editing ? removeFile : undefined}
             onFolderRename={editing ? renameFolder : undefined}
+            onRender={canEdit ? renderFile : undefined}
           />
         </>
       )}

@@ -57,6 +57,7 @@ import {
   downloadUrl,
   formatBytes,
   variantLabel,
+  waitForJob,
   type FileRecord,
   type ModelDetail,
   type VariantDetail,
@@ -121,20 +122,6 @@ const UNPACK_CHIP = {
       'Nothing has unpacked this archive — most likely a format MeshTrove cannot open. Its contents are not staged in this import.',
   },
 } as const
-
-/// Wait for one job to settle. The render is the *job's* doing, so the picture is
-/// there when the job says so — no inferring it from the shape of the queue.
-/// Gives up after ~2 minutes and lets the caller refetch anyway; a render that
-/// slow has bigger problems than a stale gallery.
-async function waitForJob(jobId: number): Promise<void> {
-  for (let i = 0; i < 120; i++) {
-    const job = await api.job(jobId)
-    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-  }
-}
 
 export default function VariantSection({
   model,

@@ -185,6 +185,22 @@ export interface ImageRecord {
   is_primary: boolean
   /** set when the image belongs to a variant of the model, not the model itself */
   variant_id?: string | null
+  /** the blob behind the picture — hung off the URL so a re-render busts the cache */
+  blob_sha256?: string
+  /** the model file this was rendered from, while it still exists */
+  source_file_id?: string | null
+  /** the orientation this render was made with */
+  render_overrides?: RenderOverrides | null
+}
+
+/// Which way is up for one file, and how far round the turntable has been
+/// spun. Stored against the *file*, not the picture: it is a fact about the
+/// mesh, so it survives a re-render and a change of renderer config.
+export interface RenderOverrides {
+  /** f3d up axis: `+X`, `-X`, `+Y`, `-Y`, `+Z`, `-Z` */
+  up?: string | null
+  /** camera azimuth about the up axis, in degrees (0..315) */
+  turntable?: number | null
 }
 
 export interface ModelDetail {
@@ -942,6 +958,12 @@ export const api = {
   /// job, so the caller can wait for *its* picture rather than watching the queue.
   renderFile: (fileId: string) =>
     request<{ job_id: number }>(`/api/files/${fileId}/render`, { method: 'POST' }),
+  /// Render this picture again with a different orientation. The axis is written
+  /// to the *source file*, so the fix outlives the picture: press it again and
+  /// you are still adjusting the same file, and a bulk re-render keeps it.
+  /// Returns the job — the image row is rewritten in place, so its id stays put.
+  rerenderImage: (imageId: string, overrides: RenderOverrides) =>
+    request<{ job_id: number }>(`/api/images/${imageId}/rerender`, json(overrides)),
   job: (jobId: number) => request<Job>(`/api/jobs/${jobId}`),
 
   creators: (q = '') => request<Creator[]>(`/api/creators?q=${encodeURIComponent(q)}`),
@@ -1182,12 +1204,38 @@ export interface ModelPatchApplyOptions {
   model_descriptions: boolean
 }
 
-export const imageUrl = (id: string) => `/api/images/${id}`
+/// Wait for one job to settle. A render is the *job's* doing, so the picture is
+/// there when the job says so — no inferring it from the shape of the queue.
+/// Gives up after ~2 minutes and lets the caller refetch anyway; a render that
+/// slow has bigger problems than a stale gallery.
+export async function waitForJob(jobId: number): Promise<void> {
+  for (let i = 0; i < 120; i++) {
+    const job = await api.job(jobId)
+    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+}
+
+/// The URL for one image. `version` — the image's `blob_sha256` — is not read by
+/// the server: it is there so the browser's cache can tell one set of bytes from
+/// the next. A re-render rewrites the row in place, keeping its id, so without it
+/// a cached picture would survive the change that was made to correct it.
+export const imageUrl = (id: string, version?: string | null) =>
+  version ? `/api/images/${id}?v=${version.slice(0, 12)}` : `/api/images/${id}`
 /// A square version of an image for card thumbnails: the backend seam-carves a
 /// non-square source down to a square, taking the pixels from its dullest
 /// regions rather than centre-cropping the subject. Already-square images are
 /// served unchanged. `size` is the edge length in CSS pixels before DPR.
-export const squareImageUrl = (id: string, size = 512) => `/api/images/${id}/square?size=${size}`
+///
+/// `version` (an image's `blob_sha256`) is optional here, unlike on `imageUrl`:
+/// the cards work from a summary that carries only the image id. Supplying it
+/// lets the server cache the answer permanently; without it the picture is held
+/// for five minutes and then revalidated against an ETag, which is what lets a
+/// re-render reach a card whose id never changed.
+export const squareImageUrl = (id: string, size = 512, version?: string | null) =>
+  `/api/images/${id}/square?size=${size}${version ? `&v=${version.slice(0, 12)}` : ''}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 /// An f3d-rendered PNG still of a single file, rendered on demand and not
 /// persisted. The STL viewer shows this first for large meshes, before the user

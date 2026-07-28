@@ -50,9 +50,9 @@ pub struct RenderOverrides {
     /// the global config says (f3d's own default is `+Y`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub up: Option<String>,
-    /// Camera azimuth about the up axis, in degrees — spinning the turntable
-    /// the model stands on. Normalised to 0..360; 0 is "no rotation" and is
-    /// stored as `None`.
+    /// How far round the up axis to walk the camera, in degrees — spinning the
+    /// turntable the model stands on. Normalised to 0..360; 0 is "no rotation"
+    /// and is stored as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turntable: Option<i32>,
 }
@@ -84,13 +84,74 @@ impl RenderOverrides {
     }
 }
 
+/// Where the camera stands when the config doesn't say — the same three-quarter
+/// view the shipped default asks for, so a turntable turned on a config that
+/// dropped `--camera-direction` starts somewhere sensible rather than wherever
+/// f3d's own default happens to be.
+const DEFAULT_CAMERA_DIRECTION: [f64; 3] = [-1.0, -0.6, -1.0];
+
+/// The value of the last `--flag=value` in the args, since that is the one f3d
+/// will use.
+fn last_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let prefix = format!("{flag}=");
+    args.iter()
+        .rev()
+        .find_map(|arg| arg.strip_prefix(prefix.as_str()))
+}
+
+fn parse_direction(value: &str) -> Option<[f64; 3]> {
+    let mut parts = value.split(',').map(|p| p.trim().parse::<f64>());
+    let v = [
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+    ];
+    parts.next().is_none().then_some(v)
+}
+
+/// `+Z` → the unit vector it names.
+fn axis_vector(axis: &str) -> Option<[f64; 3]> {
+    let sign = match axis.as_bytes().first()? {
+        b'+' => 1.0,
+        b'-' => -1.0,
+        _ => return None,
+    };
+    Some(match &axis[1..] {
+        "X" => [sign, 0.0, 0.0],
+        "Y" => [0.0, sign, 0.0],
+        "Z" => [0.0, 0.0, sign],
+        _ => return None,
+    })
+}
+
+/// Rotate `v` about `axis` by `degrees` (Rodrigues). `axis` is a unit vector.
+fn rotate_about(v: [f64; 3], axis: [f64; 3], degrees: f64) -> [f64; 3] {
+    let theta = degrees.to_radians();
+    let (sin, cos) = theta.sin_cos();
+    let cross = [
+        axis[1] * v[2] - axis[2] * v[1],
+        axis[2] * v[0] - axis[0] * v[2],
+        axis[0] * v[1] - axis[1] * v[0],
+    ];
+    let dot = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+    std::array::from_fn(|i| v[i] * cos + cross[i] * sin + axis[i] * dot * (1.0 - cos))
+}
+
 /// The command line for one render: the global args with the file's own
 /// orientation appended.
 ///
 /// Appended, not merged: f3d takes the *last* occurrence of a repeated option
 /// (verified against f3d 3.5.0 — `--up=+Y --up=+Z` renders identically to
-/// `--up=+Z`), so a config that already sets `--up` is overridden rather than
+/// `--up=+Z`), so a config that already sets an option is overridden rather than
 /// argued with, and one that doesn't simply gains the flag.
+///
+/// The turntable walks the camera round rather than using f3d's
+/// `--camera-azimuth-angle`. That option rotates the camera about its *view up*
+/// without re-orthogonalising it, and the view up is not perpendicular to a
+/// three-quarter camera direction — so it rolls the picture, tipping an upright
+/// model over as it turns. Rotating the direction vector about the scene's up
+/// axis and handing f3d the result is a real turntable: the camera orbits at a
+/// fixed height and the model stays standing.
 fn args_for(config: &RendererConfig, overrides: Option<&RenderOverrides>) -> Vec<String> {
     let mut args = config.args.clone();
     let Some(overrides) = overrides else {
@@ -100,7 +161,21 @@ fn args_for(config: &RendererConfig, overrides: Option<&RenderOverrides>) -> Vec
         args.push(format!("--up={up}"));
     }
     if let Some(degrees) = overrides.turntable {
-        args.push(format!("--camera-azimuth-angle={degrees}"));
+        // Turn about whichever axis is actually up for this render: the file's
+        // own override if it set one, else whatever the config says, else f3d's
+        // default of +Y.
+        let up = overrides
+            .up
+            .as_deref()
+            .or_else(|| last_flag(&config.args, "--up"))
+            .unwrap_or("+Y");
+        let base = last_flag(&config.args, "--camera-direction")
+            .and_then(parse_direction)
+            .unwrap_or(DEFAULT_CAMERA_DIRECTION);
+        if let Some(axis) = axis_vector(up) {
+            let [x, y, z] = rotate_about(base, axis, f64::from(degrees));
+            args.push(format!("--camera-direction={x:.4},{y:.4},{z:.4}"));
+        }
     }
     args
 }
@@ -351,10 +426,50 @@ mod tests {
             tool: "f3d".into(),
             args: vec!["{input}".into(), "--up=+Y".into()],
         };
-        let args = args_for(&config, Some(&overrides(Some("+Z"), Some(45))));
+        let args = args_for(&config, Some(&overrides(Some("+Z"), None)));
+        assert_eq!(args, vec!["{input}", "--up=+Y", "--up=+Z"]);
+    }
+
+    #[test]
+    fn the_turntable_walks_the_camera_round_the_up_axis() {
+        // A quarter turn about +Z takes the horizontal part of the camera
+        // direction round with it and leaves the height alone — the camera
+        // orbits, so the model keeps standing up instead of rolling over.
+        let config = RendererConfig::default();
+        let args = args_for(&config, Some(&overrides(Some("+Z"), Some(90))));
         assert_eq!(
-            args,
-            vec!["{input}", "--up=+Y", "--up=+Z", "--camera-azimuth-angle=45"]
+            args.last().unwrap(),
+            "--camera-direction=0.6000,-1.0000,-1.0000"
+        );
+    }
+
+    #[test]
+    fn the_turntable_turns_about_whatever_is_up() {
+        // No `up` override: the axis comes from the config, and the component
+        // along it is what must survive the turn. Here that is Y.
+        let config = RendererConfig {
+            tool: "f3d".into(),
+            args: vec!["--up=+Y".into(), "--camera-direction=-1,-1,-0.6".into()],
+        };
+        let args = args_for(&config, Some(&overrides(None, Some(90))));
+        assert_eq!(
+            args.last().unwrap(),
+            "--camera-direction=-0.6000,-1.0000,1.0000"
+        );
+    }
+
+    #[test]
+    fn a_config_without_a_camera_direction_still_turns() {
+        // Nothing to rotate but the documented default — better than dropping
+        // the turn on the floor and leaving the button looking broken.
+        let config = RendererConfig {
+            tool: "f3d".into(),
+            args: vec!["{input}".into()],
+        };
+        let args = args_for(&config, Some(&overrides(Some("+Z"), Some(45))));
+        assert!(
+            args.last().unwrap().starts_with("--camera-direction="),
+            "{args:?}"
         );
     }
 
