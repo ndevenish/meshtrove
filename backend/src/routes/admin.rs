@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
             get(get_renderer).put(put_renderer),
         )
         .route("/api/admin/rerender", post(rerender))
+        .route("/api/admin/render-stats", get(render_stats))
         .route("/api/admin/gc", post(gc_blobs))
         .route("/api/admin/storage", get(storage))
         .route("/api/admin/storage/compression", get(storage_compression))
@@ -101,6 +102,10 @@ pub struct RerenderRequest {
     /// successful re-render
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// Only re-render pictures currently shown as an owner's primary image —
+    /// the ones people actually see. At most one render per model/variant/bundle.
+    #[serde(default)]
+    pub primary_only: bool,
 }
 
 fn default_scope() -> String {
@@ -113,6 +118,35 @@ fn default_mode() -> String {
 #[derive(Serialize, ToSchema)]
 pub struct RerenderResponse {
     pub jobs_queued: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RenderStats {
+    /// How many rendered images exist at all.
+    pub rendered: i64,
+    /// How many of those are an owner's primary — the subset `primary_only`
+    /// re-renders, and the number worth putting next to the checkbox.
+    pub primary: i64,
+}
+
+/// Counts for the re-render panel: how many rendered images there are, and how
+/// many are on show as a primary. Cheap — a single grouped count.
+async fn render_stats(
+    State(state): State<AppState>,
+    user: User,
+) -> Result<Json<RenderStats>, ApiError> {
+    user.require_admin()?;
+    let row = sqlx::query!(
+        r#"SELECT count(*) as "rendered!",
+                  count(*) FILTER (WHERE is_primary) as "primary!"
+           FROM images WHERE kind = 'rendered'"#,
+    )
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(RenderStats {
+        rendered: row.rendered,
+        primary: row.primary,
+    }))
 }
 
 async fn rerender(
@@ -140,15 +174,21 @@ async fn rerender(
     // alone would leave a hand-fixed file behind; comparing the two together in
     // one snapshot would make every overridden picture look permanently stale
     // and re-render it on every pass. They are separate columns for that reason.
+    //
+    // `primary_only` ANDs a separate question onto whichever scope: only the
+    // renders currently flying as an owner's primary, so a big library can
+    // refresh just the pictures on show rather than every render it holds.
     let targets = sqlx::query!(
         r#"SELECT i.id as image_id, i.source_file_id as "file_id!"
            FROM images i
            JOIN files f ON f.id = i.source_file_id
            WHERE i.kind = 'rendered'
              AND ($1 = 'all' OR i.renderer_config IS DISTINCT FROM $2
-                  OR i.render_overrides IS DISTINCT FROM f.render_overrides)"#,
+                  OR i.render_overrides IS DISTINCT FROM f.render_overrides)
+             AND (NOT $3 OR i.is_primary)"#,
         request.scope,
         config_json,
+        request.primary_only,
     )
     .fetch_all(&state.db)
     .await?;

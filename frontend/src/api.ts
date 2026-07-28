@@ -987,8 +987,12 @@ export const api = {
   rendererConfig: () => request<RendererConfig>('/api/admin/settings/renderer'),
   setRendererConfig: (config: RendererConfig) =>
     request<RendererConfig>('/api/admin/settings/renderer', { ...json(config), method: 'PUT' }),
-  rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace') =>
-    request<{ jobs_queued: number }>('/api/admin/rerender', json({ scope, mode })),
+  rerender: (scope: 'stale' | 'all', mode: 'add' | 'replace', primaryOnly: boolean) =>
+    request<{ jobs_queued: number }>(
+      '/api/admin/rerender',
+      json({ scope, mode, primary_only: primaryOnly }),
+    ),
+  renderStats: () => request<{ rendered: number; primary: number }>('/api/admin/render-stats'),
   gcBlobs: (dryRun: boolean) => request<GcReport>('/api/admin/gc', json({ dry_run: dryRun })),
   storage: () => request<StorageReport>('/api/admin/storage'),
   /// Stats every blob in the store — on demand, not on page load.

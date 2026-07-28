@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) as \"rendered!\",\n                  count(*) FILTER (WHERE is_primary) as \"primary!\"\n           FROM images WHERE kind = 'rendered'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rendered!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "primary!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "1973a931b65dfdeaeb378bf68a1c7fcce7ead0c92be27d5bc20c55e8716feb2e"
+}

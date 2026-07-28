@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id as image_id, i.source_file_id as \"file_id!\"\n           FROM images i\n           JOIN files f ON f.id = i.source_file_id\n           WHERE i.kind = 'rendered'\n             AND ($1 = 'all' OR i.renderer_config IS DISTINCT FROM $2\n                  OR i.render_overrides IS DISTINCT FROM f.render_overrides)",
+  "query": "SELECT i.id as image_id, i.source_file_id as \"file_id!\"\n           FROM images i\n           JOIN files f ON f.id = i.source_file_id\n           WHERE i.kind = 'rendered'\n             AND ($1 = 'all' OR i.renderer_config IS DISTINCT FROM $2\n                  OR i.render_overrides IS DISTINCT FROM f.render_overrides)\n             AND (NOT $3 OR i.is_primary)",
   "describe": {
     "columns": [
       {
@@ -29,7 +29,8 @@
     "parameters": {
       "Left": [
         "Text",
-        "Jsonb"
+        "Jsonb",
+        "Bool"
       ]
     },
     "nullable": [
@@ -37,5 +38,5 @@
       true
     ]
   },
-  "hash": "d7d7287e8b0b2f9265694dabdb5974b23081d051a375fc8617d7a73f3a63d8b5"
+  "hash": "2ceed869f566a4dde77401aa93d1bb452531f4fdbef8b3d7e4bb6fd59fd5cc3e"
 }

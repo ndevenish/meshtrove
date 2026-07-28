@@ -8,6 +8,8 @@ import {
   Button,
   Alert,
   MenuItem,
+  Checkbox,
+  FormControlLabel,
 } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 
@@ -27,6 +29,11 @@ export default function AdminPage() {
   const [args, setArgs] = useState<string | null>(null)
   const [scope, setScope] = useState<'stale' | 'all'>('stale')
   const [mode, setMode] = useState<'add' | 'replace'>('replace')
+  const [primaryOnly, setPrimaryOnly] = useState(false)
+  const { data: renderStats } = useQuery({
+    queryKey: ['render-stats'],
+    queryFn: api.renderStats,
+  })
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [gcReport, setGcReport] = useState<GcReport | null>(null)
@@ -74,7 +81,7 @@ export default function AdminPage() {
     setError('')
     setMessage('')
     try {
-      const result = await api.rerender(scope, mode)
+      const result = await api.rerender(scope, mode, primaryOnly)
       setMessage(`Queued ${result.jobs_queued} render job(s). Watch progress on the Jobs page.`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -157,6 +164,10 @@ export default function AdminPage() {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           Queue re-renders for images produced by a previous renderer configuration
           (&ldquo;stale&rdquo;) or for everything.
+          {renderStats &&
+            ` ${renderStats.rendered} rendered image${
+              renderStats.rendered === 1 ? '' : 's'
+            }, ${renderStats.primary} in use as a primary.`}
         </Typography>
         <Stack sx={{ alignItems: 'center' }} direction="row" spacing={2}>
           <TextField
@@ -179,6 +190,12 @@ export default function AdminPage() {
             <MenuItem value="replace">Replace old image</MenuItem>
             <MenuItem value="add">Add alongside</MenuItem>
           </TextField>
+          <FormControlLabel
+            control={
+              <Checkbox checked={primaryOnly} onChange={(e) => setPrimaryOnly(e.target.checked)} />
+            }
+            label="Primary images only"
+          />
           <Button variant="contained" onClick={rerender}>
             Queue re-renders
           </Button>
