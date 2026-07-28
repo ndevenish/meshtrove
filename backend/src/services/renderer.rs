@@ -124,17 +124,62 @@ fn axis_vector(axis: &str) -> Option<[f64; 3]> {
     })
 }
 
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn length(v: [f64; 3]) -> f64 {
+    dot(v, v).sqrt()
+}
+
 /// Rotate `v` about `axis` by `degrees` (Rodrigues). `axis` is a unit vector.
 fn rotate_about(v: [f64; 3], axis: [f64; 3], degrees: f64) -> [f64; 3] {
     let theta = degrees.to_radians();
     let (sin, cos) = theta.sin_cos();
-    let cross = [
-        axis[1] * v[2] - axis[2] * v[1],
-        axis[2] * v[0] - axis[0] * v[2],
-        axis[0] * v[1] - axis[1] * v[0],
-    ];
-    let dot = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
-    std::array::from_fn(|i| v[i] * cos + cross[i] * sin + axis[i] * dot * (1.0 - cos))
+    let k = cross(axis, v);
+    let d = dot(axis, v);
+    std::array::from_fn(|i| v[i] * cos + k[i] * sin + axis[i] * d * (1.0 - cos))
+}
+
+/// Rotate `v` by the shortest rotation that takes `from` onto `to`. Both are
+/// unit axis vectors.
+///
+/// This is what stands the camera up with the model. Changing the up axis
+/// re-orients the scene but leaves `--camera-direction` pointing wherever it
+/// pointed in world space, so the camera ends up somewhere else entirely
+/// relative to the model — switching a Z-up file from the default lands you
+/// about 90° round from where you were, looking at its side. Tilting the camera
+/// by the same rotation the model just got keeps the framing: whatever was on
+/// the right stays on the right, and the model simply stands up.
+fn rotate_between(v: [f64; 3], from: [f64; 3], to: [f64; 3]) -> [f64; 3] {
+    let axis = cross(from, to);
+    let sin = length(axis);
+    if sin < 1e-9 {
+        // Same axis: nothing to do. Opposite axis (+Y → -Y): the shortest
+        // rotation is a half turn about *any* perpendicular, so pick one the
+        // same way every time rather than leaving it to floating-point noise.
+        if dot(from, to) > 0.0 {
+            return v;
+        }
+        let perpendicular = if from[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let axis = cross(from, perpendicular);
+        let axis = std::array::from_fn(|i| axis[i] / length(axis));
+        return rotate_about(v, axis, 180.0);
+    }
+    let unit: [f64; 3] = std::array::from_fn(|i| axis[i] / sin);
+    rotate_about(v, unit, sin.atan2(dot(from, to)).to_degrees())
 }
 
 /// The command line for one render: the global args with the file's own
@@ -160,22 +205,26 @@ fn args_for(config: &RendererConfig, overrides: Option<&RenderOverrides>) -> Vec
     if let Some(up) = &overrides.up {
         args.push(format!("--up={up}"));
     }
-    if let Some(degrees) = overrides.turntable {
-        // Turn about whichever axis is actually up for this render: the file's
-        // own override if it set one, else whatever the config says, else f3d's
-        // default of +Y.
-        let up = overrides
-            .up
-            .as_deref()
-            .or_else(|| last_flag(&config.args, "--up"))
-            .unwrap_or("+Y");
-        let base = last_flag(&config.args, "--camera-direction")
-            .and_then(parse_direction)
-            .unwrap_or(DEFAULT_CAMERA_DIRECTION);
-        if let Some(axis) = axis_vector(up) {
-            let [x, y, z] = rotate_about(base, axis, f64::from(degrees));
-            args.push(format!("--camera-direction={x:.4},{y:.4},{z:.4}"));
-        }
+
+    // Which axis is up before and after: the config's, and then the file's own
+    // override if it set one. Neither saying so means f3d's default of +Y.
+    let was_up = last_flag(&config.args, "--up").unwrap_or("+Y");
+    let now_up = overrides.up.as_deref().unwrap_or(was_up);
+    let base = last_flag(&config.args, "--camera-direction")
+        .and_then(parse_direction)
+        .unwrap_or(DEFAULT_CAMERA_DIRECTION);
+
+    let (Some(was), Some(now)) = (axis_vector(was_up), axis_vector(now_up)) else {
+        return args;
+    };
+    // Stand the camera up with the model, then spin the turntable about the new
+    // vertical. Both are no-ops in the common case, and then nothing is emitted
+    // at all — an untouched file renders on exactly the command it always did.
+    let stood_up = rotate_between(base, was, now);
+    let turned = rotate_about(stood_up, now, f64::from(overrides.turntable.unwrap_or(0)));
+    if turned != base {
+        let [x, y, z] = turned;
+        args.push(format!("--camera-direction={x:.4},{y:.4},{z:.4}"));
     }
     args
 }
@@ -427,19 +476,80 @@ mod tests {
             args: vec!["{input}".into(), "--up=+Y".into()],
         };
         let args = args_for(&config, Some(&overrides(Some("+Z"), None)));
-        assert_eq!(args, vec!["{input}", "--up=+Y", "--up=+Z"]);
+        assert_eq!(
+            args,
+            // No camera-direction in this config, so the shipped default is what
+            // gets stood up.
+            vec![
+                "{input}",
+                "--up=+Y",
+                "--up=+Z",
+                "--camera-direction=-1.0000,1.0000,-0.6000"
+            ]
+        );
+    }
+
+    #[test]
+    fn standing_the_model_up_takes_the_camera_with_it() {
+        // The whole point: changing the up axis should tip the model upright,
+        // not spin it. The camera gets the same rotation the model did, which
+        // for +Y → +Z is a quarter turn about X.
+        let config = RendererConfig::default();
+        let args = args_for(&config, Some(&overrides(Some("+Z"), None)));
+        assert_eq!(
+            args.last().unwrap(),
+            "--camera-direction=-1.0000,1.0000,-0.6000"
+        );
+    }
+
+    #[test]
+    fn every_axis_keeps_the_cameras_height_and_distance() {
+        // Whichever way up the file wants, the camera should end up looking
+        // down from the same angle at the same distance — only *around* the
+        // model does it move. Anything else and picking an axis silently
+        // changes the framing as well as the orientation.
+        let base = DEFAULT_CAMERA_DIRECTION;
+        let elevation = dot(base, [0.0, 1.0, 0.0]);
+        for axis in UP_AXES {
+            let up = axis_vector(axis).unwrap();
+            let moved = rotate_between(base, [0.0, 1.0, 0.0], up);
+            assert!(
+                (dot(moved, up) - elevation).abs() < 1e-9,
+                "{axis} changed the camera's height: {moved:?}"
+            );
+            assert!(
+                (length(moved) - length(base)).abs() < 1e-9,
+                "{axis} changed the camera's distance: {moved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_up_that_changes_nothing_moves_no_camera() {
+        // The config already says +Z and the file asks for +Z: there is nothing
+        // to stand up, so the command is the one it always was.
+        let config = RendererConfig {
+            tool: "f3d".into(),
+            args: vec!["--up=+Z".into(), "--camera-direction=-1,-1,-0.6".into()],
+        };
+        let args = args_for(&config, Some(&overrides(Some("+Z"), None)));
+        assert_eq!(
+            args,
+            vec!["--up=+Z", "--camera-direction=-1,-1,-0.6", "--up=+Z"]
+        );
     }
 
     #[test]
     fn the_turntable_walks_the_camera_round_the_up_axis() {
-        // A quarter turn about +Z takes the horizontal part of the camera
-        // direction round with it and leaves the height alone — the camera
-        // orbits, so the model keeps standing up instead of rolling over.
+        // The camera stands up with the model first — (-1, 1, -0.6) — and the
+        // quarter turn then takes its horizontal part round about +Z, leaving
+        // the height (-0.6) alone. It orbits, so the model keeps standing up
+        // instead of rolling over.
         let config = RendererConfig::default();
         let args = args_for(&config, Some(&overrides(Some("+Z"), Some(90))));
         assert_eq!(
             args.last().unwrap(),
-            "--camera-direction=0.6000,-1.0000,-1.0000"
+            "--camera-direction=-1.0000,-1.0000,-0.6000"
         );
     }
 

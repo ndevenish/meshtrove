@@ -37,6 +37,150 @@ function splitAxis(up: string | null | undefined): { axis: string; negative: boo
   return { axis: up.slice(1), negative: up.startsWith('-') }
 }
 
+// --- the axis gizmo -------------------------------------------------------
+//
+// Three buttons labelled X, Y and Z say nothing about which way those axes
+// actually point, so picking one is a guess followed by a render. The gizmo
+// answers it: it stands the axes up in the same camera the renderer will use,
+// so you can read off which one is currently up and which way a turn will take
+// you before spending a render on it.
+
+type Vec3 = [number, number, number]
+
+/// Must match the backend's `DEFAULT_CAMERA_DIRECTION` (services/renderer.rs)
+/// and the `--camera-direction` in the shipped renderer config. An admin who
+/// edits that setting moves the real camera and not this drawing of it — the
+/// gizmo would then be a stale sketch of where the camera used to stand.
+const BASE_DIRECTION: Vec3 = [-1, -0.6, -1]
+
+const AXES: { name: string; vector: Vec3; colour: string }[] = [
+  // Readable on both themes, which f3d's own axis colours (a very light green
+  // in particular) are not against a white popover.
+  { name: 'X', vector: [1, 0, 0], colour: '#e5484d' },
+  { name: 'Y', vector: [0, 1, 0], colour: '#2f9e5f' },
+  { name: 'Z', vector: [0, 0, 1], colour: '#3e63dd' },
+]
+
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+const cross = (a: Vec3, b: Vec3): Vec3 => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+]
+const norm = (v: Vec3): Vec3 => {
+  const length = Math.hypot(...v) || 1
+  return [v[0] / length, v[1] / length, v[2] / length]
+}
+
+function axisVector(axis: string): Vec3 {
+  const sign = axis.startsWith('-') ? -1 : 1
+  return axis.endsWith('X') ? [sign, 0, 0] : axis.endsWith('Z') ? [0, 0, sign] : [0, sign, 0]
+}
+
+/// Rodrigues, the same turn the backend makes to the camera direction.
+function rotateAbout(v: Vec3, axis: Vec3, degrees: number): Vec3 {
+  const t = (degrees * Math.PI) / 180
+  const [c, s] = [Math.cos(t), Math.sin(t)]
+  const k = cross(axis, v)
+  const d = dot(axis, v)
+  return [0, 1, 2].map((i) => v[i] * c + k[i] * s + axis[i] * d * (1 - c)) as Vec3
+}
+
+/// The shortest rotation taking `from` onto `to`, applied to `v`. Mirrors
+/// `rotate_between` in services/renderer.rs — this is the camera standing up
+/// with the model, and the gizmo is only honest if it stands up the same way.
+function rotateBetween(v: Vec3, from: Vec3, to: Vec3): Vec3 {
+  const axis = cross(from, to)
+  const sin = Math.hypot(...axis)
+  if (sin < 1e-9) {
+    if (dot(from, to) > 0) return v
+    const perpendicular: Vec3 = Math.abs(from[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]
+    return rotateAbout(v, norm(cross(from, perpendicular)), 180)
+  }
+  return rotateAbout(v, norm(axis), (Math.atan2(sin, dot(from, to)) * 180) / Math.PI)
+}
+
+/// f3d's own default, and so the axis the shipped camera direction was aimed
+/// with. The gizmo draws the world before any override, so this is where it
+/// starts from — matching `was_up` in the backend's `args_for`.
+const DEFAULT_UP: Vec3 = [0, 1, 0]
+
+/// The three world axes as the current camera sees them, projected flat.
+/// `depth` is how far each one points away from the viewer, so the ones going
+/// into the screen can be drawn faint and underneath.
+function project(up: string, turntable: number) {
+  const upVector = axisVector(up)
+  const stoodUp = rotateBetween(BASE_DIRECTION, DEFAULT_UP, upVector)
+  const forward = norm(rotateAbout(stoodUp, upVector, turntable))
+  // A camera looking straight down its own up axis has no sideways: nothing
+  // sensible to draw, and a zero-length cross product to draw it with.
+  let right = cross(forward, upVector)
+  if (Math.hypot(...right) < 1e-6) right = [1, 0, 0]
+  right = norm(right)
+  const screenUp = cross(right, forward)
+
+  return AXES.map((axis) => ({
+    ...axis,
+    x: dot(axis.vector, right),
+    y: dot(axis.vector, screenUp),
+    depth: dot(axis.vector, forward),
+  }))
+}
+
+/// Which way the axes point in the picture this is about to make.
+function AxisGizmo({ up, turntable }: { up: string; turntable: number }) {
+  const size = 84
+  const centre = size / 2
+  const reach = 26
+  // Back to front, so an axis pointing away is overdrawn by the ones in front.
+  const axes = project(up, turntable).sort((a, b) => b.depth - a.depth)
+
+  return (
+    // Centred by a flex parent rather than `mx: auto` on the svg: an svg's own
+    // box does not behave like a block's, and auto margins slide off it.
+    <Box sx={{ display: 'flex', justifyContent: 'center' }}>
+      <Box
+        component="svg"
+        viewBox={`0 0 ${size} ${size}`}
+        sx={{ width: size, height: size, display: 'block' }}
+        aria-label={`Axes as seen in the render: up is ${up}, turned ${turntable}°`}
+      >
+        <circle cx={centre} cy={centre} r={2} fill="currentColor" opacity={0.35} />
+        {axes.map((axis) => {
+          // Screen y grows downward; the projection's does not.
+          const x = centre + axis.x * reach
+          const y = centre - axis.y * reach
+          const away = axis.depth > 0
+          return (
+            <g key={axis.name} opacity={away ? 0.4 : 1}>
+              <line
+                x1={centre}
+                y1={centre}
+                x2={x}
+                y2={y}
+                stroke={axis.colour}
+                strokeWidth={2}
+                strokeLinecap="round"
+              />
+              <text
+                x={centre + axis.x * (reach + 9)}
+                y={centre - axis.y * (reach + 9)}
+                fill={axis.colour}
+                fontSize={11}
+                fontWeight={700}
+                textAnchor="middle"
+                dominantBaseline="central"
+              >
+                {axis.name}
+              </text>
+            </g>
+          )
+        })}
+      </Box>
+    </Box>
+  )
+}
+
 /// Correct a render that came out on its side, or facing the wrong way.
 ///
 /// f3d assumes +Y up; print files are authored by whoever made them, so a Z-up
@@ -142,6 +286,9 @@ export default function RenderOrientation({
         transformOrigin={{ vertical: 'top', horizontal: 'right' }}
       >
         <Stack spacing={1.5} sx={{ p: 2, width: 260 }}>
+          {/* The axes as this render will see them. `up` falls back to f3d's
+              own default, which is what an unset override leaves in force. */}
+          <AxisGizmo up={pending.up || '+Y'} turntable={turntable} />
           <Box>
             <Typography variant="caption" color="text.secondary">
               Which way is up
