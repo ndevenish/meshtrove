@@ -1142,9 +1142,17 @@ async fn render_file_preview(
     }
 
     let config = crate::services::renderer::current_config(&state).await?;
+    // The still is a throwaway, but it should look like the picture the gallery
+    // holds — same file, same orientation.
+    let overrides = crate::services::renderer::overrides_for_file(&state, id).await?;
     let blob_path = state.store.path_for(&file.blob_sha256);
-    let (work_dir, output) =
-        crate::services::renderer::render_blob_to_png(&config, &blob_path, &file.filename).await?;
+    let (work_dir, output) = crate::services::renderer::render_blob_to_png(
+        &config,
+        overrides.as_ref(),
+        &blob_path,
+        &file.filename,
+    )
+    .await?;
 
     let bytes = tokio::fs::read(&output).await;
     let _ = tokio::fs::remove_dir_all(&work_dir).await;

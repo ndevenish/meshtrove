@@ -408,8 +408,12 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
     .ok_or(ApiError::NotFound)?;
 
     let images = sqlx::query!(
-        r#"SELECT id, kind::text as "kind!", is_primary, width, height FROM images
-           WHERE bundle_id = $1 ORDER BY is_primary DESC, sort_order, created_at"#,
+        r#"SELECT i.id, i.kind::text as "kind!", i.is_primary, i.width, i.height,
+                  i.blob_sha256, i.render_overrides, f.id as "source_file_id?"
+           FROM images i
+           LEFT JOIN files f ON f.id = i.source_file_id
+           WHERE i.bundle_id = $1
+           ORDER BY i.is_primary DESC, i.sort_order, i.created_at"#,
         id,
     )
     .fetch_all(&state.db)
@@ -449,6 +453,9 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
                 // A bundle's own gallery is its own images; the member models'
                 // pictures belong on the member models.
                 variant_id: None,
+                blob_sha256: i.blob_sha256,
+                source_file_id: i.source_file_id,
+                render_overrides: crate::routes::models::parse_overrides(i.render_overrides),
             })
             .collect(),
         categories,

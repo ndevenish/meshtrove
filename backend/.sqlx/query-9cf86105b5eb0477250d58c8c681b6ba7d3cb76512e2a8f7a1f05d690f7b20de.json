@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT blob_sha256, filename, model_id, variant_id, bundle_id FROM files WHERE id = $1",
+  "query": "SELECT blob_sha256, filename, model_id, variant_id, bundle_id, render_overrides\n         FROM files WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,17 @@
             "name": "bundle_id"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "render_overrides",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "render_overrides"
+          }
+        }
       }
     ],
     "parameters": {
@@ -69,8 +80,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "295160e17e6009320b78d4e4293a25db015a2c3e8cbf445f8afdae55b138227b"
+  "hash": "9cf86105b5eb0477250d58c8c681b6ba7d3cb76512e2a8f7a1f05d690f7b20de"
 }

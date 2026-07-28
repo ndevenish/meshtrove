@@ -24,6 +24,7 @@ use crate::routes::tags::upsert_tag;
 use crate::routes::variants::{
     VariantDetail, fetch_variants, set_variant_tags, variant_with_tag_set,
 };
+use crate::services::renderer::RenderOverrides;
 use crate::state::AppState;
 use crate::util::{slug_token, slug_token_of, slugify};
 
@@ -347,6 +348,25 @@ pub struct ImageSummary {
     /// the model itself — the gallery shows both, but "primary" means a different
     /// thing for each, and the UI has to be able to tell them apart.
     pub variant_id: Option<Uuid>,
+    /// The blob behind the picture. The UI hangs it off the image URL as a
+    /// version: a re-render rewrites the row *in place*, so the id alone is no
+    /// longer enough to tell one set of bytes from the next, and a browser
+    /// holding the old ones would go on showing them.
+    pub blob_sha256: String,
+    /// The model file this was rendered from, while it still exists — a render
+    /// can only be redone from its source, so this is also what says whether the
+    /// orientation controls apply.
+    pub source_file_id: Option<Uuid>,
+    /// The per-file orientation this render was made with, so the controls open
+    /// showing where they left off.
+    pub render_overrides: Option<RenderOverrides>,
+}
+
+/// Stored orientation → the typed shape the gallery reads. A row written by an
+/// older build, or by hand, is treated as "no orientation" rather than failing
+/// the whole page: the controls then simply open at their defaults.
+pub(crate) fn parse_overrides(value: Option<serde_json::Value>) -> Option<RenderOverrides> {
+    value.and_then(|value| serde_json::from_value(value).ok())
 }
 
 /// A slug for `name`: `slugify(name)` plus a random token, so no model is
@@ -495,7 +515,12 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<ModelDe
     // so the card and the top of the gallery are never two different pictures.
     let images = sqlx::query!(
         r#"SELECT i.id, i.kind::text as "kind!", i.is_primary, i.width, i.height,
-                  i.variant_id,
+                  i.variant_id, i.blob_sha256, i.render_overrides,
+                  -- The join is what proves the source survives: `source_file_id`
+                  -- is ON DELETE SET NULL, but a row can also point at a file
+                  -- that a cascade took, and a render cannot be redone from a
+                  -- file that is not there.
+                  f.id as "source_file_id?",
                   (i.model_id IS NULL) as "from_variant!",
                   coalesce(
                       (SELECT count(*) FROM variant_tag_assignments a
@@ -559,6 +584,9 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<ModelDe
                 width: i.width,
                 height: i.height,
                 variant_id: i.variant_id,
+                blob_sha256: i.blob_sha256,
+                source_file_id: i.source_file_id,
+                render_overrides: parse_overrides(i.render_overrides),
             })
             .collect(),
         created_by: row.created_by,

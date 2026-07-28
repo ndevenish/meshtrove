@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET blob_sha256 = $1, mime = 'image/png', source_file_id = $2,\n                               renderer = $3, renderer_config = $4, render_overrides = $5,\n                               width = NULL, height = NULL\n             WHERE id = $6 AND kind = 'rendered'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bpchar",
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f9205af2eea7584171238db43d8b06f7c7ba1688b1cd379dc0d1e3464da4c30e"
+}

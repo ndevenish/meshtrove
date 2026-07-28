@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO images (blob_sha256, model_id, variant_id, bundle_id, kind, mime,\n                                   source_file_id, renderer, renderer_config, render_overrides,\n                                   is_primary, created_by)\n               SELECT $1, $2, $3, $4, 'rendered', 'image/png', $5, $6, $7, $8,\n                      NOT EXISTS (SELECT 1 FROM images i WHERE i.is_primary AND (\n                          (i.model_id = $2 AND $2 IS NOT NULL) OR\n                          (i.variant_id = $3 AND $3 IS NOT NULL) OR\n                          (i.bundle_id = $4 AND $4 IS NOT NULL))),\n                      NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bpchar",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00e75a0719159e933f731fa6cd153728ebc7aec8645736f92bd453c9d5177fa8"
+}

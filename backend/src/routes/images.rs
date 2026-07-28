@@ -16,8 +16,9 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::extractors::User;
-use crate::routes::files::{serve_file, stream_blob};
+use crate::routes::files::{RenderQueued, serve_file, stream_blob};
 use crate::services::blobstore::BlobStore;
+use crate::services::renderer::RenderOverrides;
 use crate::services::squares;
 use crate::state::AppState;
 
@@ -32,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/images/{id}", get(serve_image).delete(remove_image))
         .route("/api/images/{id}/square", get(serve_square))
         .route("/api/images/{id}/primary", put(mark_primary))
+        .route("/api/images/{id}/rerender", post(rerender_image))
         .route("/api/files/{id}/promote", post(promote_file))
         .route(
             "/api/models/{id}/images/{image_id}/promote",
@@ -569,6 +571,74 @@ async fn promote_to_model(
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Re-render this picture with a different orientation.
+///
+/// f3d assumes +Y up, and a Z-up print file rendered that way comes out lying on
+/// its side — about a third of a real library. The fix is per-file (which way is
+/// up is a fact about the mesh), so this writes the orientation onto the *source
+/// file* and then queues the render: press it again on a re-rendered picture and
+/// you are still adjusting the same file, and the admin's bulk re-render inherits
+/// the fix rather than undoing it.
+///
+/// The job replaces the image in place, so the id the caller is holding stays
+/// valid — the picture changes underneath it.
+async fn rerender_image(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(overrides): Json<RenderOverrides>,
+) -> Result<(StatusCode, Json<RenderQueued>), ApiError> {
+    let (_, created_by) = image_owner(&state, id).await?;
+    user.require_can_edit(created_by)?;
+
+    let overrides = overrides
+        .normalise()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    // Only a render can be re-rendered, and only while the file it came from is
+    // still there: `source_file_id` is ON DELETE SET NULL, so a picture whose
+    // model file has been deleted is a picture we cannot make again.
+    let source_file_id = sqlx::query_scalar!(
+        "SELECT source_file_id FROM images WHERE id = $1 AND kind = 'rendered'",
+        id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .flatten()
+    .ok_or_else(|| {
+        ApiError::BadRequest(
+            "only a rendered image with a surviving source file can be re-rendered".into(),
+        )
+    })?;
+
+    // An empty override is stored as NULL, not as `{}`: "no orientation set" is
+    // one state, and the staleness check compares these values.
+    let stored = if overrides.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(&overrides).map_err(anyhow::Error::from)?)
+    };
+    sqlx::query!(
+        "UPDATE files SET render_overrides = $2 WHERE id = $1",
+        source_file_id,
+        stored,
+    )
+    .execute(&state.db)
+    .await?;
+
+    let job_id = crate::services::jobs::enqueue(
+        &state.db,
+        "render_preview",
+        serde_json::json!({
+            "file_id": source_file_id,
+            "mode": "replace",
+            "replace_image_id": id,
+        }),
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(RenderQueued { job_id })))
 }
 
 /// Make this image the owner's preview, atomically demoting the previous one.

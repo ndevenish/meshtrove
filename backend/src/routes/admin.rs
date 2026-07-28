@@ -133,11 +133,20 @@ async fn rerender(
 
     // Rendered images with a surviving source file, optionally only those not
     // produced by the current renderer configuration.
+    //
+    // "Stale" is two questions, not one: the global config may have moved on
+    // since the picture was made, *or* the file's own orientation may have (the
+    // gallery's controls write it to the file). Comparing the global config
+    // alone would leave a hand-fixed file behind; comparing the two together in
+    // one snapshot would make every overridden picture look permanently stale
+    // and re-render it on every pass. They are separate columns for that reason.
     let targets = sqlx::query!(
         r#"SELECT i.id as image_id, i.source_file_id as "file_id!"
            FROM images i
-           WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL
-             AND ($1 = 'all' OR i.renderer_config IS DISTINCT FROM $2)"#,
+           JOIN files f ON f.id = i.source_file_id
+           WHERE i.kind = 'rendered'
+             AND ($1 = 'all' OR i.renderer_config IS DISTINCT FROM $2
+                  OR i.render_overrides IS DISTINCT FROM f.render_overrides)"#,
         request.scope,
         config_json,
     )

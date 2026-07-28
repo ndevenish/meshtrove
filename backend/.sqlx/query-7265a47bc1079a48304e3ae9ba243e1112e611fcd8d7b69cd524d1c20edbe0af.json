@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT source_file_id FROM images WHERE id = $1 AND kind = 'rendered'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_file_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "source_file_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7265a47bc1079a48304e3ae9ba243e1112e611fcd8d7b69cd524d1c20edbe0af"
+}
