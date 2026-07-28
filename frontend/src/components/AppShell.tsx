@@ -27,6 +27,7 @@ import { useAuth, useColorMode } from '../main'
 import { api } from '../api'
 import { readDrop, startImport } from '../upload'
 import { GlobalDropContext } from '../globalDrop'
+import { useRenderRefresh } from '../renderWatch'
 import ImportErrorDialog from './ImportErrorDialog'
 import ChangePasswordDialog from './ChangePasswordDialog'
 import VersionBar from './VersionBar'
@@ -49,6 +50,10 @@ export default function AppShell() {
   const [progress, setProgress] = useState(0)
   const [uploadName, setUploadName] = useState('')
   const [dropError, setDropError] = useState('')
+
+  // A regenerated preview swaps a card's image out from under it; refresh the
+  // card-bearing queries when a render lands, from whatever page is open.
+  useRenderRefresh()
 
   // The window-level drop listener is registered once; a ref keeps it reading the
   // *current* page rather than the one that was open when it was installed.
