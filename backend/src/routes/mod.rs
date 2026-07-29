@@ -4,6 +4,7 @@ pub mod api_tokens;
 pub mod auth;
 pub mod browse;
 pub mod bundles;
+pub mod carve;
 pub mod creators;
 pub mod custom_fields;
 pub mod dropbox;

@@ -20,6 +20,7 @@ import StarIcon from '@mui/icons-material/Star'
 import StarBorderIcon from '@mui/icons-material/StarBorder'
 import DeleteIcon from '@mui/icons-material/Delete'
 import MergeIcon from '@mui/icons-material/Merge'
+import ContentCutIcon from '@mui/icons-material/ContentCut'
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate'
 import Inventory2Icon from '@mui/icons-material/Inventory2'
 import ReactMarkdown from 'react-markdown'
@@ -408,6 +409,18 @@ export default function ModelPage() {
                 {/* Merge and Delete both sit at the far end from Save, clear of
                     where a double-click on the primary action would land, so a
                     stray second click can't fall on either. */}
+                {/* The mirror of Merge, and a workbench rather than a dialog:
+                    it needs the rule editor and the whole file list, so it gets
+                    a page of its own. */}
+                <Button
+                  component={Link}
+                  to={`/models/${model.slug}/carve`}
+                  startIcon={<ContentCutIcon />}
+                  disabled={saving}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Carve…
+                </Button>
                 <Button
                   startIcon={<MergeIcon />}
                   disabled={saving}

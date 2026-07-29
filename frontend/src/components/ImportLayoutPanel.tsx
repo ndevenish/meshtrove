@@ -88,15 +88,18 @@ const blankRule = (): LayoutRule => ({
 
 /// The layout carve panel: compose the carve out of several small patterns,
 /// assign each one's capture groups a role, map raw captured values onto variant
-/// tags, and preview the merged result. All matching happens server-side
-/// (`POST /api/imports/{id}/plan`) — patterns are opaque strings here, and the
-/// commit runs the same analysis, so what this previews is exactly what commits.
+/// tags, and preview the merged result. All matching happens server-side (the
+/// `planner` prop — `POST /api/imports/{id}/plan` for a staged drop, the model
+/// carve endpoint for one already in the library): patterns are opaque strings
+/// here, and the executing end runs the same analysis, so what this previews is
+/// exactly what happens.
 /// Memoised: a Loot-style layout mounts dozens of Autocompletes and radio rows,
 /// and the import page re-renders on every form keystroke — the panel's own
 /// inputs only change when the import or destination does (callers keep the
 /// callback props referentially stable).
 export default memo(function ImportLayoutPanel({
-  importId,
+  subjectId,
+  planner,
   fileCount,
   revision = 0,
   unpacking,
@@ -105,7 +108,13 @@ export default memo(function ImportLayoutPanel({
   onPlan,
   onMergeTargets,
 }: {
-  importId: string
+  /** what is being carved — an import id, or a model id. Namespaces the draft
+      (see importDraft.ts) and keys the coverage query, so two subjects never
+      share a half-built layout. */
+  subjectId: string
+  /** run a dry run server-side. Kept referentially stable by the caller, since
+      the panel re-plans whenever it changes. */
+  planner: (spec: LayoutSpec, target: PlanTarget, countsOnly?: boolean) => Promise<LayoutPlan>
   /** re-plan when this grows */
   fileCount: number
   /** bumped by the caller whenever the staged files change in a way the count
@@ -127,31 +136,37 @@ export default memo(function ImportLayoutPanel({
   onMergeTargets?: (targets: (string | null)[] | null) => void
 }) {
   const queryClient = useQueryClient()
-  // The carve is part of the import's draft: the rule list, flatten and merge
-  // choices persist per import id (see importDraft.ts), so reopening the import
+  // Carving an existing model has no staging area to leave files in: what the
+  // rules don't match simply stays where it already is. So the "keep unmatched"
+  // choice — and the copy that talks about landing unsorted — is an import-only
+  // affordance.
+  const staged = target !== 'carve'
+  // The carve is part of the subject's draft: the rule list, flatten and merge
+  // choices persist per subject id (see importDraft.ts), so reopening the import
   // brings the half-built layout back with it — including which rules you had
   // switched off, which is per-import working state, not a property of the saved
   // template. The plan itself is not stored — it is re-derived server-side from
   // the restored spec on mount.
-  const [selected, setSelected] = useImportDraftState(importId, 'layout.selected', '')
-  const [rules, setRules] = useImportDraftState<LayoutRule[]>(importId, 'layout.rules', [])
+  const [selected, setSelected] = useImportDraftState(subjectId, 'layout.selected', '')
+  const [rules, setRules] = useImportDraftState<LayoutRule[]>(subjectId, 'layout.rules', [])
   const [plan, setPlan] = useState<LayoutPlan | null>(null)
   const [planError, setPlanError] = useState('')
-  const [flatten, setFlatten] = useImportDraftState(importId, 'layout.flatten', false)
+  const [flatten, setFlatten] = useImportDraftState(subjectId, 'layout.flatten', false)
   // Commit only the matched files and keep the rest staged here. Per-import
   // working state (like the enabled toggles' current values), never part of a
   // saved template — whether a drop is being split across targets is a fact
   // about this drop, not about the publisher's tree.
-  const [keepUnmatched, setKeepUnmatched] = useImportDraftState(
-    importId,
+  const [keepUnmatchedChoice, setKeepUnmatched] = useImportDraftState(
+    subjectId,
     'layout.keepUnmatched',
     false,
   )
+  const keepUnmatched = keepUnmatchedChoice && staged
   // Retarget choices, keyed by planned-model identity so they survive re-plans:
   // a member id, or 'new' to force a fresh member. An unset model rides on the
   // plan's auto-matched `merge_target`.
   const [mergeChoices, setMergeChoices] = useImportDraftState<Record<string, string>>(
-    importId,
+    subjectId,
     'layout.mergeChoices',
     {},
   )
@@ -173,7 +188,7 @@ export default memo(function ImportLayoutPanel({
   // of an empty column and saves a full dry-run of every layout, every second,
   // against numbers that are stale before they render.
   const { data: coverage } = useQuery({
-    queryKey: ['layout-coverage', importId, fileCount, layouts?.map((l) => l.id).join()],
+    queryKey: ['layout-coverage', subjectId, fileCount, layouts?.map((l) => l.id).join()],
     enabled: !!layouts && fileCount > 0 && !unpacking,
     queryFn: async () => {
       const entries = await Promise.all(
@@ -182,7 +197,7 @@ export default memo(function ImportLayoutPanel({
             // One integer per layout is all this reads, so don't ask for the
             // per-file annotations: they are the whole weight of a plan, and
             // this runs once per saved layout the moment the page opens.
-            const p = await api.planImport(importId, layout, 'bundle', undefined, true)
+            const p = await planner(layout, target, true)
             return [layout.id, p.matched] as const
           } catch {
             return [layout.id, -1] as const
@@ -267,7 +282,7 @@ export default memo(function ImportLayoutPanel({
     const spec: LayoutSpec = { rules, flatten: effectiveFlatten, keep_unmatched: keepUnmatched }
     const timer = setTimeout(async () => {
       try {
-        const result = await api.planImport(importId, spec, target, bundleId)
+        const result = await planner(spec, target)
         setPlan(result)
         setPlanError('')
         onPlanRef.current(spec, result)
@@ -280,7 +295,8 @@ export default memo(function ImportLayoutPanel({
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    importId,
+    subjectId,
+    planner,
     rules,
     target,
     fileCount,
@@ -453,7 +469,7 @@ export default memo(function ImportLayoutPanel({
           <Tooltip
             title={
               rule.enabled
-                ? 'Switch this rule off for this import — it then contributes nothing'
+                ? 'Switch this rule off here — it then contributes nothing'
                 : 'Switch this rule back on'
             }
           >
@@ -502,7 +518,7 @@ export default memo(function ImportLayoutPanel({
               updateRule(index, { pattern: e.target.value })
               setSelected('custom')
             }}
-            helperText="Searched anywhere in each staged file’s full path. Assign its capture groups below."
+            helperText={`Searched anywhere in each ${staged ? 'staged ' : ''}file’s full path. Assign its capture groups below.`}
             slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: 13 } } }}
             sx={{ mb: 1 }}
           />
@@ -603,7 +619,7 @@ export default memo(function ImportLayoutPanel({
             }}
           >
             <MenuItem value="">
-              <em>None — everything lands unsorted</em>
+              <em>{staged ? 'None — everything lands unsorted' : 'None — nothing is carved'}</em>
             </MenuItem>
             {(layouts ?? []).map((layout) => (
               <MenuItem key={layout.id} value={layout.id}>
@@ -628,7 +644,11 @@ export default memo(function ImportLayoutPanel({
             matches {plan.matched} of {plan.total} files
             {plan.carved !== plan.matched && ` (${plan.carved} carved)`}
             {plan.matched < plan.total &&
-              (keepUnmatched ? ' — the rest stay staged here' : ' — the rest land unsorted')}
+              (!staged
+                ? ' — the rest stay exactly where they are'
+                : keepUnmatched
+                  ? ' — the rest stay staged here'
+                  : ' — the rest land unsorted')}
           </Typography>
         )}
       </Stack>
@@ -669,26 +689,28 @@ export default memo(function ImportLayoutPanel({
             }
           />
 
-          <FormControlLabel
-            sx={{ mb: 1, display: 'flex' }}
-            control={
-              <Checkbox
-                size="small"
-                checked={keepUnmatched}
-                onChange={(e) => setKeepUnmatched(e.target.checked)}
-              />
-            }
-            label={
-              <Box>
-                <Typography variant="body2">Keep unmatched files staged</Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Import only what the rules match — matched files leave the import; the rest stay
-                  here (instead of landing unsorted), so you can carve them at a different target in
-                  another pass.
-                </Typography>
-              </Box>
-            }
-          />
+          {staged && (
+            <FormControlLabel
+              sx={{ mb: 1, display: 'flex' }}
+              control={
+                <Checkbox
+                  size="small"
+                  checked={keepUnmatched}
+                  onChange={(e) => setKeepUnmatched(e.target.checked)}
+                />
+              }
+              label={
+                <Box>
+                  <Typography variant="body2">Keep unmatched files staged</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Import only what the rules match — matched files leave the import; the rest stay
+                    here (instead of landing unsorted), so you can carve them at a different target
+                    in another pass.
+                  </Typography>
+                </Box>
+              }
+            />
+          )}
 
           {rules.map(ruleBlock)}
 
@@ -775,7 +797,7 @@ export default memo(function ImportLayoutPanel({
                       ) : (
                         <Chip
                           size="small"
-                          label={target === 'bundle' ? 'anonymous variant' : 'unsorted'}
+                          label={target === 'model' ? 'unsorted' : 'anonymous variant'}
                           variant="outlined"
                         />
                       )}

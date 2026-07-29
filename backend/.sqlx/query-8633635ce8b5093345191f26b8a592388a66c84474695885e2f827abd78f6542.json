@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE models\n                 SET creator_ref = coalesce(creator_ref, $2),\n                     model_version = coalesce(model_version, $3)\n                 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8633635ce8b5093345191f26b8a592388a66c84474695885e2f827abd78f6542"
+}

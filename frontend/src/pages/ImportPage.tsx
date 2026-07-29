@@ -28,6 +28,7 @@ import {
   type ImportFolder,
   type LayoutPlan,
   type LayoutSpec,
+  type PlanTarget,
   type ImportSummary,
 } from '../api'
 import { FileTree } from '../components/VariantSection'
@@ -220,6 +221,17 @@ function ImportWorkbench() {
     await queryClient.invalidateQueries({ queryKey: ['imports'] })
     setFileRevision((n) => n + 1)
   }
+
+  // How the layout panel dry-runs against *this* import. Referentially stable
+  // (the panel re-plans whenever it changes) and so keyed only on what the
+  // request actually carries: the import, and the bundle a merge targets.
+  const importId = staged?.id
+  const mergeBundleId = dest === 'bundle' ? target?.id : undefined
+  const planImport = useCallback(
+    (spec: LayoutSpec, planTarget: PlanTarget, countsOnly?: boolean) =>
+      api.planImport(importId!, spec, planTarget, mergeBundleId, countsOnly),
+    [importId, mergeBundleId],
+  )
 
   // Referentially stable so the memoised layout panel isn't re-rendered by
   // every keystroke in the form around it.
@@ -627,7 +639,8 @@ function ImportWorkbench() {
               Carve it up? (optional)
             </Typography>
             <ImportLayoutPanel
-              importId={staged.id}
+              subjectId={staged.id}
+              planner={planImport}
               // What a layout's coverage is measured against. Lazily, the files
               // in hand are only the folders that have been looked at, which
               // would make the denominator a fact about scrolling — so use the
@@ -638,7 +651,7 @@ function ImportWorkbench() {
               revision={fileRevision}
               unpacking={staged.unpacking}
               target={dest === 'new_model' ? 'model' : 'bundle'}
-              bundleId={dest === 'bundle' ? target?.id : undefined}
+              bundleId={mergeBundleId}
               onPlan={handlePlan}
               onMergeTargets={setMergeTargets}
             />

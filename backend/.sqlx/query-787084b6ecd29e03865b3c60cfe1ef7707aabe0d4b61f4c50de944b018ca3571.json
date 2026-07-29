@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO model_tags (model_id, tag_id)\n             SELECT $1, tag_id FROM model_tags WHERE model_id = $2\n             ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "787084b6ecd29e03865b3c60cfe1ef7707aabe0d4b61f4c50de944b018ca3571"
+}

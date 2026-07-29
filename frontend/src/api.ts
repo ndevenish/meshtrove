@@ -551,8 +551,22 @@ export interface LayoutPlan {
 }
 
 /// One-model imports pool everything into variants; bundle imports split
-/// member models by the model-name capture.
-export type PlanTarget = 'model' | 'bundle'
+/// member models by the model-name capture. `carve` is both at once, for a
+/// model that already exists: files that captured no name stay on it as
+/// variants, files that captured one split out into models of their own.
+export type PlanTarget = 'model' | 'bundle' | 'carve'
+
+/// What a carve did, and so where the page goes next: a bundle when models
+/// split out (it holds every model the carve produced, the carved one
+/// included), the model itself when the carve only re-sorted its variants.
+export interface CarveResult {
+  kind: 'model' | 'bundle'
+  id: string
+  slug: string
+  models_created: number
+  /** variants the carve emptied, and so removed */
+  variants_removed: number
+}
 
 /// The single decision an import exists to defer: what is this archive?
 /// An attached `layout` carves the files into models/variants as it commits.
@@ -930,6 +944,15 @@ export const api = {
       `/api/dropbox?dropbox=${encodeURIComponent(dropbox)}&entry=${encodeURIComponent(entry)}`,
       { method: 'DELETE' },
     ),
+  /** every file a carve can touch: the model's unsorted bucket plus every
+      variant's files, flat and in path order (archives excluded — they are
+      provenance, not parts to sort) */
+  modelCarveFiles: (id: string) => request<FileRecord[]>(`/api/models/${id}/carve/files`),
+  /** Dry-run a carve over a model's own files. Same `analyze` the carve runs. */
+  planModelCarve: (id: string, spec: LayoutSpec, countsOnly?: boolean) =>
+    request<LayoutPlan>(`/api/models/${id}/carve/plan`, json({ ...spec, counts_only: countsOnly })),
+  carveModel: (id: string, spec: LayoutSpec, bundleName?: string) =>
+    request<CarveResult>(`/api/models/${id}/carve`, json({ ...spec, bundle_name: bundleName })),
   importLayouts: () => request<ImportLayout[]>('/api/import-layouts'),
   createImportLayout: (body: { name: string; creator_id?: string | null } & LayoutSpec) =>
     request<ImportLayout>('/api/import-layouts', json(body)),

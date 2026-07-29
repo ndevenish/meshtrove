@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM model_variants v\n         WHERE v.model_id = $1 AND v.name IS NULL AND v.print_notes IS NULL\n           AND NOT EXISTS (SELECT 1 FROM files f WHERE f.variant_id = v.id)\n           AND NOT EXISTS (SELECT 1 FROM images i WHERE i.variant_id = v.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e36b8afcc87648cb20ca87a7afdae4f76a0428441ddafd6aae112653ead3acc2"
+}

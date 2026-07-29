@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bundle_models (bundle_id, model_id)\n             SELECT bm.bundle_id, m FROM bundle_models bm, unnest($2::uuid[]) AS m\n             WHERE bm.model_id = $1\n             ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "18cc6dd34abffde39dd00da0810e6958d9997d83e5a94f2baffd2f53c3141667"
+}

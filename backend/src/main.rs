@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
         .merge(routes::variant_tags::router())
         .merge(routes::browse::router())
         .merge(routes::bundles::router())
+        .merge(routes::carve::router())
         .merge(routes::jobs::router())
         .merge(routes::creators::router())
         .merge(routes::custom_fields::router())

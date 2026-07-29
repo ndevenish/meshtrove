@@ -859,7 +859,9 @@ async fn plan_files(
 
 /// The variant-tag vocabulary, lowercased: a raw capture equal to an existing
 /// tag name resolves without an explicit value-map entry.
-async fn variant_vocab(db: impl sqlx::PgExecutor<'_>) -> Result<HashSet<String>, ApiError> {
+pub(crate) async fn variant_vocab(
+    db: impl sqlx::PgExecutor<'_>,
+) -> Result<HashSet<String>, ApiError> {
     Ok(
         sqlx::query_scalar!(r#"SELECT lower(name::text) as "name!" FROM variant_tags"#)
             .fetch_all(db)
@@ -1541,7 +1543,7 @@ async fn claim_files(
 /// `Bolt.stl` twice *and* a real `Bolt (2).stl` needs a second pass. Each pass
 /// strictly lengthens the names it touches, so this terminates; the bound is
 /// there to make that a fact about the code rather than about the argument.
-async fn disambiguate_filenames(
+pub(crate) async fn disambiguate_filenames(
     tx: &mut sqlx::PgConnection,
     models: &[Uuid],
     bundle: Option<Uuid>,
@@ -1595,15 +1597,15 @@ async fn disambiguate_filenames(
 /// The tag vocabularies a commit pre-resolves up front (name → id, keyed
 /// lowercased), so the per-model carve is map lookups rather than a round trip
 /// per tag.
-struct TagMaps {
-    variant: HashMap<String, Uuid>,
-    model: HashMap<String, Uuid>,
+pub(crate) struct TagMaps {
+    pub(crate) variant: HashMap<String, Uuid>,
+    pub(crate) model: HashMap<String, Uuid>,
 }
 
 /// Get-or-create every `variant_tags` name, returning name (trimmed, lowercased)
 /// → id. `name` is citext, so the map is case-insensitive; trim in Rust so
 /// " 32mm" and "32mm" collapse the way the single-name upsert does.
-async fn upsert_variant_tags_bulk(
+pub(crate) async fn upsert_variant_tags_bulk(
     tx: &mut sqlx::PgConnection,
     names: &[String],
 ) -> Result<HashMap<String, Uuid>, ApiError> {
@@ -1650,7 +1652,7 @@ async fn upsert_variant_tags_bulk(
 }
 
 /// Same, for the model `tags` vocabulary.
-async fn upsert_tags_bulk(
+pub(crate) async fn upsert_tags_bulk(
     tx: &mut sqlx::PgConnection,
     names: &[String],
 ) -> Result<HashMap<String, Uuid>, ApiError> {
@@ -1691,7 +1693,7 @@ async fn upsert_tags_bulk(
 
 /// Where a carve puts files that resolved no variant tags.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Untagged {
+pub(crate) enum Untagged {
     /// Loose in the model's unsorted bucket (variant_id NULL) — a one-model carve.
     UnsortedBucket,
     /// The model's anonymous variant (empty tag set) — a bundle carve.
@@ -1710,7 +1712,7 @@ enum Untagged {
 /// to the same tag set are folded together (two would otherwise collide on the
 /// deferred `UNIQUE (model_id, tag_key)`), and for an existing member its
 /// current variants are read once so a matching set reuses that variant.
-async fn carve_variants(
+pub(crate) async fn carve_variants(
     tx: &mut sqlx::PgConnection,
     model_id: Uuid,
     variants: &[PlanVariant],
@@ -1829,9 +1831,14 @@ async fn carve_variants(
         .execute(&mut *tx)
         .await?;
     }
+    // A file has exactly one owner, so each move sets its new one and clears
+    // every other column — the source may be a staged import (the commit path)
+    // or the model/variant the file already sat on (re-carving a model), and the
+    // CHECK constraint refuses to hold both at once.
     if !move_files.is_empty() {
         sqlx::query!(
-            "UPDATE files SET variant_id = d.vid, import_id = NULL
+            "UPDATE files SET variant_id = d.vid, model_id = NULL, bundle_id = NULL,
+                              import_id = NULL
              FROM (SELECT unnest($1::uuid[]) AS fid, unnest($2::uuid[]) AS vid) d
              WHERE files.id = d.fid",
             &move_files,
@@ -1842,7 +1849,9 @@ async fn carve_variants(
     }
     if !unsorted_files.is_empty() {
         sqlx::query!(
-            "UPDATE files SET model_id = $1, import_id = NULL WHERE id = ANY($2::uuid[])",
+            "UPDATE files SET model_id = $1, variant_id = NULL, bundle_id = NULL,
+                              import_id = NULL
+             WHERE id = ANY($2::uuid[])",
             model_id,
             &unsorted_files,
         )
@@ -2044,7 +2053,7 @@ fn mapped_ids(names: &[String], map: &HashMap<String, Uuid>) -> Vec<Uuid> {
 /// Additive model tagging — a carve never removes tags a model already has.
 /// Names are pre-resolved via `tag_ids` (see [`upsert_tags_bulk`]), so this is
 /// one insert regardless of how many tags the model carries.
-async fn add_model_tags(
+pub(crate) async fn add_model_tags(
     tx: &mut sqlx::PgConnection,
     model_id: Uuid,
     names: &[String],
@@ -2187,7 +2196,7 @@ async fn carve_into_bundle(
 /// aware of slugs this same carve has claimed but not yet made visible. Member
 /// models get the same `name-token` shape as any other, so a later rename can
 /// carry the token over.
-async fn unique_member_slug(
+pub(crate) async fn unique_member_slug(
     tx: &mut sqlx::PgConnection,
     name: &str,
     reserved: &mut HashSet<String>,

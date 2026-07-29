@@ -127,14 +127,21 @@ pub struct LayoutSpec {
 }
 
 /// Whether the carve targets one model (variants only; model-name captures
-/// just suggest the name) or a bundle (model-name captures split member
-/// models).
+/// just suggest the name), a bundle (model-name captures split member models),
+/// or an existing model being carved up (both at once — see [`CarveTarget::Carve`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CarveTarget {
     Model,
     #[default]
     Bundle,
+    /// Re-carving a model that already exists. A file that captured no model
+    /// name stays where it is — on the model being carved, sorted into the
+    /// variant its tags describe — while a file that *did* capture one is a
+    /// piece that was never this model at all and splits out into its own.
+    /// So the plan holds at most one unnamed model (name `""`, the model being
+    /// carved) alongside a named model per captured name.
+    Carve,
 }
 
 /// A file to be planned. `path`/`filename` as stored on the `files` row.
@@ -718,19 +725,27 @@ pub fn analyze(
 
         // Group into the carve tree. Under a one-model target everything
         // matched lands on the single model; under a bundle target a file
-        // needs a model name to be carvable.
+        // needs a model name to be carvable. Carving an existing model takes
+        // both halves of that: a name splits the file out into a model of its
+        // own, and no name keeps it on the model being carved (the `""` key).
+        let named_key = || {
+            model_name
+                .as_ref()
+                .map(|n| (fold(n), model_tags.iter().map(|t| fold(t)).collect()))
+        };
         let key = match target {
             CarveTarget::Model => Some((String::new(), Vec::new())),
-            CarveTarget::Bundle => model_name
-                .as_ref()
-                .map(|n| (fold(n), model_tags.iter().map(|t| fold(t)).collect())),
+            CarveTarget::Bundle => named_key(),
+            CarveTarget::Carve => named_key().or(Some((String::new(), Vec::new()))),
         };
         if let Some(key) = key {
             carved += 1;
             let acc = models.entry(key).or_insert_with(|| ModelAcc {
                 name: match target {
                     CarveTarget::Model => String::new(),
-                    CarveTarget::Bundle => model_name.clone().unwrap_or_default(),
+                    CarveTarget::Bundle | CarveTarget::Carve => {
+                        model_name.clone().unwrap_or_default()
+                    }
                 },
                 creator_ref: None,
                 model_version: None,
@@ -1222,6 +1237,63 @@ mod tests {
         // the caller can see this is really a bundle.
         assert_eq!(plan.models[0].name, "");
         assert_eq!(plan.model_names, vec!["Gold", "Sanjay"]);
+    }
+
+    #[test]
+    fn carving_splits_named_files_out_and_keeps_unnamed_ones_home() {
+        // The two halves of a carve in one plan: `Extras/` captures no name, so
+        // its files stay on the model being carved (the `""` model) as a 32mm
+        // variant; `Gold/` and `Sanjay/` each capture one, so each becomes a
+        // model of its own.
+        let spec = spec_of(vec![
+            rule(r"^Parts/([^/]+)/", &[("1", Role::ModelName)]),
+            rule(r"/(\d+mm)/", &[("1", Role::VariantTag)]),
+        ]);
+        let files = vec![
+            file(1, "Extras/32mm", "base.stl"),
+            file(2, "Parts/Gold/32mm", "gold.stl"),
+            file(3, "Parts/Sanjay/75mm", "sanjay.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Carve, &files, &vocab()).unwrap();
+        assert_eq!(plan.carved, 3, "every matched file is placed somewhere");
+        let mut names: Vec<&str> = plan.models.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["", "Gold", "Sanjay"]);
+        let home = plan
+            .models
+            .iter()
+            .find(|m| m.name.is_empty())
+            .expect("home");
+        assert_eq!(home.file_count, 1);
+        assert_eq!(home.variants[0].tags, vec!["32mm"]);
+    }
+
+    #[test]
+    fn carving_with_no_name_group_is_a_pure_variant_split() {
+        // No model-name role anywhere: nothing can split out, so every matched
+        // file stays on the one model and only its variants change.
+        let spec = spec_of(vec![rule(r"/(\d+mm)/", &[("1", Role::VariantTag)])]);
+        let files = vec![
+            file(1, "Gold/32mm", "a.stl"),
+            file(2, "Gold/75mm", "b.stl"),
+            file(3, "Gold", "readme.txt"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Carve, &files, &vocab()).unwrap();
+        assert_eq!(plan.models.len(), 1);
+        assert_eq!(plan.models[0].name, "");
+        let mut sets: Vec<Vec<String>> = plan.models[0]
+            .variants
+            .iter()
+            .map(|v| v.tags.clone())
+            .collect();
+        sets.sort();
+        assert_eq!(
+            sets,
+            vec![vec!["32mm".to_string()], vec!["75mm".to_string()]]
+        );
+        // The unmatched file is left alone — it is not swept into a variant.
+        assert_eq!(plan.matched, 2);
+        assert!(!plan.annotations[2].matched);
     }
 
     #[test]
