@@ -23,8 +23,23 @@
 //! bundle, and if the original already belonged to a bundle the new models join
 //! that one too. That is why the page redirects to the bundle when anything
 //! split, and back to the model when nothing did.
+//!
+//! # Carving a whole bundle
+//!
+//! A bundle is usually one purchase that arrived as one tree, so its members
+//! share a naming scheme — and a mistake in how it was read is a mistake on
+//! every one of them. `/api/bundles/{id}/carve` runs **one** layout over every
+//! member: each member is carved exactly as it would be on its own, and because
+//! a split model inherits the subject's bundle memberships, the pieces land in
+//! the bundle already being carved rather than in a new one per member.
+//!
+//! The preview is the members' plans merged into one (see `merge_plans`), which
+//! is honest about the two ways a bundle-wide plan differs from a single
+//! model's: every member's own share reads as one "this model" row, and two
+//! members that both capture the name "Head" list as two rows, because that is
+//! two new models.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use axum::{
     Json, Router,
@@ -44,7 +59,7 @@ use crate::routes::imports::{
     upsert_tags_bulk, upsert_variant_tags_bulk, variant_vocab,
 };
 use crate::routes::{bundles, models};
-use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan};
+use crate::services::layout::{self, CarveTarget, LayoutSpec, Plan, PlanModel};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -52,6 +67,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/models/{id}/carve/files", get(carve_files))
         .route("/api/models/{id}/carve/plan", post(plan))
         .route("/api/models/{id}/carve", post(carve))
+        .route("/api/bundles/{id}/carve/files", get(bundle_carve_files))
+        .route("/api/bundles/{id}/carve/plan", post(plan_bundle))
+        .route("/api/bundles/{id}/carve", post(carve_bundle))
 }
 
 /// Everything a carve can touch: the model's unsorted bucket plus every file of
@@ -66,9 +84,14 @@ async fn model_carve_files(
     db: impl sqlx::PgExecutor<'_>,
     model_id: Uuid,
 ) -> Result<Vec<FileRow>, ApiError> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as!(
+        CarveFileRow,
+        // `!`: computed columns, and the model id is only NULL-able because the
+        // owner may be the variant instead (see the coalesce).
         r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
-                  f.kind as "kind: FileKind", f.created_at, b.size
+                  f.kind as "kind: FileKind", f.created_at, b.size,
+                  coalesce(f.model_id, v.model_id) as "model_id!",
+                  (f.variant_id IS NOT NULL) as "in_variant!"
            FROM files f
            JOIN blobs b ON b.sha256 = f.blob_sha256
            LEFT JOIN model_variants v ON v.id = f.variant_id
@@ -79,9 +102,65 @@ async fn model_carve_files(
     )
     .fetch_all(db)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| FileRow {
+    Ok(rows.into_iter().map(FileRow::from).collect())
+}
+
+/// Every carveable file of every member of a bundle, in one query — the same
+/// per-model list, unioned. Grouped by member before it reaches the layout: the
+/// rules match on the path a file has *on its own model*, so a bundle-wide carve
+/// is a per-member carve run several times, never one carve over a merged tree.
+async fn bundle_member_files(
+    db: impl sqlx::PgExecutor<'_>,
+    bundle_id: Uuid,
+) -> Result<Vec<FileRow>, ApiError> {
+    let rows = sqlx::query_as!(
+        CarveFileRow,
+        r#"SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,
+                  f.kind as "kind: FileKind", f.created_at, b.size,
+                  coalesce(f.model_id, v.model_id) as "model_id!",
+                  (f.variant_id IS NOT NULL) as "in_variant!"
+           FROM files f
+           JOIN blobs b ON b.sha256 = f.blob_sha256
+           LEFT JOIN model_variants v ON v.id = f.variant_id
+           WHERE coalesce(f.model_id, v.model_id) IN
+                     (SELECT model_id FROM bundle_models WHERE bundle_id = $1)
+             AND f.kind <> 'archive'::file_kind
+           ORDER BY f.path, f.filename"#,
+        bundle_id,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(FileRow::from).collect())
+}
+
+/// The columns both carve-file queries select — named so the two share one
+/// mapping into [`FileRow`] rather than each growing its own copy.
+struct CarveFileRow {
+    id: Uuid,
+    blob_sha256: String,
+    path: String,
+    filename: String,
+    mime: Option<String>,
+    kind: FileKind,
+    created_at: chrono::DateTime<chrono::Utc>,
+    size: i64,
+    model_id: Uuid,
+    in_variant: bool,
+}
+
+/// One carveable file, in both the shapes this module needs: what the page
+/// lists, and what the layout matches on.
+struct FileRow {
+    /// The model holding it — its own, or its variant's.
+    model_id: Uuid,
+    record: FileRecord,
+    plan: layout::PlanFile,
+}
+
+impl From<CarveFileRow> for FileRow {
+    fn from(r: CarveFileRow) -> Self {
+        FileRow {
+            model_id: r.model_id,
             record: FileRecord {
                 id: r.id,
                 blob_sha256: r.blob_sha256,
@@ -97,16 +176,20 @@ async fn model_carve_files(
                 id: r.id,
                 path: r.path,
                 filename: r.filename,
+                in_variant: r.in_variant,
             },
-        })
-        .collect())
+        }
+    }
 }
 
-/// One carveable file, in both the shapes this module needs: what the page
-/// lists, and what the layout matches on.
-struct FileRow {
-    record: FileRecord,
-    plan: layout::PlanFile,
+/// Split the flat list into the per-model lists the layout is run over, keeping
+/// each one in the path order the query produced.
+fn by_model(files: Vec<FileRow>) -> BTreeMap<Uuid, Vec<layout::PlanFile>> {
+    let mut out: BTreeMap<Uuid, Vec<layout::PlanFile>> = BTreeMap::new();
+    for file in files {
+        out.entry(file.model_id).or_default().push(file.plan);
+    }
+    out
 }
 
 async fn carve_files(
@@ -116,6 +199,16 @@ async fn carve_files(
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
     let id = models::resolve_id(&state, &key).await?;
     let files = model_carve_files(&state.db, id).await?;
+    Ok(Json(files.into_iter().map(|f| f.record).collect()))
+}
+
+async fn bundle_carve_files(
+    State(state): State<AppState>,
+    _user: User,
+    Path(key): Path<String>,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    let id = bundles::resolve_id(&state, &key).await?;
+    let files = bundle_member_files(&state.db, id).await?;
     Ok(Json(files.into_iter().map(|f| f.record).collect()))
 }
 
@@ -153,6 +246,24 @@ async fn fetch_subject(state: &AppState, key: &str) -> Result<Subject, ApiError>
     })
 }
 
+/// Every member of a bundle, as carve subjects in name order — what a
+/// bundle-wide carve runs over, and the order its members are carved in.
+async fn bundle_subjects(
+    db: impl sqlx::PgExecutor<'_>,
+    bundle_id: Uuid,
+) -> Result<Vec<Subject>, ApiError> {
+    Ok(sqlx::query_as!(
+        Subject,
+        "SELECT m.id, m.name, m.slug, m.created_by, m.creator_id, m.creator_ref, m.model_version
+         FROM models m JOIN bundle_models bm ON bm.model_id = m.id
+         WHERE bm.bundle_id = $1
+         ORDER BY m.name",
+        bundle_id,
+    )
+    .fetch_all(db)
+    .await?)
+}
+
 // ---------------------------------------------------------------------------
 // plan: dry-run a layout over the model's own files
 // ---------------------------------------------------------------------------
@@ -180,13 +291,148 @@ async fn plan(
     let files = model_carve_files(&state.db, subject.id).await?;
     let vocab = variant_vocab(&state.db).await?;
     let plan_files: Vec<layout::PlanFile> = files.into_iter().map(|f| f.plan).collect();
-    let mut plan = layout::analyze(&request.spec, CarveTarget::Carve, &plan_files, &vocab)?;
-    if request.counts_only {
+    let plan = layout::analyze(&request.spec, CarveTarget::Carve, &plan_files, &vocab)?;
+    Ok(Json(strip(plan, request.counts_only)))
+}
+
+/// Preview a bundle-wide carve: one plan per member, merged. The members are
+/// planned separately for the same reason they are carved separately — the rules
+/// match on the path a file has on its own model — and merged so the page can
+/// show one preview of what pressing the button does.
+async fn plan_bundle(
+    State(state): State<AppState>,
+    user: User,
+    Path(key): Path<String>,
+    Json(request): Json<PlanRequest>,
+) -> Result<Json<Plan>, ApiError> {
+    let bundle_id = bundles::resolve_id(&state, &key).await?;
+    user.require_can_edit(bundles::bundle_created_by(&state, bundle_id).await?)?;
+    let vocab = variant_vocab(&state.db).await?;
+    let files = by_model(bundle_member_files(&state.db, bundle_id).await?);
+    let mut plans = Vec::with_capacity(files.len());
+    for member_files in files.values() {
+        plans.push(layout::analyze(
+            &request.spec,
+            CarveTarget::Carve,
+            member_files,
+            &vocab,
+        )?);
+    }
+    Ok(Json(strip(merge_plans(plans), request.counts_only)))
+}
+
+/// Drop everything the coverage ranking doesn't read. The annotations are the
+/// whole weight of a plan — one entry per file — and the picker dry-runs every
+/// saved layout just to compare their match counts.
+fn strip(mut plan: Plan, counts_only: bool) -> Plan {
+    if counts_only {
         plan.annotations = Vec::new();
         plan.models = Vec::new();
         plan.model_names = Vec::new();
     }
-    Ok(Json(plan))
+    plan
+}
+
+/// Fold the members' plans into the one the page draws.
+///
+/// Two things are deliberately *not* merged. Every member's own share (the
+/// unnamed model) collapses into a single row — thirty members would otherwise
+/// list thirty identical "this model" entries — while two members that both
+/// capture the name "Head" stay two rows, because the carve really does make two
+/// models. Files keep their own annotations either way, so the file list is
+/// exactly the union of what each member's rules saw.
+fn merge_plans(plans: Vec<Plan>) -> Plan {
+    let mut out = Plan {
+        total: 0,
+        matched: 0,
+        carved: 0,
+        rules: Vec::new(),
+        models: Vec::new(),
+        model_names: Vec::new(),
+        annotations: Vec::new(),
+        members: Vec::new(),
+        model_tag_order: Vec::new(),
+    };
+    let mut home: Option<PlanModel> = None;
+    for plan in plans {
+        out.total += plan.total;
+        out.matched += plan.matched;
+        out.carved += plan.carved;
+        out.annotations.extend(plan.annotations);
+        for name in plan.model_names {
+            if !out.model_names.contains(&name) {
+                out.model_names.push(name);
+            }
+        }
+        for tag in plan.model_tag_order {
+            if !out.model_tag_order.contains(&tag) {
+                out.model_tag_order.push(tag);
+            }
+        }
+        for model in plan.models {
+            if !model.name.is_empty() {
+                out.models.push(model);
+            } else if let Some(home) = &mut home {
+                merge_home(home, model);
+            } else {
+                home = Some(model);
+            }
+        }
+        // Every member ran the same spec, so the rule blocks are index-aligned:
+        // what differs is which examples and which raw values each member's files
+        // happened to show. The editor needs the union — a value only member 12
+        // captures still has to appear in the mapping table, or the carve refuses
+        // on an unmapped value the page never offered.
+        if out.rules.is_empty() {
+            out.rules = plan.rules;
+            continue;
+        }
+        for (into, from) in out.rules.iter_mut().zip(plan.rules) {
+            for (group, from_group) in into.groups.iter_mut().zip(from.groups) {
+                for example in from_group.examples {
+                    if group.examples.len() < 3 && !group.examples.contains(&example) {
+                        group.examples.push(example);
+                    }
+                }
+            }
+            for value in from.values {
+                if !into.values.iter().any(|v| v.raw == value.raw) {
+                    into.values.push(value);
+                }
+            }
+        }
+    }
+    // `analyze` emits each rule's values in canonical order; keep that after the
+    // merge so the mapping table doesn't reshuffle as the plans arrive.
+    for rule in &mut out.rules {
+        rule.values.sort_by_key(|v| v.raw.to_lowercase());
+    }
+    // The members' own share leads the list, as it does on a single model.
+    if let Some(home) = home {
+        out.models.insert(0, home);
+    }
+    out
+}
+
+/// Add one member's own share to the collapsed "stays on the member it is
+/// already on" row, folding variants that resolved the same tag set.
+fn merge_home(into: &mut PlanModel, from: PlanModel) {
+    into.file_count += from.file_count;
+    for tag in from.tags {
+        if !into.tags.contains(&tag) {
+            into.tags.push(tag);
+        }
+    }
+    for variant in from.variants {
+        // `analyze` sorts a variant's tags, so set equality is list equality.
+        match into.variants.iter_mut().find(|v| v.tags == variant.tags) {
+            Some(existing) => {
+                existing.file_count += variant.file_count;
+                existing.files.extend(variant.files);
+            }
+            None => into.variants.push(variant),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,23 +464,40 @@ pub struct CarveResult {
     pub variants_removed: usize,
 }
 
-async fn carve(
-    State(state): State<AppState>,
-    user: User,
-    Path(key): Path<String>,
-    Json(input): Json<CarveInput>,
-) -> Result<Json<CarveResult>, ApiError> {
-    let subject = fetch_subject(&state, &key).await?;
-    user.require_can_edit(subject.created_by)?;
+/// What carving one model did.
+#[derive(Default)]
+struct CarveOutcome {
+    /// Files the layout placed. Zero means the rules recognised nothing on this
+    /// model and nothing was written.
+    carved: usize,
+    /// Models that split out of it.
+    created: Vec<Uuid>,
+    /// Variants the carve left holding nothing, and so removed.
+    variants_removed: usize,
+}
 
-    let mut tx = state.db.begin().await?;
-
+/// Carve one model, inside an open transaction: dry-run the layout over its own
+/// files, re-sort what stays into variants, split out what named itself, apply
+/// the path rewrites, and drop the variants the carve emptied.
+///
+/// The models it produced are handed back rather than filed anywhere, because
+/// where they go is the caller's question: a lone carve gathers them into a new
+/// bundle of their own, while a bundle-wide carve already has the bundle they
+/// belong in. They do inherit the subject's *existing* bundle memberships here,
+/// since that holds either way — carving a member must not drop its pieces out of
+/// the bundle it was part of.
+async fn carve_one(
+    tx: &mut sqlx::PgConnection,
+    subject: &Subject,
+    spec: &LayoutSpec,
+    user: &User,
+) -> Result<CarveOutcome, ApiError> {
     // Dry-run first, inside the transaction: a bad pattern or an unmapped value
     // must fail before anything moves.
     let files = model_carve_files(&mut *tx, subject.id).await?;
     let vocab = variant_vocab(&mut *tx).await?;
     let plan_files: Vec<layout::PlanFile> = files.into_iter().map(|f| f.plan).collect();
-    let plan = layout::analyze(&input.spec, CarveTarget::Carve, &plan_files, &vocab)?;
+    let plan = layout::analyze(spec, CarveTarget::Carve, &plan_files, &vocab)?;
     let unmapped = plan.unmapped_values();
     if !unmapped.is_empty() {
         return Err(ApiError::BadRequest(format!(
@@ -242,10 +505,12 @@ async fn carve(
             unmapped.join(", ")
         )));
     }
+    // Nothing for this layout to do here. Not an error at this level: a
+    // bundle-wide carve runs one set of rules over every member, and a member
+    // they don't recognise is simply left alone. The lone-model endpoint refuses
+    // outright instead — there, this *is* the whole operation.
     if plan.carved == 0 {
-        return Err(ApiError::BadRequest(
-            "no file matches this layout — there is nothing to carve".into(),
-        ));
+        return Ok(CarveOutcome::default());
     }
 
     // Resolve every tag name up front, one bulk upsert per vocabulary, so the
@@ -259,8 +524,8 @@ async fn carve(
         }
     }
     let tags = TagMaps {
-        variant: upsert_variant_tags_bulk(&mut tx, &vtag_names).await?,
-        model: upsert_tags_bulk(&mut tx, &mtag_names).await?,
+        variant: upsert_variant_tags_bulk(&mut *tx, &vtag_names).await?,
+        model: upsert_tags_bulk(&mut *tx, &mtag_names).await?,
     };
 
     // The unnamed planned model is this model's own share of the carve; every
@@ -273,7 +538,7 @@ async fn carve(
         .collect::<Vec<_>>();
 
     if let Some(home) = home {
-        add_model_tags(&mut tx, subject.id, &home.tags, &tags.model).await?;
+        add_model_tags(&mut *tx, subject.id, &home.tags, &tags.model).await?;
         // A creator id or version the layout read off this model's own files is
         // about this model — but only fills a blank, since what is already on
         // the model was put there deliberately.
@@ -295,7 +560,7 @@ async fn carve(
         // variant *is* the model's plain bucket of files, as a first-class
         // sibling of the tagged ones rather than as leftovers.
         carve_variants(
-            &mut tx,
+            &mut *tx,
             subject.id,
             &home.variants,
             user.id,
@@ -311,13 +576,13 @@ async fn carve(
     let inherited_values = if splits.is_empty() {
         Vec::new()
     } else {
-        custom_fields::values_of(&mut tx, ValueOwner::Model(subject.id)).await?
+        custom_fields::values_of(&mut *tx, ValueOwner::Model(subject.id)).await?
     };
 
     let mut reserved_slugs: HashSet<String> = HashSet::new();
     let mut created: Vec<Uuid> = Vec::new();
     for planned in &splits {
-        let slug = unique_member_slug(&mut tx, &planned.name, &mut reserved_slugs).await?;
+        let slug = unique_member_slug(&mut *tx, &planned.name, &mut reserved_slugs).await?;
         // Everything about *where this came from* carries over: it was bought
         // once, from one creator, on one order, and splitting it up doesn't
         // change any of that. Only the creator's own id and version come from
@@ -350,17 +615,17 @@ async fn carve(
         )
         .execute(&mut *tx)
         .await?;
-        add_model_tags(&mut tx, model_id, &planned.tags, &tags.model).await?;
+        add_model_tags(&mut *tx, model_id, &planned.tags, &tags.model).await?;
         custom_fields::copy_values_onto(
-            &mut tx,
+            &mut *tx,
             &inherited_values,
             ValueOwner::Model(model_id),
             |_| true,
-            &user,
+            user,
         )
         .await?;
         carve_variants(
-            &mut tx,
+            &mut *tx,
             model_id,
             &planned.variants,
             user.id,
@@ -382,7 +647,7 @@ async fn carve(
         .filter(|a| a.matched)
         .map(|a| a.id)
         .collect();
-    if input.spec.flatten && !claimed.is_empty() {
+    if spec.flatten && !claimed.is_empty() {
         sqlx::query!(
             "UPDATE files SET path = '' WHERE id = ANY($1::uuid[])",
             &claimed,
@@ -415,20 +680,11 @@ async fn carve(
     .await?
     .rows_affected() as usize;
 
-    // Split models are pieces of one thing, so they are kept together as one:
-    // a bundle over every model this carve produced, the original included.
-    let mut result = CarveResult {
-        kind: "model".into(),
-        id: subject.id,
-        slug: subject.slug.clone(),
-        models_created: created.len(),
-        variants_removed,
-    };
+    // Wherever the subject already belonged, its pieces belong too — otherwise
+    // carving a bundle's member quietly drops most of it out of that bundle. This
+    // is also the whole of a bundle-wide carve's filing: the members are already
+    // in the bundle, so the pieces join it here.
     if !created.is_empty() {
-        // Wherever the original already belonged, its pieces belong too —
-        // otherwise carving a bundle's member quietly drops most of it out of
-        // that bundle. Done before the new bundle is made, so the new one isn't
-        // in the list.
         sqlx::query!(
             "INSERT INTO bundle_models (bundle_id, model_id)
              SELECT bm.bundle_id, m FROM bundle_models bm, unnest($2::uuid[]) AS m
@@ -439,7 +695,60 @@ async fn carve(
         )
         .execute(&mut *tx)
         .await?;
+    }
 
+    // Both path rewrites above are blind — a flatten sends every claimed file to
+    // `''` — so two files told apart only by their folder can now agree on
+    // (owner, path, filename). Settle that last, over every model the carve
+    // touched, once nothing else is moving.
+    let touched: Vec<Uuid> = created
+        .iter()
+        .copied()
+        .chain(std::iter::once(subject.id))
+        .collect();
+    disambiguate_filenames(&mut *tx, &touched, None).await?;
+
+    sqlx::query!(
+        "UPDATE models SET updated_at = now() WHERE id = ANY($1::uuid[])",
+        &touched,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    Ok(CarveOutcome {
+        carved: plan.carved,
+        created,
+        variants_removed,
+    })
+}
+
+async fn carve(
+    State(state): State<AppState>,
+    user: User,
+    Path(key): Path<String>,
+    Json(input): Json<CarveInput>,
+) -> Result<Json<CarveResult>, ApiError> {
+    let subject = fetch_subject(&state, &key).await?;
+    user.require_can_edit(subject.created_by)?;
+
+    let mut tx = state.db.begin().await?;
+    let outcome = carve_one(&mut tx, &subject, &input.spec, &user).await?;
+    if outcome.carved == 0 {
+        return Err(ApiError::BadRequest(
+            "no file matches this layout — there is nothing to carve".into(),
+        ));
+    }
+
+    // Split models are pieces of one thing, so they are kept together as one:
+    // a bundle over every model this carve produced, the original included.
+    let mut result = CarveResult {
+        kind: "model".into(),
+        id: subject.id,
+        slug: subject.slug.clone(),
+        models_created: outcome.created.len(),
+        variants_removed: outcome.variants_removed,
+    };
+    if !outcome.created.is_empty() {
         let bundle_name = input
             .bundle_name
             .as_deref()
@@ -464,7 +773,8 @@ async fn carve(
             "INSERT INTO bundle_models (bundle_id, model_id)
              SELECT $1, m FROM unnest($2::uuid[]) AS m",
             bundle_id,
-            &created
+            &outcome
+                .created
                 .iter()
                 .copied()
                 .chain(std::iter::once(subject.id))
@@ -480,39 +790,108 @@ async fn carve(
         };
     }
 
-    // Both path rewrites above are blind — a flatten sends every claimed file to
-    // `''` — so two files told apart only by their folder can now agree on
-    // (owner, path, filename). Settle that last, over every model the carve
-    // touched, once nothing else is moving.
-    let touched: Vec<Uuid> = created
-        .iter()
-        .copied()
-        .chain(std::iter::once(subject.id))
-        .collect();
-    disambiguate_filenames(&mut tx, &touched, None).await?;
-
-    sqlx::query!(
-        "UPDATE models SET updated_at = now() WHERE id = ANY($1::uuid[])",
-        &touched,
-    )
-    .execute(&mut *tx)
-    .await?;
-
     tx.commit().await?;
 
     // A split model has no picture of its own yet — the original's images stayed
     // with the original. Render one per variant, from the STL with the shortest
     // filename, exactly as the import commit does.
-    for model_id in &created {
+    for model_id in &outcome.created {
         enqueue_previews(&state, *model_id).await?;
     }
 
     tracing::info!(
         model = %subject.id,
-        created = created.len(),
-        variants_removed,
+        created = outcome.created.len(),
+        variants_removed = outcome.variants_removed,
         into = %result.kind,
         "carved a model",
+    );
+    Ok(Json(result))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BundleCarveResult {
+    /// Members the layout actually moved files on. The rest matched nothing and
+    /// were left untouched — not an error: one layout over a whole bundle is
+    /// expected to have nothing to say about some of it.
+    pub members_carved: usize,
+    /// New member models split out, across every member.
+    pub models_created: usize,
+    /// Variants the carve left holding nothing, and so removed.
+    pub variants_removed: usize,
+}
+
+/// Carve every member of a bundle with one layout.
+///
+/// One transaction over the lot: the members share a naming scheme, so a layout
+/// that turns out to be wrong is wrong about all of them, and half-carving a
+/// bundle would leave a mess with no undo. Everything the members produce joins
+/// this bundle (see [`carve_one`]) rather than making a bundle per member.
+async fn carve_bundle(
+    State(state): State<AppState>,
+    user: User,
+    Path(key): Path<String>,
+    Json(spec): Json<LayoutSpec>,
+) -> Result<Json<BundleCarveResult>, ApiError> {
+    let bundle_id = bundles::resolve_id(&state, &key).await?;
+    user.require_can_edit(bundles::bundle_created_by(&state, bundle_id).await?)?;
+
+    let mut tx = state.db.begin().await?;
+    let subjects = bundle_subjects(&mut *tx, bundle_id).await?;
+    if subjects.is_empty() {
+        return Err(ApiError::BadRequest(
+            "this bundle has no member models to carve".into(),
+        ));
+    }
+    // Owning the bundle is not owning its members: an editor who may edit the
+    // crate may still not edit everything in it, and a carve rewrites the members
+    // themselves. Checked before anything is written, so a bundle with one
+    // untouchable member fails loudly rather than being carved most of the way.
+    for subject in &subjects {
+        user.require_can_edit(subject.created_by)?;
+    }
+
+    let mut result = BundleCarveResult {
+        members_carved: 0,
+        models_created: 0,
+        variants_removed: 0,
+    };
+    let mut created: Vec<Uuid> = Vec::new();
+    for subject in &subjects {
+        let outcome = carve_one(&mut tx, subject, &spec, &user).await?;
+        if outcome.carved == 0 {
+            continue;
+        }
+        result.members_carved += 1;
+        result.variants_removed += outcome.variants_removed;
+        created.extend(outcome.created);
+    }
+    if result.members_carved == 0 {
+        return Err(ApiError::BadRequest(
+            "no file on any member matches this layout — there is nothing to carve".into(),
+        ));
+    }
+    result.models_created = created.len();
+
+    sqlx::query!(
+        "UPDATE bundles SET updated_at = now() WHERE id = $1",
+        bundle_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    for model_id in &created {
+        enqueue_previews(&state, *model_id).await?;
+    }
+
+    tracing::info!(
+        bundle = %bundle_id,
+        members = subjects.len(),
+        carved = result.members_carved,
+        created = result.models_created,
+        variants_removed = result.variants_removed,
+        "carved a bundle's members",
     );
     Ok(Json(result))
 }

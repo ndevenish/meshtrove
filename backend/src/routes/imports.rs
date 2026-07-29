@@ -853,6 +853,9 @@ async fn plan_files(
             id: r.id,
             path: r.path,
             filename: r.filename,
+            // A staged file belongs to the import, not to any variant — there is
+            // nothing for `sweep_unmatched` to protect here.
+            in_variant: false,
         })
         .collect())
 }

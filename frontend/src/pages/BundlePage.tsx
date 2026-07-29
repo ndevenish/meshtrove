@@ -1,5 +1,5 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Autocomplete,
   Container,
@@ -29,6 +29,7 @@ import RemoveCircleIcon from '@mui/icons-material/RemoveCircle'
 import DragHandleIcon from '@mui/icons-material/DragHandle'
 import CloseIcon from '@mui/icons-material/Close'
 import CallSplitIcon from '@mui/icons-material/CallSplit'
+import ContentCutIcon from '@mui/icons-material/ContentCut'
 import MergeIcon from '@mui/icons-material/Merge'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -368,6 +369,18 @@ export default function BundlePage() {
                   sx={{ whiteSpace: 'nowrap' }}
                 >
                   Tag all models
+                </Button>
+                {/* The members of one purchase share a naming scheme, so they
+                    share the mistakes in how it was read: one layout, every
+                    member. Its own page — the rule workbench wants the width. */}
+                <Button
+                  component={Link}
+                  to={`/bundles/${bundle.slug}/carve`}
+                  startIcon={<ContentCutIcon />}
+                  disabled={saving || bundle.models.length === 0}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Carve members…
                 </Button>
                 <Button
                   variant="contained"

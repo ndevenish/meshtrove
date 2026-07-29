@@ -11,6 +11,7 @@ import AppShell from './components/AppShell'
 import BrowsePage from './pages/BrowsePage'
 import ModelPage from './pages/ModelPage'
 import CarvePage from './pages/CarvePage'
+import BundleCarvePage from './pages/BundleCarvePage'
 import BundlePage from './pages/BundlePage'
 import LikesPage from './pages/LikesPage'
 import ImportsPage from './pages/ImportsPage'
@@ -86,6 +87,7 @@ function App() {
               <Route path="/models/:id" element={<ModelPage />} />
               <Route path="/models/:id/carve" element={<CarvePage />} />
               <Route path="/bundles/:id" element={<BundlePage />} />
+              <Route path="/bundles/:id/carve" element={<BundleCarvePage />} />
               <Route path="/likes" element={<LikesPage />} />
               <Route path="/imports" element={<ImportsPage />} />
               <Route path="/imports/:id" element={<ImportPage />} />

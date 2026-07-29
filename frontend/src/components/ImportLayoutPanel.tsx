@@ -105,6 +105,7 @@ export default memo(function ImportLayoutPanel({
   unpacking,
   target,
   bundleId,
+  homeLabel = 'This model',
   onPlan,
   onMergeTargets,
 }: {
@@ -129,6 +130,11 @@ export default memo(function ImportLayoutPanel({
   /** merging into this existing bundle: the plan then reports which member each
       planned model would land on, and the panel offers a retarget dropdown */
   bundleId?: string
+  /** what to call the planned model that captured no name — the files that stay
+      where they are. "This model" is right when the subject *is* one model; a
+      bundle-wide carve merges every member's own share into that one row, and
+      calling it "this model" there names a model that doesn't exist. */
+  homeLabel?: string
   onPlan: (spec: LayoutSpec | null, plan: LayoutPlan | null) => void
   /** the resolved per-model merge choices, index-aligned to the plan's models
       (a member id or null=new); null when there's no existing bundle to merge
@@ -740,7 +746,7 @@ export default memo(function ImportLayoutPanel({
                   >
                     <ViewInArIcon sx={{ fontSize: 16, opacity: 0.6 }} />
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      {model.name || 'This model'}
+                      {model.name || homeLabel}
                     </Typography>
                     {model.tags.map((tag) => (
                       <Chip

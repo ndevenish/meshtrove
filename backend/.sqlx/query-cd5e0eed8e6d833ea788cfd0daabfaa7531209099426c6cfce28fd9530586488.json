@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.id, m.name, m.slug, m.created_by, m.creator_id, m.creator_ref, m.model_version\n         FROM models m JOIN bundle_models bm ON bm.model_id = m.id\n         WHERE bm.bundle_id = $1\n         ORDER BY m.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "slug",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_by",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "created_by"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "creator_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "creator_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "creator_ref",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "creator_ref"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "model_version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "cd5e0eed8e6d833ea788cfd0daabfaa7531209099426c6cfce28fd9530586488"
+}

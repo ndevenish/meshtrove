@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,\n                  f.kind as \"kind: FileKind\", f.created_at, b.size\n           FROM files f\n           JOIN blobs b ON b.sha256 = f.blob_sha256\n           LEFT JOIN model_variants v ON v.id = f.variant_id\n           WHERE (f.model_id = $1 OR v.model_id = $1)\n             AND f.kind <> 'archive'::file_kind\n           ORDER BY f.path, f.filename",
+  "query": "SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,\n                  f.kind as \"kind: FileKind\", f.created_at, b.size,\n                  coalesce(f.model_id, v.model_id) as \"model_id!\",\n                  (f.variant_id IS NOT NULL) as \"in_variant!\"\n           FROM files f\n           JOIN blobs b ON b.sha256 = f.blob_sha256\n           LEFT JOIN model_variants v ON v.id = f.variant_id\n           WHERE (f.model_id = $1 OR v.model_id = $1)\n             AND f.kind <> 'archive'::file_kind\n           ORDER BY f.path, f.filename",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,18 @@
             "name": "size"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "model_id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "in_variant!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -119,8 +131,10 @@
       true,
       false,
       false,
-      false
+      false,
+      null,
+      null
     ]
   },
-  "hash": "aed10f373ede282e3479806c749c700c65c5a2a5e0d98de4502865d3fb355744"
+  "hash": "6c0ab28eda38e1e9509114b4163d6439fdd2258d327c07fd3277c88f4b58a02b"
 }

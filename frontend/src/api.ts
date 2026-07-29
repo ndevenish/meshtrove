@@ -568,6 +568,16 @@ export interface CarveResult {
   variants_removed: number
 }
 
+/// What carving a whole bundle did. No `kind`/`slug`: the bundle is where you
+/// already are, and everything the carve produced joined it.
+export interface BundleCarveResult {
+  /** members the layout actually moved files on; the rest matched nothing */
+  members_carved: number
+  /** new member models split out, across every member */
+  models_created: number
+  variants_removed: number
+}
+
 /// The single decision an import exists to defer: what is this archive?
 /// An attached `layout` carves the files into models/variants as it commits.
 /// Metadata typed once on the import page. Flattened into the commit body; on a
@@ -953,6 +963,17 @@ export const api = {
     request<LayoutPlan>(`/api/models/${id}/carve/plan`, json({ ...spec, counts_only: countsOnly })),
   carveModel: (id: string, spec: LayoutSpec, bundleName?: string) =>
     request<CarveResult>(`/api/models/${id}/carve`, json({ ...spec, bundle_name: bundleName })),
+  /** every carveable file of every member of a bundle, as one flat list */
+  bundleCarveFiles: (id: string) => request<FileRecord[]>(`/api/bundles/${id}/carve/files`),
+  /** Dry-run one layout over every member: their plans, merged. */
+  planBundleCarve: (id: string, spec: LayoutSpec, countsOnly?: boolean) =>
+    request<LayoutPlan>(
+      `/api/bundles/${id}/carve/plan`,
+      json({ ...spec, counts_only: countsOnly }),
+    ),
+  /** Carve every member with one layout. What splits out joins this bundle. */
+  carveBundle: (id: string, spec: LayoutSpec) =>
+    request<BundleCarveResult>(`/api/bundles/${id}/carve`, json(spec)),
   importLayouts: () => request<ImportLayout[]>('/api/import-layouts'),
   createImportLayout: (body: { name: string; creator_id?: string | null } & LayoutSpec) =>
     request<ImportLayout>('/api/import-layouts', json(body)),

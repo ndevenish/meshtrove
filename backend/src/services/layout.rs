@@ -149,6 +149,11 @@ pub struct PlanFile {
     pub id: Uuid,
     pub path: String,
     pub filename: String,
+    /// Already sitting in a variant, rather than loose in the model's unsorted
+    /// bucket (or staged in an import, which is never in a variant). Nothing in
+    /// `analyze` reads it yet; the carve's file list knows it, so it travels with
+    /// the file rather than being looked up again later.
+    pub in_variant: bool,
 }
 
 impl PlanFile {
@@ -897,6 +902,7 @@ mod tests {
             id: Uuid::from_u128(id),
             path: path.into(),
             filename: filename.into(),
+            in_variant: false,
         }
     }
 

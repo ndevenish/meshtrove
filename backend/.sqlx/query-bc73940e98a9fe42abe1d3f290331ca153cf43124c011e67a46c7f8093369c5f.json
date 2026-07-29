@@ -1,0 +1,140 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT f.id, f.blob_sha256, f.path, f.filename, f.mime,\n                  f.kind as \"kind: FileKind\", f.created_at, b.size,\n                  coalesce(f.model_id, v.model_id) as \"model_id!\",\n                  (f.variant_id IS NOT NULL) as \"in_variant!\"\n           FROM files f\n           JOIN blobs b ON b.sha256 = f.blob_sha256\n           LEFT JOIN model_variants v ON v.id = f.variant_id\n           WHERE coalesce(f.model_id, v.model_id) IN\n                     (SELECT model_id FROM bundle_models WHERE bundle_id = $1)\n             AND f.kind <> 'archive'::file_kind\n           ORDER BY f.path, f.filename",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "blob_sha256",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "blob_sha256"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "path",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "filename",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "filename"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "mime",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "mime"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "kind: FileKind",
+        "type_info": {
+          "Custom": {
+            "name": "file_kind",
+            "kind": {
+              "Enum": [
+                "model",
+                "document",
+                "archive",
+                "other",
+                "project",
+                "raw"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "size",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "blobs",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "model_id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "in_variant!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "bc73940e98a9fe42abe1d3f290331ca153cf43124c011e67a46c7f8093369c5f"
+}
