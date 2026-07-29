@@ -27,7 +27,7 @@ import ReactMarkdown from 'react-markdown'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import DownloadIcon from '@mui/icons-material/Download'
-import { api, imageUrl, sourceOrigin } from '../api'
+import { api, imageUrl, sourceOrigin, uploadWithProgress, type FileRecord } from '../api'
 import { CustomFieldReadout } from '../components/CustomFieldControl'
 import ExportDialog from '../components/ExportDialog'
 import { useAuth } from '../main'
@@ -68,6 +68,11 @@ export default function ModelPage() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [toast, setToast] = useState('')
+  // Tags edit under the gallery, in the other column from the rest of the form:
+  // the editor keeps the draft and draws the control into this node. State rather
+  // than a ref, so attaching it re-renders and the portal finds its target.
+  const [tagsSlot, setTagsSlot] = useState<HTMLDivElement | null>(null)
+  const [uploadPct, setUploadPct] = useState<number | null>(null)
   // Import scraped metadata: the inline drop box lives in edit mode, so the
   // app-wide drop overlay must stand aside while editing or it swallows the zip.
   const [patchOpen, setPatchOpen] = useState(false)
@@ -200,6 +205,31 @@ export default function ModelPage() {
     form.append('file', file)
     await api.uploadImage('models', model.id, form)
     refresh()
+  }
+
+  /// Files dropped here go straight onto *this* model — no import to stage and
+  /// commit, because the question an import exists to ask ("model or bundle?") is
+  /// already answered: you are standing on the model. They land in its unsorted
+  /// bucket with their folders intact, and a .zip unpacks in the background.
+  const uploadStraightIn = async (files: { file: File; path: string }[]) => {
+    setUploadPct(0)
+    try {
+      const form = new FormData()
+      for (const { file, path } of files) {
+        form.append('path', path) // applies to the file part that follows
+        form.append('file', file)
+      }
+      await uploadWithProgress<FileRecord[]>(`/api/models/${model.id}/files`, form, (f) =>
+        setUploadPct(Math.round(f * 100)),
+      )
+      await refresh()
+      await queryClient.invalidateQueries({ queryKey: ['model-files', model.id] })
+      await queryClient.invalidateQueries({ queryKey: ['jobs', 'all'] })
+    } catch (err) {
+      setToast(`Upload failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setUploadPct(null)
+    }
   }
 
   return (
@@ -380,6 +410,11 @@ export default function ModelPage() {
               </Button>
             )}
           </Stack>
+          {/* Tags, while editing: a wide strip of chips that grows as you type,
+              and it crowded the fields that name the model. Under the pictures it
+              has the room, and the column has the slack. ModelDetailsEditor still
+              owns the draft — this is only where it draws. */}
+          {editing && <Box ref={setTagsSlot} sx={{ mt: 2 }} />}
         </Box>
 
         {/* Details */}
@@ -465,21 +500,43 @@ export default function ModelPage() {
                 model={model}
                 onDone={() => setEditing(false)}
                 onBusyChange={setSaving}
+                tagsSlot={tagsSlot}
               />
-              <Box sx={{ mb: 2 }}>
-                <Dropzone
-                  label="Import scraped metadata"
-                  hint="Drop a bundle-patch zip — its metadata is applied to this model"
-                  accept=".zip"
-                  onDrop={(drop) => {
-                    const file = drop.files[0]?.file
-                    if (file) {
-                      setPatchFile(file)
-                      setPatchOpen(true)
+              {/* Two ways of putting something into this model, side by side as
+                  on a bundle: the files themselves, or someone else's notes about
+                  them. */}
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 2 }}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Dropzone
+                    label={
+                      uploadPct === null
+                        ? 'Upload files to this model'
+                        : uploadPct < 100
+                          ? `Uploading ${uploadPct}%…`
+                          : 'Unpacking…'
                     }
-                  }}
-                />
-              </Box>
+                    hint="Straight into this model’s unsorted files · .zip auto-unpacks"
+                    multiple
+                    busy={uploadPct !== null}
+                    progress={uploadPct !== null && uploadPct < 100 ? uploadPct : undefined}
+                    onDrop={(drop) => void uploadStraightIn(drop.files)}
+                  />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Dropzone
+                    label="Import scraped metadata"
+                    hint="Drop a bundle-patch zip — its metadata is applied to this model"
+                    accept=".zip"
+                    onDrop={(drop) => {
+                      const file = drop.files[0]?.file
+                      if (file) {
+                        setPatchFile(file)
+                        setPatchOpen(true)
+                      }
+                    }}
+                  />
+                </Box>
+              </Stack>
             </>
           )}
           {!editing && (model.creator_name || model.source_url) && (
@@ -668,7 +725,7 @@ export default function ModelPage() {
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >
         <Alert
-          severity={toast.startsWith('Paste failed') ? 'error' : 'success'}
+          severity={toast.includes('failed') ? 'error' : 'success'}
           onClose={() => setToast('')}
         >
           {toast}

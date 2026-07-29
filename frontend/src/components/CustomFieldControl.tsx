@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import {
+  Box,
   Checkbox,
   Chip,
   FormControlLabel,
@@ -13,6 +14,7 @@ import {
 } from '@mui/material'
 import AttachFileIcon from '@mui/icons-material/AttachFile'
 import DeleteIcon from '@mui/icons-material/Delete'
+import DownloadIcon from '@mui/icons-material/Download'
 
 import { formatBytes, type CustomFieldValue, type CustomFieldValueInput } from '../api'
 import Dropzone from './Dropzone'
@@ -150,18 +152,38 @@ export function CustomFieldControl({
       )
     case 'file':
       if (!onUploadFile) return null
+      // The file it holds and the place to drop the next one are one control: a
+      // field with a value shows it *in* the target, so a set field costs the form
+      // a two-line strip rather than a chip plus a poster-sized box. The buttons
+      // sit outside the target — it is a <label>, and a click inside one opens the
+      // file picker however hard the handler protests.
       return (
-        <Stack spacing={1}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+            <Dropzone
+              dense
+              label={busy ? 'Uploading…' : field.name}
+              hint={
+                file
+                  ? `${file.filename} · ${formatBytes(file.size)}`
+                  : 'Drop one file — it stays out of the file list'
+              }
+              busy={busy}
+              onDrop={(drop) => {
+                const dropped = drop.files[0]?.file
+                if (!dropped) return
+                setBusy(true)
+                void onUploadFile(dropped).finally(() => setBusy(false))
+              }}
+            />
+          </Box>
           {file && (
-            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-              <Chip
-                size="small"
-                icon={<AttachFileIcon />}
-                label={`${file.filename} · ${formatBytes(file.size)}`}
-                component="a"
-                href={`/api/files/${file.file_id}/download`}
-                clickable
-              />
+            <>
+              <Tooltip title={`Download ${file.filename}`}>
+                <IconButton size="small" component="a" href={`/api/files/${file.file_id}/download`}>
+                  <DownloadIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Tooltip>
               <Tooltip title="Remove file">
                 <IconButton
                   size="small"
@@ -175,19 +197,8 @@ export function CustomFieldControl({
                   <DeleteIcon sx={{ fontSize: 18 }} />
                 </IconButton>
               </Tooltip>
-            </Stack>
+            </>
           )}
-          <Dropzone
-            label={busy ? 'Uploading…' : file ? `Replace ${field.name}` : field.name}
-            hint="One file · dropped here it stays out of the file list"
-            busy={busy}
-            onDrop={(drop) => {
-              const dropped = drop.files[0]?.file
-              if (!dropped) return
-              setBusy(true)
-              void onUploadFile(dropped).finally(() => setBusy(false))
-            }}
-          />
         </Stack>
       )
     default:
