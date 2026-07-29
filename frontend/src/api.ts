@@ -448,6 +448,11 @@ export interface LayoutSpec {
       import, which survives the commit (flagged partial) for another pass.
       Per-import working state — not saved into layout templates. */
   keep_unmatched?: boolean
+  /** gather the files the rules didn't match into the model's unnamed
+      (anonymous) variant instead of leaving them where they lie. Only ever moves
+      files that aren't in a variant already. Carve-only working state — not saved
+      into layout templates. */
+  sweep_unmatched?: boolean
 }
 
 export interface ImportLayout extends LayoutSpec {

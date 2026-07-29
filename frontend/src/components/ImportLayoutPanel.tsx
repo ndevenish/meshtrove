@@ -145,7 +145,8 @@ export default memo(function ImportLayoutPanel({
   // Carving an existing model has no staging area to leave files in: what the
   // rules don't match simply stays where it already is. So the "keep unmatched"
   // choice — and the copy that talks about landing unsorted — is an import-only
-  // affordance.
+  // affordance, while "sweep the rest into the unnamed variant", the only other
+  // place unmatched files could go, is a carve-only one.
   const staged = target !== 'carve'
   // The carve is part of the subject's draft: the rule list, flatten and merge
   // choices persist per subject id (see importDraft.ts), so reopening the import
@@ -168,6 +169,15 @@ export default memo(function ImportLayoutPanel({
     false,
   )
   const keepUnmatched = keepUnmatchedChoice && staged
+  // The mirror image of "keep unmatched", and carve-only for the same reason: a
+  // carve has nowhere to leave files, so its choice is between leaving them where
+  // they lie and gathering them into the model's unnamed variant.
+  const [sweepUnmatchedChoice, setSweepUnmatched] = useImportDraftState(
+    subjectId,
+    'layout.sweepUnmatched',
+    false,
+  )
+  const sweepUnmatched = sweepUnmatchedChoice && !staged
   // Retarget choices, keyed by planned-model identity so they survive re-plans:
   // a member id, or 'new' to force a fresh member. An unset model rides on the
   // plan's auto-matched `merge_target`.
@@ -223,6 +233,7 @@ export default memo(function ImportLayoutPanel({
     setRules([])
     setFlatten(false)
     setKeepUnmatched(false)
+    setSweepUnmatched(false)
     setPlan(null)
     setPlanError('')
   }
@@ -285,7 +296,12 @@ export default memo(function ImportLayoutPanel({
     if (unpacking) return
     // Every rule is sent, blanks included, so `plan.rules` stays index-aligned
     // with the editor blocks on screen.
-    const spec: LayoutSpec = { rules, flatten: effectiveFlatten, keep_unmatched: keepUnmatched }
+    const spec: LayoutSpec = {
+      rules,
+      flatten: effectiveFlatten,
+      keep_unmatched: keepUnmatched,
+      sweep_unmatched: sweepUnmatched,
+    }
     const timer = setTimeout(async () => {
       try {
         const result = await planner(spec, target)
@@ -310,6 +326,7 @@ export default memo(function ImportLayoutPanel({
     unpacking,
     effectiveFlatten,
     keepUnmatched,
+    sweepUnmatched,
     bundleId,
     live.length,
   ])
@@ -651,7 +668,9 @@ export default memo(function ImportLayoutPanel({
             {plan.carved !== plan.matched && ` (${plan.carved} carved)`}
             {plan.matched < plan.total &&
               (!staged
-                ? ' — the rest stay exactly where they are'
+                ? sweepUnmatched
+                  ? ' — the rest go to the unnamed variant'
+                  : ' — the rest stay exactly where they are'
                 : keepUnmatched
                   ? ' — the rest stay staged here'
                   : ' — the rest land unsorted')}
@@ -712,6 +731,29 @@ export default memo(function ImportLayoutPanel({
                     Import only what the rules match — matched files leave the import; the rest stay
                     here (instead of landing unsorted), so you can carve them at a different target
                     in another pass.
+                  </Typography>
+                </Box>
+              }
+            />
+          )}
+
+          {!staged && (
+            <FormControlLabel
+              sx={{ mb: 1, display: 'flex' }}
+              control={
+                <Checkbox
+                  size="small"
+                  checked={sweepUnmatched}
+                  onChange={(e) => setSweepUnmatched(e.target.checked)}
+                />
+              }
+              label={
+                <Box>
+                  <Typography variant="body2">Sweep the rest into the unnamed variant</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Gather the files no rule matched into the model’s unnamed variant — its plain
+                    bucket — instead of leaving them loose beside the variants this carve builds. A
+                    file that is already in a variant is left there.
                   </Typography>
                 </Box>
               }

@@ -122,7 +122,8 @@ export default function CarvePage() {
         {files?.length === 1 ? '' : 's'} this model holds. What the rules recognise as a{' '}
         <strong>variant</strong> is re-sorted into variants here; what they recognise as a{' '}
         <strong>model name</strong> is a piece that was never this model, and splits out into one of
-        its own. Anything unmatched stays exactly where it is.
+        its own. Anything unmatched stays exactly where it is — unless you ask for the leftovers to
+        be swept into the unnamed variant.
       </Typography>
 
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>

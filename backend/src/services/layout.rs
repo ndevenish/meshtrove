@@ -124,6 +124,16 @@ pub struct LayoutSpec {
     /// template.
     #[serde(default)]
     pub keep_unmatched: bool,
+    /// Gather the files the rules *didn't* match into the model's anonymous
+    /// variant, rather than leaving them where they lie. A carve that sorts most
+    /// of a tree into variants otherwise leaves the remainder loose beside them,
+    /// which is the one state the model page has no good place for; this finishes
+    /// the job. Only ever moves files that aren't in a variant already — one that
+    /// is was put there deliberately (or by an earlier pass), and a rule that
+    /// fails to mention it is not licence to dismantle it. Per-carve working
+    /// state, not part of a saved template.
+    #[serde(default)]
+    pub sweep_unmatched: bool,
 }
 
 /// Whether the carve targets one model (variants only; model-name captures
@@ -150,9 +160,8 @@ pub struct PlanFile {
     pub path: String,
     pub filename: String,
     /// Already sitting in a variant, rather than loose in the model's unsorted
-    /// bucket (or staged in an import, which is never in a variant). Nothing in
-    /// `analyze` reads it yet; the carve's file list knows it, so it travels with
-    /// the file rather than being looked up again later.
+    /// bucket (or staged in an import, which is never in a variant). Only read by
+    /// [`LayoutSpec::sweep_unmatched`], which leaves such a file alone.
     pub in_variant: bool,
 }
 
@@ -205,8 +214,9 @@ pub struct FileAnnotation {
 }
 
 /// One planned variant of a planned model. Empty `tags` = matched files that
-/// resolved no variant tags; the commit puts them in the model's unsorted
-/// bucket (one-model carve) or its anonymous variant (bundle carve).
+/// resolved no variant tags (plus, under [`LayoutSpec::sweep_unmatched`], the
+/// unmatched ones); the commit puts them in the model's unsorted bucket
+/// (one-model carve) or its anonymous variant (bundle carve).
 #[derive(Serialize, ToSchema)]
 pub struct PlanVariant {
     pub tags: Vec<String>,
@@ -284,7 +294,8 @@ pub struct Plan {
     pub total: usize,
     pub matched: usize,
     /// Files that actually land on a model/variant (a matched file without a
-    /// model name still falls to unsorted under a bundle target).
+    /// model name still falls to unsorted under a bundle target). Larger than
+    /// `matched` when [`LayoutSpec::sweep_unmatched`] gathers leftovers in too.
     pub carved: usize,
     /// Index-aligned to the spec's rules.
     pub rules: Vec<RulePlan>,
@@ -526,6 +537,7 @@ pub fn analyze(
     let mut seen_model_tags: HashSet<String> = HashSet::new();
     // (folded name, folded tag set) -> model; BTreeMaps keep the output stable.
     type VariantKey = Vec<String>;
+    #[derive(Default)]
     struct ModelAcc {
         name: String,
         creator_ref: Option<String>,
@@ -705,6 +717,31 @@ pub fn analyze(
         }
 
         if !matched_any {
+            // Unmatched files are left exactly where they are — unless the carve
+            // asked for the leftovers to be swept up, in which case the loose ones
+            // join the home model's untagged variant. That is the same variant the
+            // matched-but-untagged files land in, so the model ends up with one
+            // plain bucket beside its tagged variants instead of a bucket *and* a
+            // pile of loose files. A bundle target has no home model to sweep into
+            // (a file with no captured name isn't any member's), so nothing moves.
+            if spec.sweep_unmatched
+                && !file.in_variant
+                && matches!(target, CarveTarget::Model | CarveTarget::Carve)
+            {
+                carved += 1;
+                let acc = models.entry((String::new(), Vec::new())).or_default();
+                let variant = acc
+                    .variants
+                    .entry(Vec::new())
+                    .or_insert_with(|| PlanVariant {
+                        tags: Vec::new(),
+                        file_count: 0,
+                        example: full.clone(),
+                        files: Vec::new(),
+                    });
+                variant.file_count += 1;
+                variant.files.push(file.id);
+            }
             annotations.push(FileAnnotation {
                 id: file.id,
                 matched: false,
@@ -864,6 +901,7 @@ mod tests {
             rules,
             flatten: false,
             keep_unmatched: false,
+            sweep_unmatched: false,
         }
     }
 
@@ -1300,6 +1338,50 @@ mod tests {
         // The unmatched file is left alone — it is not swept into a variant.
         assert_eq!(plan.matched, 2);
         assert!(!plan.annotations[2].matched);
+    }
+
+    #[test]
+    fn sweeping_gathers_the_loose_leftovers_into_the_untagged_variant() {
+        let spec = LayoutSpec {
+            sweep_unmatched: true,
+            ..spec_of(vec![rule(r"/(\d+mm)/", &[("1", Role::VariantTag)])])
+        };
+        let files = vec![
+            file(1, "Gold/32mm", "a.stl"),
+            file(2, "Gold", "readme.txt"),
+            // Already in a variant: the rules ignore it, and so does the sweep.
+            PlanFile {
+                in_variant: true,
+                ..file(3, "Gold", "notes.txt")
+            },
+        ];
+        let plan = analyze(&spec, CarveTarget::Carve, &files, &vocab()).unwrap();
+        // Unmatched is still unmatched — the annotated list must not claim a rule
+        // recognised these — but two of the three files now land somewhere.
+        assert_eq!((plan.matched, plan.carved), (1, 2));
+        assert!(!plan.annotations[1].matched);
+        let home = plan.models.iter().find(|m| m.name.is_empty()).unwrap();
+        let untagged = home
+            .variants
+            .iter()
+            .find(|v| v.tags.is_empty())
+            .expect("the swept files have a variant of their own");
+        assert_eq!(untagged.files, vec![Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn sweeping_has_nothing_to_sweep_into_under_a_bundle_target() {
+        // A bundle carve places files by captured model name; an unmatched file
+        // has no name, so there is no member for it to be swept onto.
+        let spec = LayoutSpec {
+            sweep_unmatched: true,
+            ..spec_of(vec![rule(r"^Parts/([^/]+)/", &[("1", Role::ModelName)])])
+        };
+        let files = vec![file(1, "Parts/Gold", "a.stl"), file(2, "Extras", "b.stl")];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        assert_eq!((plan.matched, plan.carved), (1, 1));
+        assert_eq!(plan.models.len(), 1);
+        assert_eq!(plan.models[0].name, "Gold");
     }
 
     #[test]
