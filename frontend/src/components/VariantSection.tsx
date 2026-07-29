@@ -825,8 +825,8 @@ export const FileTree = memo(function FileTree({
       return row.kind === 'file'
         ? row.file.id
         : row.kind === 'pending'
-          ? `${row.dir} ${row.nth}`
-          : ` header ${row.dir}`
+          ? `${row.dir}\u0000${row.nth}`
+          : `\u0000header\u0000${row.dir}`
     },
   })
   const virtualRows = virtualizer.getVirtualItems()

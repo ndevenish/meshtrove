@@ -936,7 +936,7 @@ function sliceParts(parts: PathParts, from: number, to = Infinity): PathParts {
 const prefixKey = (parts: PathParts, cut: number): string =>
   sliceParts(parts, 0, cut)
     .map((p) => `${p.role ?? ''}:${p.text}`)
-    .join(' ')
+    .join('\u0000')
 
 /// A run of consecutive files sharing a highlighted prefix, which the list
 /// prints once as a header instead of on every row.
