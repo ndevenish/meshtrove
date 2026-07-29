@@ -340,66 +340,74 @@ export default function BundlePage() {
                 </Button>
               </>
             )}
-            {canEdit && editing && (
-              <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
-                {/* Delete leads, kept clear of Save/Cancel: it sits at the far
-                    end from where a double-click on the primary action would
-                    land, so a stray second click can't fall on it. */}
-                <Button
-                  color="error"
-                  startIcon={<DeleteIcon />}
-                  disabled={saving}
-                  onClick={() => setDeleteOpen(true)}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Delete bundle
-                </Button>
-                <Button
-                  startIcon={<MergeIcon />}
-                  disabled={saving}
-                  onClick={() => setMergeOpen(true)}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Merge in…
-                </Button>
-                <Button
-                  startIcon={<SellIcon />}
-                  disabled={saving || bundle.models.length === 0}
-                  onClick={() => setRetagOpen(true)}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Tag all models
-                </Button>
-                {/* The members of one purchase share a naming scheme, so they
-                    share the mistakes in how it was read: one layout, every
-                    member. Its own page — the rule workbench wants the width. */}
-                <Button
-                  component={Link}
-                  to={`/bundles/${bundle.slug}/carve`}
-                  startIcon={<ContentCutIcon />}
-                  disabled={saving || bundle.models.length === 0}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Carve members…
-                </Button>
-                <Button
-                  variant="contained"
-                  disabled={saving}
-                  onClick={() => {
-                    void editorRef.current?.save().catch(() => {
-                      // The editor reports why; stay in edit mode rather than
-                      // discarding what was typed.
-                    })
-                  }}
-                >
-                  Save
-                </Button>
-                <Button disabled={saving} onClick={() => setEditing(false)}>
-                  Cancel
-                </Button>
-              </Stack>
-            )}
           </Stack>
+
+          {/* Seven buttons on the title's line left the title a word wide and
+              wrapping under them, as on a model. In edit mode they get a line of
+              their own, right-aligned under the name. */}
+          {canEdit && editing && (
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ justifyContent: 'flex-end', flexWrap: 'wrap', gap: 1, mt: 1, mb: 1 }}
+            >
+              {/* Delete leads, kept clear of Save/Cancel: it sits at the far
+                  end from where a double-click on the primary action would
+                  land, so a stray second click can't fall on it. */}
+              <Button
+                color="error"
+                startIcon={<DeleteIcon />}
+                disabled={saving}
+                onClick={() => setDeleteOpen(true)}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Delete bundle
+              </Button>
+              <Button
+                startIcon={<MergeIcon />}
+                disabled={saving}
+                onClick={() => setMergeOpen(true)}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Merge in…
+              </Button>
+              <Button
+                startIcon={<SellIcon />}
+                disabled={saving || bundle.models.length === 0}
+                onClick={() => setRetagOpen(true)}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Tag all models
+              </Button>
+              {/* The members of one purchase share a naming scheme, so they
+                  share the mistakes in how it was read: one layout, every
+                  member. Its own page — the rule workbench wants the width. */}
+              <Button
+                component={Link}
+                to={`/bundles/${bundle.slug}/carve`}
+                startIcon={<ContentCutIcon />}
+                disabled={saving || bundle.models.length === 0}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Carve members…
+              </Button>
+              <Button
+                variant="contained"
+                disabled={saving}
+                onClick={() => {
+                  void editorRef.current?.save().catch(() => {
+                    // The editor reports why; stay in edit mode rather than
+                    // discarding what was typed.
+                  })
+                }}
+              >
+                Save
+              </Button>
+              <Button disabled={saving} onClick={() => setEditing(false)}>
+                Cancel
+              </Button>
+            </Stack>
+          )}
 
           {editing && (
             <>
