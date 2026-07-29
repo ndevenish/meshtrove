@@ -56,7 +56,10 @@ import BundleDeleteDialog from '../components/BundleDeleteDialog'
 import BundleSplitDialog from '../components/BundleSplitDialog'
 import BundleMergeDialog from '../components/BundleMergeDialog'
 import ImageLightbox from '../components/ImageLightbox'
-import RenderOrientation, { canReorient } from '../components/RenderOrientation'
+import RenderOrientation, {
+  BundleRenderOrientation,
+  canReorient,
+} from '../components/RenderOrientation'
 
 export default function BundlePage() {
   const { id } = useParams<{ id: string }>()
@@ -304,6 +307,16 @@ export default function BundlePage() {
               </Button>
             )}
           </Stack>
+          {/* One axis for the lot. Under the strip rather than on it: it is about
+              every thumbnail above, not any one of them. Draws nothing unless
+              there are two or more renders to fix. */}
+          {canEdit && (
+            <BundleRenderOrientation
+              bundleId={bundle.id}
+              images={bundle.images}
+              onRendered={refresh}
+            />
+          )}
         </Box>
 
         {/* Details. A flex column so the unsorted files can be pushed to its

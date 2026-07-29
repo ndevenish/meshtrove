@@ -34,6 +34,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/images/{id}/square", get(serve_square))
         .route("/api/images/{id}/primary", put(mark_primary))
         .route("/api/images/{id}/rerender", post(rerender_image))
+        .route(
+            "/api/bundles/{id}/images/rerender",
+            post(rerender_bundle_images),
+        )
         .route("/api/files/{id}/promote", post(promote_file))
         .route(
             "/api/models/{id}/images/{image_id}/promote",
@@ -692,6 +696,92 @@ async fn rerender_image(
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(RenderQueued { job_id })))
+}
+
+/// The jobs a bulk re-render queued, so the caller can wait for the pictures
+/// rather than polling the whole queue.
+#[derive(Serialize, ToSchema)]
+pub struct RerenderBatch {
+    pub job_ids: Vec<i64>,
+}
+
+/// Re-render a bundle's whole gallery with one orientation.
+///
+/// A bundle's own pictures are one purchase's worth of renders, made from files
+/// that were authored together — so when one of them came out lying on its side,
+/// they all did, and fixing them one popover at a time is the same answer typed
+/// six times. This is exactly [`rerender_image`] applied to the lot: the axis is
+/// written to each *source file*, so the fix outlives these particular pictures
+/// and a later bulk re-render keeps it.
+///
+/// The member models' renders are not touched. They have galleries and controls
+/// of their own, and a bundle is the crate the models came in, not the owner of
+/// what is inside them.
+async fn rerender_bundle_images(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(overrides): Json<RenderOverrides>,
+) -> Result<(StatusCode, Json<RerenderBatch>), ApiError> {
+    user.require_can_edit(crate::routes::bundles::bundle_created_by(&state, id).await?)?;
+    let overrides = overrides
+        .normalise()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    // Only a render with a surviving source file can be made again: an uploaded
+    // photo in the same gallery is not a render, and `source_file_id` is
+    // ON DELETE SET NULL, so a render whose model file has gone cannot be redone.
+    let targets = sqlx::query!(
+        r#"SELECT i.id, i.source_file_id as "file_id!"
+           FROM images i
+           WHERE i.bundle_id = $1 AND i.kind = 'rendered' AND i.source_file_id IS NOT NULL
+           ORDER BY i.is_primary DESC, i.sort_order, i.created_at"#,
+        id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    if targets.is_empty() {
+        return Err(ApiError::BadRequest(
+            "this bundle has no rendered pictures to re-orient".into(),
+        ));
+    }
+
+    // An empty override is stored as NULL, not as `{}`: "no orientation set" is
+    // one state, and the staleness check compares these values.
+    let stored = if overrides.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(&overrides).map_err(anyhow::Error::from)?)
+    };
+    // Two renders of one file share its orientation, so this is by file id, not
+    // one UPDATE per picture.
+    let files: Vec<Uuid> = targets.iter().map(|t| t.file_id).collect();
+    sqlx::query!(
+        "UPDATE files SET render_overrides = $2 WHERE id = ANY($1::uuid[])",
+        &files,
+        stored,
+    )
+    .execute(&state.db)
+    .await?;
+
+    // Replaced in place, as the single-image control does: every id the gallery is
+    // holding stays valid and the pictures change underneath it.
+    let mut job_ids = Vec::with_capacity(targets.len());
+    for target in &targets {
+        job_ids.push(
+            crate::services::jobs::enqueue(
+                &state.db,
+                "render_preview",
+                serde_json::json!({
+                    "file_id": target.file_id,
+                    "mode": "replace",
+                    "replace_image_id": target.id,
+                }),
+            )
+            .await?,
+        );
+    }
+    Ok((StatusCode::ACCEPTED, Json(RerenderBatch { job_ids })))
 }
 
 /// Make this image the owner's preview, atomically demoting the previous one.

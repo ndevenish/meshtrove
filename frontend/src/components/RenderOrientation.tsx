@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -181,6 +181,175 @@ function AxisGizmo({ up, turntable }: { up: string; turntable: number }) {
   )
 }
 
+/// "No orientation set", as one stable object: the seed of these controls is a
+/// hook dependency, and a fresh `{}` every render would re-seed them forever.
+const NO_OVERRIDES: RenderOverrides = {}
+
+/// The panel itself — the gizmo, the axis picker, the turntable and the footer.
+/// The per-image button and the whole-gallery one open this same thing; all that
+/// differs between them is what an apply writes to, and what the footer says it
+/// covers.
+function OrientationControls({
+  value,
+  onChange,
+  busy,
+  covers,
+  error,
+}: {
+  value: RenderOverrides
+  onChange: (next: RenderOverrides) => void
+  busy: boolean
+  /** what this apply will re-render, for the footer */
+  covers: string
+  error: string | null
+}) {
+  const { axis, negative } = splitAxis(value.up)
+  const turntable = value.turntable ?? 0
+
+  const setAxis = (next: string) =>
+    onChange({ ...value, up: next ? `${negative ? '-' : '+'}${next}` : null })
+  const flip = () => onChange({ ...value, up: axis ? `${negative ? '+' : '-'}${axis}` : null })
+  const turn = (delta: number) => onChange({ ...value, turntable: turntable + delta })
+
+  return (
+    <Stack spacing={1.5} sx={{ p: 2, width: 260 }}>
+      {/* The axes as this render will see them. `up` falls back to f3d's
+          own default, which is what an unset override leaves in force. */}
+      <AxisGizmo up={value.up || '+Y'} turntable={turntable} />
+      <Box>
+        <Typography variant="caption" color="text.secondary">
+          Which way is up
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: 'center' }}>
+          <ToggleButtonGroup
+            exclusive
+            size="small"
+            value={axis}
+            onChange={(_, next) => setAxis(next ?? '')}
+            sx={{ flexGrow: 1 }}
+          >
+            {['X', 'Y', 'Z'].map((a) => (
+              <ToggleButton key={a} value={a} sx={{ flexGrow: 1, py: 0.25 }}>
+                {a}
+              </ToggleButton>
+            ))}
+          </ToggleButtonGroup>
+          <Tooltip title={axis ? `Stand it on its head (−${axis})` : 'Pick an axis first'}>
+            {/* A disabled child cannot fire the events a Tooltip listens
+                for, hence the span: without it the hint disappears exactly
+                when it is most needed. */}
+            <span>
+              <ToggleButton
+                size="small"
+                value="flip"
+                disabled={!axis}
+                selected={negative}
+                onChange={flip}
+                sx={{ py: 0.25 }}
+              >
+                <SwapVertIcon sx={{ fontSize: 18 }} />
+              </ToggleButton>
+            </span>
+          </Tooltip>
+        </Stack>
+      </Box>
+
+      <Box>
+        <Typography variant="caption" color="text.secondary">
+          Turntable
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: 'center' }}>
+          <Tooltip title={`Turn ${STEP}° left`}>
+            <IconButton size="small" onClick={() => turn(-STEP)}>
+              <RotateLeftIcon />
+            </IconButton>
+          </Tooltip>
+          <Typography variant="body2" sx={{ flexGrow: 1, textAlign: 'center' }}>
+            {turntable}°
+          </Typography>
+          <Tooltip title={`Turn ${STEP}° right`}>
+            <IconButton size="small" onClick={() => turn(STEP)}>
+              <RotateRightIcon />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      </Box>
+
+      <Divider />
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
+          {busy ? 'Rendering…' : covers}
+        </Typography>
+        <Button
+          size="small"
+          disabled={!value.up && !turntable}
+          onClick={() => onChange(NO_OVERRIDES)}
+        >
+          Reset
+        </Button>
+      </Stack>
+      {error && (
+        <Typography variant="caption" color="error">
+          {error}
+        </Typography>
+      )}
+    </Stack>
+  )
+}
+
+/// What the controls show, and the deferred apply behind them.
+///
+/// Changes are applied on a short delay rather than per click: stepping the
+/// turntable round three notches should cost one render, not three. The timer is
+/// cleared on unmount — a popover closed mid-debounce has said what it wants, but
+/// a component that is gone has no business refetching for it.
+///
+/// `seed` is what the controls open on, re-read whenever it changes while the
+/// popover is shut (so a picture swapped underneath brings its own orientation).
+/// It has to be referentially stable — memoise it, or take it straight off a
+/// query — since a new object every render would re-seed on every render.
+function useOrientation(
+  seed: RenderOverrides,
+  open: boolean,
+  run: (next: RenderOverrides) => Promise<void>,
+) {
+  const [pending, setPending] = useState<RenderOverrides>(seed)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!open) setPending(seed)
+  }, [seed, open])
+
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (timer.current) clearTimeout(timer.current)
+    }
+  }, [])
+  // Read at fire time, not capture time: the caller passes a fresh closure every
+  // render, and the one that should run is the latest.
+  const runRef = useRef(run)
+  runRef.current = run
+
+  const apply = (next: RenderOverrides) => {
+    setPending(next)
+    setError(null)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(async () => {
+      setBusy(true)
+      try {
+        await runRef.current(next)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Re-render failed.')
+      } finally {
+        setBusy(false)
+      }
+    }, 500)
+  }
+
+  return { pending, apply, busy, error }
+}
+
 /// Correct a render that came out on its side, or facing the wrong way.
 ///
 /// f3d assumes +Y up; print files are authored by whoever made them, so a Z-up
@@ -188,10 +357,8 @@ function AxisGizmo({ up, turntable }: { up: string; turntable: number }) {
 /// where this writes it (`POST /api/images/{id}/rerender`) — so the fix outlives
 /// the picture it was made on, and a bulk re-render inherits it.
 ///
-/// Changes are applied on a short delay rather than per click: stepping the
-/// turntable round three notches should cost one render, not three. The image
-/// row is rewritten in place, so the id this is anchored to stays valid and the
-/// picture simply changes underneath.
+/// The image row is rewritten in place, so the id this is anchored to stays valid
+/// and the picture simply changes underneath.
 export default function RenderOrientation({
   image,
   onRendered,
@@ -204,52 +371,15 @@ export default function RenderOrientation({
   edge?: boolean
 }) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  // What the controls show. Seeded from the render's own orientation so the
-  // popover opens where the last one left off, and re-seeded if the picture is
-  // swapped for another while the popover is shut.
-  const [pending, setPending] = useState<RenderOverrides>(image.render_overrides ?? {})
-  useEffect(() => {
-    if (!anchor) setPending(image.render_overrides ?? {})
-  }, [image.render_overrides, anchor])
-
-  // The apply is deferred so a burst of clicks queues one render. The timer is
-  // cleared on unmount: a popover closed mid-debounce has said what it wants,
-  // but a component that is gone has no business refetching for it.
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    return () => {
-      if (timer.current) clearTimeout(timer.current)
-    }
-  }, [])
-
-  const apply = (next: RenderOverrides) => {
-    setPending(next)
-    setError(null)
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(async () => {
-      setBusy(true)
-      try {
-        const { job_id } = await api.rerenderImage(image.id, next)
-        await waitForJob(job_id)
-        onRendered()
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Re-render failed.')
-      } finally {
-        setBusy(false)
-      }
-    }, 500)
-  }
-
-  const { axis, negative } = splitAxis(pending.up)
-  const turntable = pending.turntable ?? 0
-
-  const setAxis = (next: string) =>
-    apply({ ...pending, up: next ? `${negative ? '-' : '+'}${next}` : null })
-  const flip = () => apply({ ...pending, up: axis ? `${negative ? '+' : '-'}${axis}` : null })
-  const turn = (delta: number) => apply({ ...pending, turntable: turntable + delta })
+  const { pending, apply, busy, error } = useOrientation(
+    image.render_overrides ?? NO_OVERRIDES,
+    !!anchor,
+    async (next) => {
+      const { job_id } = await api.rerenderImage(image.id, next)
+      await waitForJob(job_id)
+      onRendered()
+    },
+  )
 
   return (
     <>
@@ -285,84 +415,97 @@ export default function RenderOrientation({
         anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
         transformOrigin={{ vertical: 'top', horizontal: 'right' }}
       >
-        <Stack spacing={1.5} sx={{ p: 2, width: 260 }}>
-          {/* The axes as this render will see them. `up` falls back to f3d's
-              own default, which is what an unset override leaves in force. */}
-          <AxisGizmo up={pending.up || '+Y'} turntable={turntable} />
-          <Box>
-            <Typography variant="caption" color="text.secondary">
-              Which way is up
-            </Typography>
-            <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: 'center' }}>
-              <ToggleButtonGroup
-                exclusive
-                size="small"
-                value={axis}
-                onChange={(_, next) => setAxis(next ?? '')}
-                sx={{ flexGrow: 1 }}
-              >
-                {['X', 'Y', 'Z'].map((a) => (
-                  <ToggleButton key={a} value={a} sx={{ flexGrow: 1, py: 0.25 }}>
-                    {a}
-                  </ToggleButton>
-                ))}
-              </ToggleButtonGroup>
-              <Tooltip title={axis ? `Stand it on its head (−${axis})` : 'Pick an axis first'}>
-                {/* A disabled child cannot fire the events a Tooltip listens
-                    for, hence the span: without it the hint disappears exactly
-                    when it is most needed. */}
-                <span>
-                  <ToggleButton
-                    size="small"
-                    value="flip"
-                    disabled={!axis}
-                    selected={negative}
-                    onChange={flip}
-                    sx={{ py: 0.25 }}
-                  >
-                    <SwapVertIcon sx={{ fontSize: 18 }} />
-                  </ToggleButton>
-                </span>
-              </Tooltip>
-            </Stack>
-          </Box>
+        <OrientationControls
+          value={pending}
+          onChange={apply}
+          busy={busy}
+          covers="Applies to every render of this file."
+          error={error}
+        />
+      </Popover>
+    </>
+  )
+}
 
-          <Box>
-            <Typography variant="caption" color="text.secondary">
-              Turntable
-            </Typography>
-            <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: 'center' }}>
-              <Tooltip title={`Turn ${STEP}° left`}>
-                <IconButton size="small" onClick={() => turn(-STEP)}>
-                  <RotateLeftIcon />
-                </IconButton>
-              </Tooltip>
-              <Typography variant="body2" sx={{ flexGrow: 1, textAlign: 'center' }}>
-                {turntable}°
-              </Typography>
-              <Tooltip title={`Turn ${STEP}° right`}>
-                <IconButton size="small" onClick={() => turn(STEP)}>
-                  <RotateRightIcon />
-                </IconButton>
-              </Tooltip>
-            </Stack>
-          </Box>
+/// The orientation a set of renders agree on, or nothing if they disagree — what
+/// a gallery-wide control opens showing. Fixing a gallery once and coming back
+/// should find the fix, not a blank panel that would undo it on the first click.
+function sharedOverrides(images: ImageRecord[]): RenderOverrides {
+  const first = images[0]?.render_overrides ?? NO_OVERRIDES
+  const agree = images.every(
+    (image) =>
+      (image.render_overrides?.up ?? null) === (first.up ?? null) &&
+      (image.render_overrides?.turntable ?? 0) === (first.turntable ?? 0),
+  )
+  return agree ? first : NO_OVERRIDES
+}
 
-          <Divider />
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-            <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
-              {busy ? 'Rendering…' : 'Applies to every render of this file.'}
-            </Typography>
-            <Button size="small" disabled={!pending.up && !turntable} onClick={() => apply({})}>
-              Reset
-            </Button>
-          </Stack>
-          {error && (
-            <Typography variant="caption" color="error">
-              {error}
-            </Typography>
-          )}
-        </Stack>
+/// One orientation for a bundle's whole gallery.
+///
+/// A bundle's own renders come from files that were authored together, so they
+/// are wrong together: a Z-up publisher makes every one of them lie down, and
+/// fixing them one popover at a time is the same answer typed six times. This is
+/// the control above with every render in the gallery as its subject — the axis
+/// still lands on each source file, so the fix outlives these pictures.
+///
+/// Renders on the member models are not touched: they have galleries and controls
+/// of their own. Nothing is drawn unless there are at least two renders here to
+/// fix, since one of them is what the per-image button is for.
+export function BundleRenderOrientation({
+  bundleId,
+  images,
+  onRendered,
+}: {
+  bundleId: string
+  /** the bundle's own gallery, renders and uploaded photos alike */
+  images: ImageRecord[]
+  onRendered: () => void
+}) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null)
+  const renders = useMemo(() => images.filter(canReorient), [images])
+  const seed = useMemo(() => sharedOverrides(renders), [renders])
+  const { pending, apply, busy, error } = useOrientation(seed, !!anchor, async (next) => {
+    const { job_ids } = await api.rerenderBundleImages(bundleId, next)
+    // Every picture, not just the first: the gallery is only worth refetching
+    // once the last of them has been redrawn.
+    await Promise.all(job_ids.map((id) => waitForJob(id)))
+    onRendered()
+  })
+
+  if (renders.length < 2) return null
+
+  return (
+    <>
+      {/* `describeChild`, unlike the icon-only buttons above: a Tooltip's title
+          otherwise becomes the child's `aria-label` and *replaces* its visible
+          text as the accessible name, so this button would announce as the hint
+          and answer to nothing a user can see. */}
+      <Tooltip describeChild title="Fix which way up this bundle’s renders — all of them at once">
+        <Button
+          size="small"
+          startIcon={
+            busy ? <CircularProgress size={16} /> : <ThreeDRotationIcon sx={{ fontSize: 18 }} />
+          }
+          onClick={(e) => setAnchor(e.currentTarget)}
+        >
+          Orient all {renders.length}
+        </Button>
+      </Tooltip>
+
+      <Popover
+        open={!!anchor}
+        anchorEl={anchor}
+        onClose={() => setAnchor(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+      >
+        <OrientationControls
+          value={pending}
+          onChange={apply}
+          busy={busy}
+          covers={`Applies to all ${renders.length} renders here — not to the member models.`}
+          error={error}
+        />
       </Popover>
     </>
   )

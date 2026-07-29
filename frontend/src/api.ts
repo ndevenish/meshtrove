@@ -993,6 +993,10 @@ export const api = {
   /// Returns the job — the image row is rewritten in place, so its id stays put.
   rerenderImage: (imageId: string, overrides: RenderOverrides) =>
     request<{ job_id: number }>(`/api/images/${imageId}/rerender`, json(overrides)),
+  /// The same fix over a bundle's whole gallery: one orientation onto every
+  /// render it holds (member models keep their own). Returns a job per picture.
+  rerenderBundleImages: (bundleId: string, overrides: RenderOverrides) =>
+    request<{ job_ids: number[] }>(`/api/bundles/${bundleId}/images/rerender`, json(overrides)),
   job: (jobId: number) => request<Job>(`/api/jobs/${jobId}`),
 
   creators: (q = '') => request<Creator[]>(`/api/creators?q=${encodeURIComponent(q)}`),
