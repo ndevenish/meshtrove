@@ -41,3 +41,8 @@ utoipa = { version = "5.5.0", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1.23.5", features = ["v4", "serde"] }
 zip = "8.6.0"
+
+[dev-dependencies]
+# The deserializer behind `axum::extract::Query`, so a query-string test parses
+# a URL exactly the way a request does (see `routes::models::de_flag`).
+serde_urlencoded = "0.7.1"

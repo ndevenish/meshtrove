@@ -60,7 +60,9 @@ pub struct SearchQuery {
     pub per_page: Option<u32>,
     /// Admin-only escape hatch: include hidden-tagged items in the results. The
     /// handler ANDs this with the caller actually being an admin, so a forged
-    /// `show_hidden=1` from a non-admin does nothing.
+    /// `show_hidden=1` from a non-admin does nothing. `1` is the spelling the
+    /// browse URL uses — see [`de_flag`], which is what makes it one.
+    #[serde(default, deserialize_with = "de_flag")]
     pub show_hidden: Option<bool>,
     /// Custom-field filters, as a JSON object of `field key → [selected tokens]`
     /// (see `custom_fields::parse_cf_filters`). Only browse reads it.
@@ -99,6 +101,35 @@ pub struct SearchResults {
     pub total: i64,
     pub page: u32,
     pub per_page: u32,
+}
+
+/// Read a query-string flag written the way a URL actually writes one.
+///
+/// serde's `bool` accepts `true`/`false` and nothing else, so `show_hidden=1` —
+/// the form the browse toggle puts in the address bar, and the form these
+/// handlers' own docs promise — was rejected before any handler ran: "Show
+/// hidden" answered an admin's audit with a 400 instead of the hidden models.
+/// The flag lives in a URL people share and hand-edit, so accept the spellings
+/// a URL carries: `1`, `true`, `yes`, `on` (any case) are yes; `0`, `false`,
+/// `no`, `off` and a valueless `?flag=` are no.
+///
+/// Anything else is still an error rather than a silent `false`: a mistyped flag
+/// that reads as "off" looks exactly like the bug this replaces.
+pub fn de_flag<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "" | "0" | "false" | "no" | "off" => Ok(Some(false)),
+        other => Err(D::Error::custom(format!(
+            "expected a flag (1/0, true/false, yes/no, on/off), got `{other}`"
+        ))),
+    }
 }
 
 /// Split a comma-separated query parameter into trimmed, non-empty names.
@@ -1145,5 +1176,49 @@ async fn label_revision(
             "that label is already used on this model".into(),
         )),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of `de_flag`: parse the query string the browse page
+    /// actually builds. `show_hidden=1` used to 400 before the handler ran.
+    fn show_hidden(query: &str) -> Result<Option<bool>, serde_urlencoded::de::Error> {
+        serde_urlencoded::from_str::<SearchQuery>(query).map(|q| q.show_hidden)
+    }
+
+    #[test]
+    fn a_flag_reads_the_spellings_a_url_uses() {
+        for yes in [
+            "show_hidden=1",
+            "show_hidden=true",
+            "show_hidden=TRUE",
+            "show_hidden=on",
+        ] {
+            assert_eq!(show_hidden(yes).unwrap(), Some(true), "{yes}");
+        }
+        for no in [
+            "show_hidden=0",
+            "show_hidden=false",
+            "show_hidden=off",
+            "show_hidden=",
+        ] {
+            assert_eq!(show_hidden(no).unwrap(), Some(false), "{no}");
+        }
+    }
+
+    #[test]
+    fn an_absent_flag_is_absent_not_an_error() {
+        assert_eq!(show_hidden("").unwrap(), None);
+        assert_eq!(show_hidden("q=knight").unwrap(), None);
+    }
+
+    /// A typo stays an error: read as "off" it would silently hide the very
+    /// models the flag was flipped to see, which is the bug this replaced.
+    #[test]
+    fn a_flag_that_means_nothing_is_rejected() {
+        assert!(show_hidden("show_hidden=ture").is_err());
     }
 }

@@ -14,7 +14,7 @@ use crate::error::ApiError;
 use crate::extractors::User;
 use crate::routes::custom_fields::{CfSide, parse_cf_filters};
 use crate::routes::models::{
-    parse_csv, push_model_hidden_exclude, push_model_tag_filters, push_text_filter,
+    de_flag, parse_csv, push_model_hidden_exclude, push_model_tag_filters, push_text_filter,
     push_variant_group,
 };
 use crate::state::AppState;
@@ -54,7 +54,9 @@ pub struct ListQuery {
     /// tag's co-occurrence count reflects them too.
     pub sel_cf: Option<String>,
     /// Admin-only: include hidden tags (and count hidden items), paired with the
-    /// browse "Show hidden" toggle. ANDed with the caller being an admin.
+    /// browse "Show hidden" toggle. ANDed with the caller being an admin. Sent as
+    /// `show_hidden=1`, which needs [`de_flag`] to be read as a bool at all.
+    #[serde(default, deserialize_with = "de_flag")]
     pub show_hidden: Option<bool>,
 }
 
