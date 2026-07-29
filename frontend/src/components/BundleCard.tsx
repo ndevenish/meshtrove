@@ -9,7 +9,14 @@ import LikeButton from './LikeButton'
 /// shows the member-model count; a "Bundle" chip makes the mixed grid scannable.
 type BundleCardData = Pick<
   BundleSummary,
-  'id' | 'slug' | 'name' | 'creator_name' | 'primary_image_id' | 'model_count' | 'tags'
+  | 'id'
+  | 'slug'
+  | 'name'
+  | 'creator_name'
+  | 'primary_image_id'
+  | 'primary_image_version'
+  | 'model_count'
+  | 'tags'
 > & { liked: boolean; like_count: number }
 
 export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
@@ -34,7 +41,7 @@ export default function BundleCard({ bundle }: { bundle: BundleCardData }) {
           {bundle.primary_image_id ? (
             <Box
               component="img"
-              src={squareImageUrl(bundle.primary_image_id)}
+              src={squareImageUrl(bundle.primary_image_id, 512, bundle.primary_image_version)}
               alt={bundle.name}
               loading="lazy"
               sx={{ width: '100%', height: '100%', objectFit: 'cover' }}

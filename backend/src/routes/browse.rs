@@ -37,6 +37,10 @@ pub struct BrowseItem {
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
     pub primary_image_id: Option<Uuid>,
+    /// The blob the preview image is currently made of. A re-render keeps the id
+    /// and changes the bytes, so the card puts this in its image URL to keep the
+    /// browser from serving the render it replaced. See `image_version` (SQL).
+    pub primary_image_version: Option<String>,
     pub tags: Vec<String>,
     /// Carries an admin-hidden tag. In normal browsing these are excluded, so
     /// this is only ever true for an admin who turned on "Show hidden".
@@ -60,6 +64,7 @@ pub fn push_model_columns(qb: &mut QueryBuilder<sqlx::Postgres>, viewer: Uuid) {
     qb.push(
         r#"'model' AS item_type, m.id, m.name, m.slug, m.creator_id, c.name AS creator_name,
            model_preview_image(m.id) AS primary_image_id,
+           image_version(model_preview_image(m.id)) AS primary_image_version,
            (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
            EXISTS (SELECT 1 FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = "#,
     )
@@ -87,6 +92,7 @@ pub fn push_bundle_columns(
     qb.push(format!(
         r#"'bundle' AS item_type, b.id, b.name, b.slug, b.creator_id, c.name AS creator_name,
            bundle_preview_image(b.id, {include_hidden}) AS primary_image_id,
+           image_version(bundle_preview_image(b.id, {include_hidden})) AS primary_image_version,
            (SELECT count(*) FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked') AS like_count,
            EXISTS (SELECT 1 FROM user_bundle_marks k WHERE k.bundle_id = b.id AND k.mark = 'liked' AND k.user_id = "#
     ))
@@ -111,6 +117,7 @@ pub fn decode_browse_item(row: &sqlx::postgres::PgRow) -> Result<BrowseItem, sql
         creator_id: row.try_get("creator_id")?,
         creator_name: row.try_get("creator_name")?,
         primary_image_id: row.try_get("primary_image_id")?,
+        primary_image_version: row.try_get("primary_image_version")?,
         tags: row.try_get("tags")?,
         hidden: row.try_get("hidden")?,
         like_count: row.try_get("like_count")?,

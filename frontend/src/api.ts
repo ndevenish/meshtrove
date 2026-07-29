@@ -132,6 +132,8 @@ export interface ModelSummary {
   creator_id: string | null
   creator_name: string | null
   primary_image_id: string | null
+  /** The blob the preview image is made of — see `squareImageUrl`. */
+  primary_image_version: string | null
   tags: string[]
   like_count: number
   /** whether the *calling* user has liked it — what the heart button renders */
@@ -255,6 +257,8 @@ export interface BundleSummary {
   creator_id: string | null
   creator_name: string | null
   primary_image_id: string | null
+  /** The blob the preview image is made of — see `squareImageUrl`. */
+  primary_image_version: string | null
   tags: string[]
   model_count: number
   updated_at: string
@@ -320,6 +324,8 @@ export interface BrowseItem {
   creator_id: string | null
   creator_name: string | null
   primary_image_id: string | null
+  /** The blob the preview image is made of — see `squareImageUrl`. */
+  primary_image_version: string | null
   tags: string[]
   /** Carries an admin-hidden tag; only ever true for an admin with "Show hidden" on. */
   hidden: boolean
@@ -1233,11 +1239,16 @@ export const imageUrl = (id: string, version?: string | null) =>
 /// regions rather than centre-cropping the subject. Already-square images are
 /// served unchanged. `size` is the edge length in CSS pixels before DPR.
 ///
-/// `version` (an image's `blob_sha256`) is optional here, unlike on `imageUrl`:
-/// the cards work from a summary that carries only the image id. Supplying it
-/// lets the server cache the answer permanently; without it the picture is held
-/// for five minutes and then revalidated against an ETag, which is what lets a
-/// re-render reach a card whose id never changed.
+/// `version` — the image's `blob_sha256`, which summaries carry as
+/// `primary_image_version` — is what makes the URL name *these* bytes: a
+/// re-render keeps the image id, so a card that asks for the id alone can be
+/// answered from cache with the render it replaced. Pass it and the URL moves
+/// with the picture, so the browser has no stale entry to serve and the server
+/// can mark the answer immutable.
+///
+/// It stays optional for a caller that genuinely has no version to give (a
+/// summary whose preview image has none). That URL is cached for five minutes
+/// and then revalidated against an ETag — correct, but a beat behind.
 export const squareImageUrl = (id: string, size = 512, version?: string | null) =>
   `/api/images/${id}/square?size=${size}${version ? `&v=${version.slice(0, 12)}` : ''}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`

@@ -68,6 +68,10 @@ pub struct BundleSummary {
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
     pub primary_image_id: Option<Uuid>,
+    /// The blob the preview image is currently made of. A re-render keeps the id
+    /// and changes the bytes, so the card puts this in its image URL to keep the
+    /// browser from serving the render it replaced. See `image_version` (SQL).
+    pub primary_image_version: Option<String>,
     pub tags: Vec<String>,
     pub model_count: i64,
     pub updated_at: DateTime<Utc>,
@@ -118,6 +122,7 @@ fn bundle_summary_cols(include_hidden: bool) -> String {
         r#"b.id, b.name, b.slug, b.creator_id,
     b.updated_at, c.name AS creator_name,
     bundle_preview_image(b.id, {include_hidden}) AS primary_image_id,
+    image_version(bundle_preview_image(b.id, {include_hidden})) AS primary_image_version,
     (SELECT count(*) FROM bundle_models bm JOIN models m ON m.id = bm.model_id
      WHERE bm.bundle_id = b.id AND ({include_hidden} OR NOT m.hidden)) AS model_count,
     coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM bundle_tags bt
@@ -133,6 +138,7 @@ fn bundle_summary_from_row(row: &sqlx::postgres::PgRow) -> Result<BundleSummary,
         creator_id: row.try_get("creator_id")?,
         creator_name: row.try_get("creator_name")?,
         primary_image_id: row.try_get("primary_image_id")?,
+        primary_image_version: row.try_get("primary_image_version")?,
         tags: row.try_get("tags")?,
         model_count: row.try_get("model_count")?,
         updated_at: row.try_get("updated_at")?,
@@ -354,6 +360,7 @@ async fn fetch_members(
     let rows = sqlx::query!(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, c.name as "creator_name?", m.updated_at,
                   model_preview_image(m.id) as primary_image_id,
+                  image_version(model_preview_image(m.id)) as primary_image_version,
                   (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as "like_count!",
                   EXISTS (SELECT 1 FROM user_model_marks k
                            WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as "liked!",
@@ -380,6 +387,7 @@ async fn fetch_members(
             creator_id: r.creator_id,
             creator_name: r.creator_name,
             primary_image_id: r.primary_image_id,
+            primary_image_version: r.primary_image_version,
             like_count: r.like_count,
             liked: r.liked,
             variant_count: r.variant_count,

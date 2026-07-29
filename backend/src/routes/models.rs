@@ -75,6 +75,10 @@ pub struct ModelSummary {
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
     pub primary_image_id: Option<Uuid>,
+    /// The blob the preview image is currently made of. A re-render keeps the id
+    /// and changes the bytes, so the card puts this in its image URL to keep the
+    /// browser from serving the render it replaced. See `image_version` (SQL).
+    pub primary_image_version: Option<String>,
     pub tags: Vec<String>,
     pub like_count: i64,
     /// whether the *calling* user has liked it — what the heart button renders
@@ -200,6 +204,7 @@ async fn search(
     let mut qb = QueryBuilder::new(
         r#"SELECT m.id, m.name, m.slug, m.creator_id, m.updated_at, c.name AS creator_name,
               model_preview_image(m.id) AS primary_image_id,
+              image_version(model_preview_image(m.id)) AS primary_image_version,
               (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') AS like_count,
               (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) AS variant_count,
               coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt
@@ -236,6 +241,7 @@ async fn search(
                     creator_id: row.try_get("creator_id")?,
                     creator_name: row.try_get("creator_name")?,
                     primary_image_id: row.try_get("primary_image_id")?,
+                    primary_image_version: row.try_get("primary_image_version")?,
                     like_count: row.try_get("like_count")?,
                     liked: row.try_get("liked")?,
                     variant_count: row.try_get("variant_count")?,

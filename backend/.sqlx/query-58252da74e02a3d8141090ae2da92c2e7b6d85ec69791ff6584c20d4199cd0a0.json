@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.id, m.name, m.slug, m.creator_id, c.name as \"creator_name?\", m.updated_at,\n                  model_preview_image(m.id) as primary_image_id,\n                  (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as \"like_count!\",\n                  EXISTS (SELECT 1 FROM user_model_marks k\n                           WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as \"liked!\",\n                  (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as \"variant_count!\",\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as \"tags!\",\n                  m.hidden as \"hidden!\"\n           FROM models m LEFT JOIN creators c ON c.id = m.creator_id\n           WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)\n             AND ($3 OR NOT m.hidden)\n           ORDER BY m.name",
+  "query": "SELECT m.id, m.name, m.slug, m.creator_id, c.name as \"creator_name?\", m.updated_at,\n                  model_preview_image(m.id) as primary_image_id,\n                  image_version(model_preview_image(m.id)) as primary_image_version,\n                  (SELECT count(*) FROM user_model_marks k WHERE k.model_id = m.id AND k.mark = 'liked') as \"like_count!\",\n                  EXISTS (SELECT 1 FROM user_model_marks k\n                           WHERE k.model_id = m.id AND k.mark = 'liked' AND k.user_id = $2) as \"liked!\",\n                  (SELECT count(*) FROM model_variants v WHERE v.model_id = m.id) as \"variant_count!\",\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name) FROM model_tags mt\n                            JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = m.id), '{}') as \"tags!\",\n                  m.hidden as \"hidden!\"\n           FROM models m LEFT JOIN creators c ON c.id = m.creator_id\n           WHERE m.id IN (SELECT model_id FROM bundle_models WHERE bundle_id = $1)\n             AND ($3 OR NOT m.hidden)\n           ORDER BY m.name",
   "describe": {
     "columns": [
       {
@@ -77,30 +77,36 @@
       },
       {
         "ordinal": 7,
+        "name": "primary_image_version",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
         "name": "like_count!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "liked!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "variant_count!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "tags!",
         "type_info": "TextArray",
         "origin": "Expression"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "hidden!",
         "type_info": "Bool",
         "origin": {
@@ -130,8 +136,9 @@
       null,
       null,
       null,
+      null,
       false
     ]
   },
-  "hash": "cdfb358f9d4c2a38ae2adcdd1ae2fa1c75d275e53d9293b92f4de34b42cb1138"
+  "hash": "58252da74e02a3d8141090ae2da92c2e7b6d85ec69791ff6584c20d4199cd0a0"
 }

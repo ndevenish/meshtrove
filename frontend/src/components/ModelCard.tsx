@@ -56,7 +56,7 @@ export default function ModelCard({
           {model.primary_image_id ? (
             <Box
               component="img"
-              src={squareImageUrl(model.primary_image_id)}
+              src={squareImageUrl(model.primary_image_id, 512, model.primary_image_version)}
               alt={model.name}
               loading="lazy"
               sx={{ width: '100%', height: '100%', objectFit: 'cover' }}

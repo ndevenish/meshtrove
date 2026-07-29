@@ -380,10 +380,15 @@ struct SquareQuery {
 /// Caching: an image id used to name one blob for good, so this was marked
 /// immutable and never asked for again. A re-render rewrites the row in place —
 /// same id, different bytes — so that promise only holds for a caller that says
-/// which bytes it means, by passing the blob as `v` (the gallery does; a card
-/// working from a summary does not). Everything else gets an ETag and a short
-/// life, so a corrected render reaches the cards instead of being cached over
-/// them for a year.
+/// which bytes it means, by passing the blob as `v`. Both the gallery and the
+/// cards do: a summary carries `primary_image_version` for exactly this.
+///
+/// A caller that names no bytes gets an ETag and five minutes instead of a year,
+/// so a corrected render still reaches it — a beat late, but it arrives. That
+/// fallback is the belt to the `v` braces, and it is deliberately not the plan:
+/// header changes cannot reach a URL a browser has *already* filed away as
+/// immutable, so only a URL that moves with the bytes actually guarantees the
+/// new picture. Keep summaries handing their version to the cards.
 async fn serve_square(
     State(state): State<AppState>,
     _user: User,
