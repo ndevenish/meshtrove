@@ -68,9 +68,9 @@ export default function ModelPage() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [toast, setToast] = useState('')
-  // Tags edit under the gallery, in the other column from the rest of the form:
-  // the editor keeps the draft and draws the control into this node. State rather
-  // than a ref, so attaching it re-renders and the portal finds its target.
+  // Where the tags control draws: under the gallery, in the other column from the
+  // rest of the form, while the editor keeps the draft. State rather than a ref,
+  // so attaching the node re-renders and the portal finds its target.
   const [tagsSlot, setTagsSlot] = useState<HTMLDivElement | null>(null)
   const [uploadPct, setUploadPct] = useState<number | null>(null)
   // Import scraped metadata: the inline drop box lives in edit mode, so the
@@ -410,11 +410,31 @@ export default function ModelPage() {
               </Button>
             )}
           </Stack>
-          {/* Tags, while editing: a wide strip of chips that grows as you type,
-              and it crowded the fields that name the model. Under the pictures it
-              has the room, and the column has the slack. ModelDetailsEditor still
-              owns the draft — this is only where it draws. */}
-          {editing && <Box ref={setTagsSlot} sx={{ mt: 2 }} />}
+          {/* Tags live under the pictures in both modes — they are how you leave
+              this model for another like it, not part of what it says about
+              itself, and reading them in one place and editing them in another
+              would be two layouts to learn. The column has the width for a strip
+              of chips; the details column did not. While editing,
+              ModelDetailsEditor keeps the draft and portals its control into this
+              node: the layout is the page's, the state stays with the form. */}
+          {editing ? (
+            <Box ref={setTagsSlot} sx={{ mt: 2 }} />
+          ) : (
+            model.tags.length > 0 && (
+              <Stack direction="row" spacing={1} sx={{ mt: 2, flexWrap: 'wrap', gap: 1 }}>
+                {model.tags.map((tag) => (
+                  <Chip
+                    key={tag}
+                    label={tag}
+                    size="small"
+                    component={Link}
+                    to={`/?tags=${encodeURIComponent(tag)}`}
+                    clickable
+                  />
+                ))}
+              </Stack>
+            )
+          )}
         </Box>
 
         {/* Details */}
@@ -439,58 +459,66 @@ export default function ModelPage() {
                 </Button>
               </>
             )}
-            {canEdit && editing && (
-              <Stack direction="row" spacing={1}>
-                {/* Merge and Delete both sit at the far end from Save, clear of
-                    where a double-click on the primary action would land, so a
-                    stray second click can't fall on either. */}
-                {/* The mirror of Merge, and a workbench rather than a dialog:
-                    it needs the rule editor and the whole file list, so it gets
-                    a page of its own. */}
-                <Button
-                  component={Link}
-                  to={`/models/${model.slug}/carve`}
-                  startIcon={<ContentCutIcon />}
-                  disabled={saving}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Carve…
-                </Button>
-                <Button
-                  startIcon={<MergeIcon />}
-                  disabled={saving}
-                  onClick={() => setMergeOpen(true)}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Merge in…
-                </Button>
-                <Button
-                  color="error"
-                  startIcon={<DeleteIcon />}
-                  disabled={saving}
-                  onClick={() => setDeleteOpen(true)}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Delete model
-                </Button>
-                <Button
-                  variant="contained"
-                  disabled={saving}
-                  onClick={() => {
-                    void editorRef.current?.save().catch(() => {
-                      // The editor shows the reason; stay in edit mode so the
-                      // half-typed changes are not thrown away.
-                    })
-                  }}
-                >
-                  Save
-                </Button>
-                <Button disabled={saving} onClick={() => setEditing(false)}>
-                  Cancel
-                </Button>
-              </Stack>
-            )}
           </Stack>
+
+          {/* Six buttons on the title's line left the title a word wide and
+              wrapping. In edit mode they get a line of their own, under the name
+              rather than squeezing it. */}
+          {canEdit && editing && (
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ justifyContent: 'flex-end', flexWrap: 'wrap', gap: 1, mt: 1, mb: 1 }}
+            >
+              {/* Merge and Delete both sit at the far end from Save, clear of
+                  where a double-click on the primary action would land, so a
+                  stray second click can't fall on either. */}
+              {/* The mirror of Merge, and a workbench rather than a dialog:
+                  it needs the rule editor and the whole file list, so it gets
+                  a page of its own. */}
+              <Button
+                component={Link}
+                to={`/models/${model.slug}/carve`}
+                startIcon={<ContentCutIcon />}
+                disabled={saving}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Carve…
+              </Button>
+              <Button
+                startIcon={<MergeIcon />}
+                disabled={saving}
+                onClick={() => setMergeOpen(true)}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Merge in…
+              </Button>
+              <Button
+                color="error"
+                startIcon={<DeleteIcon />}
+                disabled={saving}
+                onClick={() => setDeleteOpen(true)}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Delete model
+              </Button>
+              <Button
+                variant="contained"
+                disabled={saving}
+                onClick={() => {
+                  void editorRef.current?.save().catch(() => {
+                    // The editor shows the reason; stay in edit mode so the
+                    // half-typed changes are not thrown away.
+                  })
+                }}
+              >
+                Save
+              </Button>
+              <Button disabled={saving} onClick={() => setEditing(false)}>
+                Cancel
+              </Button>
+            </Stack>
+          )}
 
           {editing && (
             <>
@@ -598,20 +626,6 @@ export default function ModelPage() {
               ))}
             </Stack>
           )}
-          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 2 }}>
-            {!editing &&
-              model.tags.map((tag) => (
-                <Chip
-                  key={tag}
-                  label={tag}
-                  size="small"
-                  component={Link}
-                  to={`/?tags=${encodeURIComponent(tag)}`}
-                  clickable
-                />
-              ))}
-          </Stack>
-
           {(model.license || model.purchase_price != null) && (
             <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
               <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap', gap: 1 }}>
