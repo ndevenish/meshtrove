@@ -124,12 +124,16 @@ pub fn push_variant_tag_filters(qb: &mut QueryBuilder<sqlx::Postgres>, vtags: &[
     }
 }
 
-/// Full-text + fuzzy-name predicate (alias `m`).
+/// Full-text + fuzzy-name predicate (alias `m`). The substring arms catch what
+/// the tsvector tokenizer cannot: half a name, or a fragment of a creator's SKU
+/// pasted out of an invoice.
 pub fn push_text_filter(qb: &mut QueryBuilder<sqlx::Postgres>, q: &str) {
     if !q.is_empty() {
         qb.push(" AND (m.search @@ websearch_to_tsquery('english', ")
             .push_bind(q.to_string())
             .push(") OR m.name ILIKE '%' || ")
+            .push_bind(q.to_string())
+            .push(" || '%' OR m.creator_ref ILIKE '%' || ")
             .push_bind(q.to_string())
             .push(" || '%')");
     }
