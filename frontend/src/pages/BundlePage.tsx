@@ -308,13 +308,14 @@ export default function BundlePage() {
               </Button>
             )}
           </Stack>
-          {/* One axis for the lot. Under the strip rather than on it: it is about
-              every thumbnail above, not any one of them. Draws nothing unless
-              there are two or more renders to fix. */}
+          {/* One axis for the lot — the member models' previews above all, since
+              a bundle usually owns no renders of its own. Under the strip rather
+              than on it: it is about no one picture. Draws nothing unless there
+              are two or more to fix. */}
           {canEdit && (
             <BundleRenderOrientation
               bundleId={bundle.id}
-              images={bundle.images}
+              orientable={bundle.orientable}
               onRendered={refresh}
             />
           )}

@@ -28,6 +28,7 @@ use crate::routes::models::{
     DescriptionInput, ImageSummary, LabelInput, ModelSummary, Revision, SearchQuery,
 };
 use crate::routes::tags::upsert_tag;
+use crate::services::renderer::RenderOverrides;
 use crate::state::AppState;
 use crate::util::{slug_token, slug_token_of, slugify};
 
@@ -216,6 +217,19 @@ pub struct BundleInput {
     pub custom_fields: Option<Vec<CustomFieldValueInput>>,
 }
 
+/// The subject of the bundle's "orient all" control, summarised for the UI: how
+/// many pictures it would redraw, and where they already stand.
+#[derive(Serialize, ToSchema)]
+pub struct OrientableRenders {
+    /// Renders this bundle shows that could be re-oriented — every member's
+    /// preview picture, plus any render in the bundle's own gallery.
+    pub count: i64,
+    /// The orientation they *all* currently share, or `None` where they differ or
+    /// none is set. It seeds the control: fixing a bundle and coming back should
+    /// find the fix, not a blank that undoes it on the first click.
+    pub shared_overrides: Option<RenderOverrides>,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct BundleDetail {
     pub id: Uuid,
@@ -231,6 +245,12 @@ pub struct BundleDetail {
     pub custom_fields: Vec<CustomFieldValueDetail>,
     pub models: Vec<ModelSummary>,
     pub images: Vec<ImageSummary>,
+    /// What a one-axis fix over this bundle would cover, for the control that
+    /// offers it. The pictures themselves are mostly the *members'* previews,
+    /// which are not in this payload's `images` (a bundle rarely owns files of
+    /// its own) and whose orientation the page therefore cannot work out for
+    /// itself.
+    pub orientable: OrientableRenders,
     /// The bundle's primary categories (import sections), in tab order. A
     /// category is a model tag; a member belongs to it by carrying that tag.
     pub categories: Vec<String>,
@@ -430,6 +450,27 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
     let models = fetch_members(state, id, user).await?;
     let custom_fields = fetch_values(state, ValueOwner::Bundle(id), user).await?;
 
+    // Counted here rather than derived from `images` above: what the control
+    // covers is mostly the members' previews, which this payload carries only as
+    // ids on `models` — with no kind, no source file and no orientation to read.
+    let orientable = crate::routes::images::bundle_orientable_renders(&state.db, id).await?;
+    // Parsed before comparing, not compared as raw JSON: `{"up":"+Z"}` and
+    // `{"up":"+Z","turntable":null}` are the same orientation written twice.
+    let orientations: Vec<Option<RenderOverrides>> = orientable
+        .into_iter()
+        .map(|render| crate::routes::models::parse_overrides(render.render_overrides))
+        .collect();
+    // A state to open on only where they already agree. Seeding from one of a
+    // disagreeing set would offer to re-orient the rest to match it.
+    let shared_overrides = match orientations.split_first() {
+        Some((first, rest)) if rest.iter().all(|other| other == first) => first.clone(),
+        _ => None,
+    };
+    let orientable = OrientableRenders {
+        count: orientations.len() as i64,
+        shared_overrides,
+    };
+
     let categories: Vec<String> = sqlx::query_scalar!(
         r#"SELECT t.name::text as "name!" FROM bundle_categories bc
            JOIN tags t ON t.id = bc.tag_id
@@ -450,6 +491,7 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
         description_md: row.description_md,
         custom_fields,
         models,
+        orientable,
         images: images
             .into_iter()
             .map(|i| ImageSummary {

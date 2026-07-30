@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.source_file_id as \"file_id!\", i.render_overrides\n           FROM images i\n           WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL\n             AND (i.bundle_id = $1\n                  OR i.id IN (SELECT model_preview_image(bm.model_id)\n                              FROM bundle_models bm WHERE bm.bundle_id = $1))\n           ORDER BY i.is_primary DESC, i.sort_order, i.created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "file_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "source_file_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "render_overrides",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "render_overrides"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "318276136227ad437b05ad64f232987799c7e1f677757067a0a7ecc4eb3143c7"
+}

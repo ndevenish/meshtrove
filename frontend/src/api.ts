@@ -277,10 +277,24 @@ export interface BundleDetail {
   custom_fields: CustomFieldValue[]
   models: ModelSummary[]
   images: ImageRecord[]
+  /** what a one-axis fix over this bundle would cover — mostly the *members'*
+      preview pictures, which are not in `images` and whose orientation the page
+      therefore cannot work out for itself */
+  orientable: OrientableRenders
   /** primary categories (import sections), in tab order; each is a model tag a
       member may carry */
   categories: string[]
   created_by: string
+}
+
+/// The subject of a bundle's "orient all" control.
+export interface OrientableRenders {
+  /** renders the bundle shows that could be re-oriented: every member's preview,
+      plus any render in the bundle's own gallery */
+  count: number
+  /** the orientation they all already share, or null where they differ or none
+      is set — what the control opens on */
+  shared_overrides: RenderOverrides | null
 }
 
 /// What a bulk member retag did. Counts are tag *assignments*, not distinct
@@ -1019,8 +1033,9 @@ export const api = {
   /// Returns the job — the image row is rewritten in place, so its id stays put.
   rerenderImage: (imageId: string, overrides: RenderOverrides) =>
     request<{ job_id: number }>(`/api/images/${imageId}/rerender`, json(overrides)),
-  /// The same fix over a bundle's whole gallery: one orientation onto every
-  /// render it holds (member models keep their own). Returns a job per picture.
+  /// The same fix over everything a bundle shows: one orientation onto every
+  /// member model's preview render, plus any render in the bundle's own gallery.
+  /// Returns a job per picture.
   rerenderBundleImages: (bundleId: string, overrides: RenderOverrides) =>
     request<{ job_ids: number[] }>(`/api/bundles/${bundleId}/images/rerender`, json(overrides)),
   job: (jobId: number) => request<Job>(`/api/jobs/${jobId}`),

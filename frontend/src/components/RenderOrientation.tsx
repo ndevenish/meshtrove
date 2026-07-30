@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -17,7 +17,13 @@ import RotateLeftIcon from '@mui/icons-material/RotateLeft'
 import RotateRightIcon from '@mui/icons-material/RotateRight'
 import SwapVertIcon from '@mui/icons-material/SwapVert'
 
-import { api, waitForJob, type ImageRecord, type RenderOverrides } from '../api'
+import {
+  api,
+  waitForJob,
+  type ImageRecord,
+  type OrientableRenders,
+  type RenderOverrides,
+} from '../api'
 
 /// The turntable turns in eighths. Finer than that is a slider, and a slider is
 /// a lot of renders to find the angle you could have clicked to.
@@ -427,52 +433,46 @@ export default function RenderOrientation({
   )
 }
 
-/// The orientation a set of renders agree on, or nothing if they disagree — what
-/// a gallery-wide control opens showing. Fixing a gallery once and coming back
-/// should find the fix, not a blank panel that would undo it on the first click.
-function sharedOverrides(images: ImageRecord[]): RenderOverrides {
-  const first = images[0]?.render_overrides ?? NO_OVERRIDES
-  const agree = images.every(
-    (image) =>
-      (image.render_overrides?.up ?? null) === (first.up ?? null) &&
-      (image.render_overrides?.turntable ?? 0) === (first.turntable ?? 0),
-  )
-  return agree ? first : NO_OVERRIDES
-}
-
-/// One orientation for a bundle's whole gallery.
+/// One orientation for everything a bundle shows.
 ///
-/// A bundle's own renders come from files that were authored together, so they
-/// are wrong together: a Z-up publisher makes every one of them lie down, and
-/// fixing them one popover at a time is the same answer typed six times. This is
-/// the control above with every render in the gallery as its subject — the axis
-/// still lands on each source file, so the fix outlives these pictures.
+/// A bundle is one purchase, from files that were authored together, so they are
+/// wrong together: a Z-up publisher lays every one of them on its side, and the
+/// per-image popover then means the same answer typed once per model. This is the
+/// control above with the whole crate as its subject — chiefly the *member
+/// models' previews*, which is what a bundle page is a wall of, plus any render
+/// in the bundle's own gallery. The axis still lands on each source file, so the
+/// fix outlives these pictures.
 ///
-/// Renders on the member models are not touched: they have galleries and controls
-/// of their own. Nothing is drawn unless there are at least two renders here to
-/// fix, since one of them is what the per-image button is for.
+/// What it covers is counted by the server (`bundle.orientable`), not from the
+/// gallery below: the members' previews are not in this page's `images`, and a
+/// bundle rarely owns files of its own. Nothing is drawn unless there are at
+/// least two pictures to fix, since one of them is what a per-image button is
+/// for.
 export function BundleRenderOrientation({
   bundleId,
-  images,
+  orientable,
   onRendered,
 }: {
   bundleId: string
-  /** the bundle's own gallery, renders and uploaded photos alike */
-  images: ImageRecord[]
+  /** what the fix would cover, straight off the bundle query so the seed it
+      carries stays referentially stable between renders */
+  orientable: OrientableRenders
   onRendered: () => void
 }) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
-  const renders = useMemo(() => images.filter(canReorient), [images])
-  const seed = useMemo(() => sharedOverrides(renders), [renders])
-  const { pending, apply, busy, error } = useOrientation(seed, !!anchor, async (next) => {
-    const { job_ids } = await api.rerenderBundleImages(bundleId, next)
-    // Every picture, not just the first: the gallery is only worth refetching
-    // once the last of them has been redrawn.
-    await Promise.all(job_ids.map((id) => waitForJob(id)))
-    onRendered()
-  })
+  const { pending, apply, busy, error } = useOrientation(
+    orientable.shared_overrides ?? NO_OVERRIDES,
+    !!anchor,
+    async (next) => {
+      const { job_ids } = await api.rerenderBundleImages(bundleId, next)
+      // Every picture, not just the first: the page is only worth refetching once
+      // the last of them has been redrawn.
+      await Promise.all(job_ids.map((id) => waitForJob(id)))
+      onRendered()
+    },
+  )
 
-  if (renders.length < 2) return null
+  if (orientable.count < 2) return null
 
   return (
     <>
@@ -480,7 +480,10 @@ export function BundleRenderOrientation({
           otherwise becomes the child's `aria-label` and *replaces* its visible
           text as the accessible name, so this button would announce as the hint
           and answer to nothing a user can see. */}
-      <Tooltip describeChild title="Fix which way up this bundle’s renders — all of them at once">
+      <Tooltip
+        describeChild
+        title="Fix which way up this bundle renders — every model’s preview at once"
+      >
         <Button
           size="small"
           startIcon={
@@ -488,7 +491,7 @@ export function BundleRenderOrientation({
           }
           onClick={(e) => setAnchor(e.currentTarget)}
         >
-          Orient all {renders.length}
+          Orient all {orientable.count}
         </Button>
       </Tooltip>
 
@@ -503,7 +506,7 @@ export function BundleRenderOrientation({
           value={pending}
           onChange={apply}
           busy={busy}
-          covers={`Applies to all ${renders.length} renders here — not to the member models.`}
+          covers={`Applies to all ${orientable.count} pictures this bundle shows, the member models’ previews included.`}
           error={error}
         />
       </Popover>

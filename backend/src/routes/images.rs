@@ -705,18 +705,75 @@ pub struct RerenderBatch {
     pub job_ids: Vec<i64>,
 }
 
-/// Re-render a bundle's whole gallery with one orientation.
+/// One picture a bundle's one-axis fix covers, with the file whose orientation
+/// is what actually gets written.
+pub(crate) struct OrientableRender {
+    pub id: Uuid,
+    pub file_id: Uuid,
+    /// The orientation this render was last made with, so the control can open
+    /// showing where the bundle left off instead of a blank that undoes it.
+    pub render_overrides: Option<serde_json::Value>,
+}
+
+/// The renders a bundle's one-axis fix applies to: every member model's preview
+/// picture, plus any render in the bundle's own gallery.
 ///
-/// A bundle's own pictures are one purchase's worth of renders, made from files
-/// that were authored together — so when one of them came out lying on its side,
-/// they all did, and fixing them one popover at a time is the same answer typed
-/// six times. This is exactly [`rerender_image`] applied to the lot: the axis is
+/// The member previews are the point. A bundle rarely owns files of its own — it
+/// is the crate the models came in — so its own gallery is usually empty, and the
+/// pictures on the page are the members' thumbnails. A publisher who authored the
+/// whole set Z-up laid every one of them on its side together, and the
+/// alternative to this is opening twenty-seven model pages. The bundle's own
+/// renders come along because they were authored with the members and are wrong
+/// with them.
+///
+/// Only each model's *preview* is touched, not its whole gallery: that is the
+/// picture the bundle shows. The axis lands on the source file either way, so the
+/// model's other renders of that same file follow when they are next made.
+///
+/// Hidden members are included — only an editor can reach this control, and a
+/// model hidden from browse is still in the crate.
+///
+/// One definition of "what the button covers", shared with the bundle payload
+/// that draws the button: the count on it and the pictures it redraws must not
+/// be able to drift apart.
+pub(crate) async fn bundle_orientable_renders(
+    db: &sqlx::PgPool,
+    bundle_id: Uuid,
+) -> Result<Vec<OrientableRender>, ApiError> {
+    // Only a render with a surviving source file can be made again: an uploaded
+    // photo (or a scraped one) is not a render, and `source_file_id` is
+    // ON DELETE SET NULL, so a render whose model file has gone cannot be redone.
+    let rows = sqlx::query!(
+        r#"SELECT i.id, i.source_file_id as "file_id!", i.render_overrides
+           FROM images i
+           WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL
+             AND (i.bundle_id = $1
+                  OR i.id IN (SELECT model_preview_image(bm.model_id)
+                              FROM bundle_models bm WHERE bm.bundle_id = $1))
+           ORDER BY i.is_primary DESC, i.sort_order, i.created_at"#,
+        bundle_id,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| OrientableRender {
+            id: r.id,
+            file_id: r.file_id,
+            render_overrides: r.render_overrides,
+        })
+        .collect())
+}
+
+/// Re-render everything a bundle shows with one orientation.
+///
+/// A bundle is one purchase, made from files that were authored together — so
+/// when one of its pictures came out lying on its side, they all did, and fixing
+/// them one popover at a time is the same answer typed once per model. This is
+/// exactly [`rerender_image`] applied to the lot (see
+/// [`bundle_orientable_renders`] for which pictures those are): the axis is
 /// written to each *source file*, so the fix outlives these particular pictures
 /// and a later bulk re-render keeps it.
-///
-/// The member models' renders are not touched. They have galleries and controls
-/// of their own, and a bundle is the crate the models came in, not the owner of
-/// what is inside them.
 async fn rerender_bundle_images(
     State(state): State<AppState>,
     user: User,
@@ -728,18 +785,7 @@ async fn rerender_bundle_images(
         .normalise()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    // Only a render with a surviving source file can be made again: an uploaded
-    // photo in the same gallery is not a render, and `source_file_id` is
-    // ON DELETE SET NULL, so a render whose model file has gone cannot be redone.
-    let targets = sqlx::query!(
-        r#"SELECT i.id, i.source_file_id as "file_id!"
-           FROM images i
-           WHERE i.bundle_id = $1 AND i.kind = 'rendered' AND i.source_file_id IS NOT NULL
-           ORDER BY i.is_primary DESC, i.sort_order, i.created_at"#,
-        id,
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let targets = bundle_orientable_renders(&state.db, id).await?;
     if targets.is_empty() {
         return Err(ApiError::BadRequest(
             "this bundle has no rendered pictures to re-orient".into(),
