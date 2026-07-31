@@ -895,13 +895,24 @@ function MembersSection({
           />
         </Paper>
       ) : (
+        // A bundle with a dozen categories wraps them onto more rows rather than
+        // hiding half behind a scroll chevron. The sliding indicator only ever
+        // tracks one row, so each tab underlines itself instead.
         tabList.length > 0 && (
           <Tabs
             value={category ?? 'all'}
             onChange={(_, value) => setCategory(value === 'all' ? null : value)}
-            variant="scrollable"
-            scrollButtons="auto"
-            sx={{ mb: 2, borderBottom: (t) => `1px solid ${t.palette.divider}` }}
+            sx={{
+              mb: 2,
+              borderBottom: (t) => `1px solid ${t.palette.divider}`,
+              '& .MuiTabs-indicator': { display: 'none' },
+              '& .MuiTabs-list': { flexWrap: 'wrap' },
+              '& .MuiTab-root': {
+                borderBottom: 2,
+                borderColor: 'transparent',
+                '&.Mui-selected': { borderColor: 'primary.main' },
+              },
+            }}
           >
             <Tab value="all" label={`All Models (${models.length})`} />
             {tabList.map((name) => (
