@@ -40,16 +40,6 @@ flag + env dual (`meshtrove --help`); `.env` is auto-loaded. `--anonymous` makes
 every request a synthetic admin; unset it to exercise real auth
 (`MESHTROVE_CREATE_ADMIN=user:pass` bootstraps an admin).
 
-## Structure
-
-- `backend/src/routes/` — one file per API area; routers merged in `main.rs`
-- `backend/src/services/` — blobstore (content-addressed FS store, sha256-keyed),
-  jobs (SKIP LOCKED workers in-binary, split into a general and a render lane),
-  importer (zip), dropbox (pick up an entry
-  from `<store>/imports`), renderer (f3d shell-out)
-- `backend/migrations/0001_initial.sql` — full schema, tsvector triggers, seed axes
-- `frontend/src/api.ts` — typed fetch layer; `pages/` + `components/`
-
 ## Conventions
 
 - sqlx macros check queries against a live DB: postgres must be up (and
