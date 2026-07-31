@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.source_file_id as \"file_id!\", i.render_overrides\n           FROM images i\n           WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL\n             AND (i.bundle_id = $1\n                  OR i.id IN (SELECT model_preview_image(bm.model_id)\n                              FROM bundle_models bm WHERE bm.bundle_id = $1))\n           ORDER BY i.is_primary DESC, i.sort_order, i.created_at",
+  "query": "SELECT i.id, i.source_file_id as \"file_id!\", i.render_overrides,\n                  bm.model_id as \"model_id?\"\n           FROM images i\n           LEFT JOIN bundle_models bm\n             ON bm.bundle_id = $1 AND i.id = model_preview_image(bm.model_id)\n           WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL\n             AND (i.bundle_id = $1 OR bm.model_id IS NOT NULL)\n           ORDER BY i.is_primary DESC, i.sort_order, i.created_at",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,17 @@
             "name": "render_overrides"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "bundle_models",
+            "name": "model_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -45,8 +56,9 @@
     "nullable": [
       false,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "318276136227ad437b05ad64f232987799c7e1f677757067a0a7ecc4eb3143c7"
+  "hash": "41e8c1d2226e0b9d9db43bd15fc266af9904596e6c6217a38fc4be8473ea01bf"
 }

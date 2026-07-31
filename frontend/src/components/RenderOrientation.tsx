@@ -36,6 +36,13 @@ export function canReorient(image: ImageRecord): boolean {
   return image.kind === 'rendered' && !!image.source_file_id
 }
 
+/// All the button needs of a picture: which one to re-render, and where it
+/// currently stands. A gallery's `ImageRecord` is one — so is a bundle member's
+/// preview, which that page has as a `MemberPreview` and never as a full record
+/// (the server already vouched for it being re-renderable, so there is nothing
+/// for `canReorient` to check).
+export type Reorientable = Pick<ImageRecord, 'id' | 'render_overrides'>
+
 /// Split `+Z` into the axis and its sign, so the UI can offer three axes and a
 /// flip rather than six near-identical buttons.
 function splitAxis(up: string | null | undefined): { axis: string; negative: boolean } {
@@ -370,7 +377,7 @@ export default function RenderOrientation({
   onRendered,
   edge = false,
 }: {
-  image: ImageRecord
+  image: Reorientable
   /** called once a render has finished, to refetch whatever holds the picture */
   onRendered: () => void
   /** sit on top of the image (the preview pane) rather than beside it */

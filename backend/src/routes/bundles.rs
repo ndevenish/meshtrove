@@ -228,6 +228,25 @@ pub struct OrientableRenders {
     /// none is set. It seeds the control: fixing a bundle and coming back should
     /// find the fix, not a blank that undoes it on the first click.
     pub shared_overrides: Option<RenderOverrides>,
+    /// The subset of those pictures that are members' previews, keyed by the
+    /// member. One publisher's set is usually wrong together — that is what
+    /// "orient all" is for — but the odd model comes in on its own axis, so each
+    /// card also gets the control for its own picture. Members the caller may not
+    /// see are absent, and so is any member whose preview is not a re-renderable
+    /// render (a photo, or a render whose file has gone).
+    pub member_previews: Vec<MemberPreview>,
+}
+
+/// One member's preview render, for the control on that member's card.
+#[derive(Serialize, ToSchema)]
+pub struct MemberPreview {
+    /// The member whose card shows it — how the page finds the card.
+    pub model_id: Uuid,
+    /// The picture itself: what `POST /api/images/{id}/rerender` takes.
+    pub id: Uuid,
+    /// What it was last rendered with, so the control opens where this model
+    /// stands rather than on a blank that would undo it.
+    pub render_overrides: Option<RenderOverrides>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -450,25 +469,50 @@ async fn fetch_detail(state: &AppState, id: Uuid, user: &User) -> Result<BundleD
     let models = fetch_members(state, id, user).await?;
     let custom_fields = fetch_values(state, ValueOwner::Bundle(id), user).await?;
 
-    // Counted here rather than derived from `images` above: what the control
-    // covers is mostly the members' previews, which this payload carries only as
-    // ids on `models` — with no kind, no source file and no orientation to read.
-    let orientable = crate::routes::images::bundle_orientable_renders(&state.db, id).await?;
+    // Read here rather than derived from `images` above: what the controls cover
+    // is mostly the members' previews, which this payload carries only as ids on
+    // `models` — with no kind, no source file and no orientation to read. One
+    // query answers both the bundle-wide button and the per-card ones, so the
+    // count on the one and the pictures behind the others cannot drift apart.
+    let renders = crate::routes::images::bundle_orientable_renders(&state.db, id).await?;
     // Parsed before comparing, not compared as raw JSON: `{"up":"+Z"}` and
     // `{"up":"+Z","turntable":null}` are the same orientation written twice.
-    let orientations: Vec<Option<RenderOverrides>> = orientable
+    let renders: Vec<(Uuid, Option<Uuid>, Option<RenderOverrides>)> = renders
         .into_iter()
-        .map(|render| crate::routes::models::parse_overrides(render.render_overrides))
+        .map(|render| {
+            let overrides = crate::routes::models::parse_overrides(render.render_overrides);
+            (render.id, render.model_id, overrides)
+        })
         .collect();
     // A state to open on only where they already agree. Seeding from one of a
     // disagreeing set would offer to re-orient the rest to match it.
-    let shared_overrides = match orientations.split_first() {
-        Some((first, rest)) if rest.iter().all(|other| other == first) => first.clone(),
+    let shared_overrides = match renders.split_first() {
+        Some(((_, _, first), rest)) if rest.iter().all(|(_, _, other)| other == first) => {
+            first.clone()
+        }
         _ => None,
     };
+    // The per-card controls, kept to the members this caller was actually given
+    // above: the count for "orient all" covers hidden members too (an editor's
+    // bulk fix should not skip them), but a preview with no card on the page is
+    // nothing the page can draw.
+    let visible: HashSet<Uuid> = models.iter().map(|m| m.id).collect();
+    let member_previews = renders
+        .iter()
+        .filter_map(|(image_id, model_id, overrides)| {
+            model_id
+                .filter(|model_id| visible.contains(model_id))
+                .map(|model_id| MemberPreview {
+                    model_id,
+                    id: *image_id,
+                    render_overrides: overrides.clone(),
+                })
+        })
+        .collect();
     let orientable = OrientableRenders {
-        count: orientations.len() as i64,
+        count: renders.len() as i64,
         shared_overrides,
+        member_previews,
     };
 
     let categories: Vec<String> = sqlx::query_scalar!(

@@ -710,6 +710,10 @@ pub struct RerenderBatch {
 pub(crate) struct OrientableRender {
     pub id: Uuid,
     pub file_id: Uuid,
+    /// The member model whose preview this is, or `None` for a render in the
+    /// bundle's own gallery. It is what lets the bundle page put a per-picture
+    /// control on the member's card: the card knows only the model.
+    pub model_id: Option<Uuid>,
     /// The orientation this render was last made with, so the control can open
     /// showing where the bundle left off instead of a blank that undoes it.
     pub render_overrides: Option<serde_json::Value>,
@@ -743,13 +747,23 @@ pub(crate) async fn bundle_orientable_renders(
     // Only a render with a surviving source file can be made again: an uploaded
     // photo (or a scraped one) is not a render, and `source_file_id` is
     // ON DELETE SET NULL, so a render whose model file has gone cannot be redone.
+    // Joined to `bundle_models` rather than tested against a subquery of preview
+    // ids: the same rows either way, but the join also says *whose* preview each
+    // one is, which is what the per-card control on the bundle page needs. A
+    // picture has one owner, so a member's preview is never also the bundle's
+    // own — the two arms of the OR cannot both match one row and double it.
+    //
+    // `model_id?` because it comes from the *joined* side of that LEFT JOIN: it
+    // is absent for the bundle's own renders, and sqlx would otherwise take the
+    // column's NOT NULL at face value.
     let rows = sqlx::query!(
-        r#"SELECT i.id, i.source_file_id as "file_id!", i.render_overrides
+        r#"SELECT i.id, i.source_file_id as "file_id!", i.render_overrides,
+                  bm.model_id as "model_id?"
            FROM images i
+           LEFT JOIN bundle_models bm
+             ON bm.bundle_id = $1 AND i.id = model_preview_image(bm.model_id)
            WHERE i.kind = 'rendered' AND i.source_file_id IS NOT NULL
-             AND (i.bundle_id = $1
-                  OR i.id IN (SELECT model_preview_image(bm.model_id)
-                              FROM bundle_models bm WHERE bm.bundle_id = $1))
+             AND (i.bundle_id = $1 OR bm.model_id IS NOT NULL)
            ORDER BY i.is_primary DESC, i.sort_order, i.created_at"#,
         bundle_id,
     )
@@ -760,6 +774,7 @@ pub(crate) async fn bundle_orientable_renders(
         .map(|r| OrientableRender {
             id: r.id,
             file_id: r.file_id,
+            model_id: r.model_id,
             render_overrides: r.render_overrides,
         })
         .collect())

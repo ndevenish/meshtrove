@@ -707,6 +707,16 @@ function MembersSection({
     onChange()
   }
 
+  // Each member's preview render, by the model whose card shows it. "Orient all"
+  // above answers the usual case — one publisher, one wrong axis — and this is
+  // the odd model that came in on its own: the same popover, over one card's
+  // picture. Straight off the query and memoised on it, since what it holds
+  // seeds the popover and must not be a new object every render.
+  const previews = useMemo(
+    () => new Map(bundle.orientable.member_previews.map((p) => [p.model_id, p])),
+    [bundle.orientable.member_previews],
+  )
+
   // The add-an-existing-model picker. `useDeferredValue` is the debounce: the
   // input stays responsive while the search lags a keystroke behind it.
   const [memberQuery, setMemberQuery] = useState('')
@@ -1030,61 +1040,75 @@ function MembersSection({
             gap: 2,
           }}
         >
-          {shown.map((model, index) => (
-            <Box key={model.id} sx={{ position: 'relative' }}>
-              <ModelCard model={model} hideCreator={model.creator_id === bundleCreatorId} />
-              {canEdit && editing && (
-                <Checkbox
-                  size="small"
-                  checked={selected.has(model.id)}
-                  // onClick, not onChange: the shift key is what makes this a
-                  // range, and only a mouse event carries it. Deliberately no
-                  // preventDefault — cancelling a checkbox's own activation
-                  // leaves React's value tracker believing the DOM already
-                  // holds the new state, and the tick then never renders. The
-                  // clicked box always lands on the state the browser just
-                  // flipped it to, so letting the flip stand is also correct.
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    toggle(index, e.shiftKey)
-                  }}
-                  sx={{
-                    position: 'absolute',
-                    top: 4,
-                    left: 4,
-                    // Above the card's own click targets (ModelCard lifts its
-                    // action area to 2), or the card swallows the tick and
-                    // opens the model instead.
-                    zIndex: 3,
-                    bgcolor: 'background.paper',
-                    p: 0.25,
-                  }}
-                />
-              )}
-              {canEdit && editing && (
-                <Tooltip title="Remove from bundle">
-                  <IconButton
+          {shown.map((model, index) => {
+            const preview = previews.get(model.id)
+            return (
+              <Box key={model.id} sx={{ position: 'relative' }}>
+                <ModelCard model={model} hideCreator={model.creator_id === bundleCreatorId} />
+                {canEdit && editing && (
+                  <Checkbox
                     size="small"
+                    checked={selected.has(model.id)}
+                    // onClick, not onChange: the shift key is what makes this a
+                    // range, and only a mouse event carries it. Deliberately no
+                    // preventDefault — cancelling a checkbox's own activation
+                    // leaves React's value tracker believing the DOM already
+                    // holds the new state, and the tick then never renders. The
+                    // clicked box always lands on the state the browser just
+                    // flipped it to, so letting the flip stand is also correct.
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggle(index, e.shiftKey)
+                    }}
+                    sx={{
+                      position: 'absolute',
+                      top: 4,
+                      left: 4,
+                      // Above the card's own click targets (ModelCard lifts its
+                      // action area to 2), or the card swallows the tick and
+                      // opens the model instead.
+                      zIndex: 3,
+                      bgcolor: 'background.paper',
+                      p: 0.25,
+                    }}
+                  />
+                )}
+                {canEdit && (preview || editing) && (
+                  <Stack
+                    direction="row"
                     sx={{
                       position: 'absolute',
                       top: 4,
                       right: 4,
-                      bgcolor: 'background.paper',
                       // Same reason as the tick opposite: below 3 the card's
-                      // action area covers this and the click opens the model.
+                      // action area covers these and the click opens the model.
                       zIndex: 3,
                     }}
-                    onClick={async () => {
-                      await api.removeModelFromBundle(bundleId, model.id)
-                      await refreshAll()
-                    }}
                   >
-                    <RemoveCircleIcon fontSize="small" color="error" />
-                  </IconButton>
-                </Tooltip>
-              )}
-            </Box>
-          ))}
+                    {/* Fixing the axis is not an edit of the *bundle* — it
+                        redraws one member's picture — so it stands outside edit
+                        mode, as the same button does on the gallery strip
+                        above. */}
+                    {preview && <RenderOrientation image={preview} onRendered={refreshAll} />}
+                    {editing && (
+                      <Tooltip title="Remove from bundle">
+                        <IconButton
+                          size="small"
+                          sx={{ bgcolor: 'background.paper' }}
+                          onClick={async () => {
+                            await api.removeModelFromBundle(bundleId, model.id)
+                            await refreshAll()
+                          }}
+                        >
+                          <RemoveCircleIcon fontSize="small" color="error" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                  </Stack>
+                )}
+              </Box>
+            )
+          })}
         </Box>
       )}
     </Box>

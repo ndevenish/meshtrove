@@ -295,6 +295,20 @@ export interface OrientableRenders {
   /** the orientation they all already share, or null where they differ or none
       is set — what the control opens on */
   shared_overrides: RenderOverrides | null
+  /** those of them that are members' previews, so each member's card can carry
+      the same control for its own picture. Absent for a member whose preview is
+      a photo, or a render whose file has gone. */
+  member_previews: MemberPreview[]
+}
+
+/// A member model's preview render, as the bundle page's member grid sees it:
+/// enough of a picture to re-render, which the model cards themselves carry only
+/// as an id.
+export interface MemberPreview {
+  /** the member whose card shows it */
+  model_id: string
+  id: string
+  render_overrides: RenderOverrides | null
 }
 
 /// What a bulk member retag did. Counts are tag *assignments*, not distinct
