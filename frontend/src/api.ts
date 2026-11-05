@@ -1340,8 +1340,13 @@ export const imageUrl = (id: string, version?: string | null) =>
 /// It stays optional for a caller that genuinely has no version to give (a
 /// summary whose preview image has none). That URL is cached for five minutes
 /// and then revalidated against an ETag — correct, but a beat behind.
+///
+/// `c` names the carve itself, for the same reason: when the backend's carve
+/// changes, squares a browser filed away as immutable must not survive it. It
+/// moves with the backend's `squares::CARVE_VERSION`.
+const SQUARE_CARVE = 2
 export const squareImageUrl = (id: string, size = 512, version?: string | null) =>
-  `/api/images/${id}/square?size=${size}${version ? `&v=${version.slice(0, 12)}` : ''}`
+  `/api/images/${id}/square?size=${size}&c=${SQUARE_CARVE}${version ? `&v=${version.slice(0, 12)}` : ''}`
 export const downloadUrl = (fileId: string) => `/api/files/${fileId}/download`
 /// An f3d-rendered PNG still of a single file, rendered on demand and not
 /// persisted. The STL viewer shows this first for large meshes, before the user

@@ -410,10 +410,10 @@ async fn serve_square(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    // The bytes *and* the edge they were carved to: the same blob at two sizes
-    // is two different pictures.
+    // The bytes, the edge they were carved to, and the carve that did it: the
+    // same blob at two sizes, or through two carves, is two different pictures.
     let cache = CacheMarks {
-        etag: format!("\"{}-{size}\"", row.blob_sha256),
+        etag: format!("\"{}-{size}-c{}\"", row.blob_sha256, squares::CARVE_VERSION),
         versioned: query.v.is_some(),
     };
     // A client that already holds these exact bytes needs neither the carve nor

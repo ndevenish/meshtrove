@@ -37,10 +37,35 @@ const MAX_CARVE_FRACTION: f32 = 0.45;
 /// crops off them are not worth a re-encode, let alone a carve.
 const SQUARE_TOLERANCE: f32 = 0.015;
 
+/// The scale, as a fraction of the square's edge, below which detail does not
+/// count as subject. Energy is measured on a copy blurred by this much (≈2px
+/// at the default 512), so wood grain, fabric weave and render noise — fine,
+/// repetitive texture that fills a surface rather than outlining a thing —
+/// averages out before it can make a seam expensive, while the outline of the
+/// printed object, which is large, survives the blur.
+const TEXTURE_SCALE: f32 = 1.0 / 256.0;
+
+/// Gradient (on the blurred copy, RGB distance per pixel) that is shrugged off
+/// as backdrop. What texture survives the blur is low-contrast — plank seams in
+/// a tabletop, the facets of a studio backdrop — and a seam crossing it should
+/// cost nearly nothing; the edge of a model against either is several times
+/// this. A sliver of the raw gradient is kept below the floor so two flat
+/// regions still rank, rather than every sub-threshold seam tying and the carve
+/// collapsing into a crop from the left.
+const TEXTURE_FLOOR: f32 = 24.0;
+const BELOW_FLOOR_WEIGHT: f32 = 0.05;
+
 pub fn is_effectively_square(width: u32, height: u32) -> bool {
     let (w, h) = (width.max(1) as f32, height.max(1) as f32);
     (w.max(h) / w.min(h)) - 1.0 <= SQUARE_TOLERANCE
 }
+
+/// Which carve a cached preview came from. Bump it whenever the carve changes
+/// what it produces: it names the files on disk, so a stale square is never
+/// served for the new one, and `purge_stale` sweeps the old ones away. The
+/// frontend's `SQUARE_CARVE` must move with it — browsers hold the old squares
+/// under immutable URLs, and only a different URL reaches past them.
+pub const CARVE_VERSION: u32 = 2;
 
 /// A carved preview on disk, ready to stream.
 pub struct SquarePreview {
@@ -52,13 +77,13 @@ fn squares_dir(store_dir: &Path) -> PathBuf {
     store_dir.join("squares")
 }
 
-/// `<store>/squares/ab/<sha256>-<size>.<ext>`. Fanned out on the first byte for
-/// the same reason blobs are: one directory per library is a directory no tool
-/// enjoys listing.
+/// `<store>/squares/ab/<sha256>-<size>-c<CARVE_VERSION>.<ext>`. Fanned out on
+/// the first byte for the same reason blobs are: one directory per library is a
+/// directory no tool enjoys listing.
 fn cache_path(store_dir: &Path, sha256: &str, size: u32, ext: &str) -> PathBuf {
     squares_dir(store_dir)
         .join(&sha256[0..2])
-        .join(format!("{sha256}-{size}.{ext}"))
+        .join(format!("{sha256}-{size}-c{CARVE_VERSION}.{ext}"))
 }
 
 /// The already-carved preview for this blob, if there is one.
@@ -156,10 +181,16 @@ pub fn purge_stale(
         for entry in std::fs::read_dir(dir.path())? {
             let entry = entry?;
             let name = entry.file_name();
-            let Some(sha) = name.to_str().and_then(|n| n.split('-').next()) else {
+            let Some(name) = name.to_str() else {
                 continue;
             };
-            if live.contains(sha) {
+            let sha = name.split('-').next().unwrap_or_default();
+            // A square from an older carve is as dead as one whose blob went:
+            // nothing will ask for its name again.
+            let current = name
+                .rsplit_once('.')
+                .is_some_and(|(stem, _)| stem.ends_with(&format!("-c{CARVE_VERSION}")));
+            if live.contains(sha) && current {
                 continue;
             }
             removed += 1;
@@ -217,6 +248,7 @@ pub fn carve_to_square(image: &DynamicImage, size: u32) -> RgbaImage {
     if excess > budget {
         canvas.crop_centre(side as usize + budget);
     }
+    canvas.smooth_for_energy((side as f32 * TEXTURE_SCALE).max(0.5));
     while canvas.w > side as usize {
         canvas.remove_seam();
     }
@@ -235,6 +267,9 @@ struct Canvas {
     stride: usize,
     w: usize,
     h: usize,
+    /// The blurred copy energy is measured on, carved in step with `px` so the
+    /// two stay aligned. Empty until `smooth_for_energy` builds it.
+    smooth: Vec<[f32; 3]>,
     /// Scratch, reused every seam: per-pixel energy and the cumulative cost of
     /// the cheapest path reaching each pixel from the top.
     energy: Vec<f32>,
@@ -250,6 +285,7 @@ impl Canvas {
             stride: w,
             w,
             h,
+            smooth: Vec::new(),
             energy: vec![0.0; w * h],
             cost: vec![0.0; w * h],
         }
@@ -279,6 +315,7 @@ impl Canvas {
             stride: w,
             w,
             h,
+            smooth: Vec::new(),
             energy: vec![0.0; w * h],
             cost: vec![0.0; w * h],
         }
@@ -294,22 +331,70 @@ impl Canvas {
         self.w = width;
     }
 
-    /// The gradient magnitude at each pixel: how much colour changes across it,
-    /// horizontally and vertically. Edges score high, flat backdrop scores near
-    /// zero, and a seam is a path that stays in the flat. Out-of-frame
-    /// neighbours clamp to the edge pixel, which leaves a plain border cheap to
-    /// remove — a frame is not a subject.
+    /// Build the blurred copy energy is measured on: a separable Gaussian of
+    /// `sigma` pixels over the current (already cropped) canvas.
+    fn smooth_for_energy(&mut self, sigma: f32) {
+        let (w, h, stride) = (self.w, self.h, self.stride);
+        let radius = (sigma * 3.0).ceil() as isize;
+        let kernel: Vec<f32> = {
+            let raw: Vec<f32> = (-radius..=radius)
+                .map(|i| (-((i * i) as f32) / (2.0 * sigma * sigma)).exp())
+                .collect();
+            let sum: f32 = raw.iter().sum();
+            raw.into_iter().map(|k| k / sum).collect()
+        };
+        let clamp = |i: isize, n: usize| i.clamp(0, n as isize - 1) as usize;
+
+        let mut across = vec![[0f32; 3]; stride * h];
+        for y in 0..h {
+            let row = y * stride;
+            for x in 0..w {
+                let mut acc = [0f32; 3];
+                for (k, weight) in kernel.iter().enumerate() {
+                    let p = self.px[row + clamp(x as isize + k as isize - radius, w)];
+                    for c in 0..3 {
+                        acc[c] += weight * p[c] as f32;
+                    }
+                }
+                across[row + x] = acc;
+            }
+        }
+        let mut smooth = vec![[0f32; 3]; stride * h];
+        for y in 0..h {
+            for x in 0..w {
+                let mut acc = [0f32; 3];
+                for (k, weight) in kernel.iter().enumerate() {
+                    let p = across[clamp(y as isize + k as isize - radius, h) * stride + x];
+                    for c in 0..3 {
+                        acc[c] += weight * p[c];
+                    }
+                }
+                smooth[y * stride + x] = acc;
+            }
+        }
+        self.smooth = smooth;
+    }
+
+    /// How much colour changes across each pixel of the blurred copy,
+    /// horizontally and vertically, less the floor texture is allowed. Edges
+    /// score high, backdrop and fine texture score near zero, and a seam is a
+    /// path that stays in the dull. Out-of-frame neighbours clamp to the edge
+    /// pixel, which leaves a plain border cheap to remove — a frame is not a
+    /// subject.
     fn compute_energy(&mut self) {
+        let px = &self.smooth;
         for y in 0..self.h {
             let up = y.saturating_sub(1) * self.stride;
             let down = (y + 1).min(self.h - 1) * self.stride;
             let row = y * self.stride;
             for x in 0..self.w {
-                let left = self.px[row + x.saturating_sub(1)];
-                let right = self.px[row + (x + 1).min(self.w - 1)];
+                let left = px[row + x.saturating_sub(1)];
+                let right = px[row + (x + 1).min(self.w - 1)];
                 let dx = squared_difference(left, right);
-                let dy = squared_difference(self.px[up + x], self.px[down + x]);
-                self.energy[row + x] = (dx + dy).sqrt();
+                let dy = squared_difference(px[up + x], px[down + x]);
+                let gradient = (dx + dy).sqrt();
+                self.energy[row + x] =
+                    (gradient - TEXTURE_FLOOR).max(0.0) + BELOW_FLOOR_WEIGHT * gradient;
             }
         }
     }
@@ -347,6 +432,7 @@ impl Canvas {
         for y in (0..self.h).rev() {
             let row = y * self.stride;
             self.px.copy_within(row + x + 1..row + self.w, row + x);
+            self.smooth.copy_within(row + x + 1..row + self.w, row + x);
             if y == 0 {
                 break;
             }
@@ -362,10 +448,10 @@ impl Canvas {
     }
 }
 
-fn squared_difference(a: [u8; 4], b: [u8; 4]) -> f32 {
+fn squared_difference(a: [f32; 3], b: [f32; 3]) -> f32 {
     let mut total = 0.0;
     for channel in 0..3 {
-        let delta = a[channel] as f32 - b[channel] as f32;
+        let delta = a[channel] - b[channel];
         total += delta * delta;
     }
     total
@@ -373,6 +459,7 @@ fn squared_difference(a: [u8; 4], b: [u8; 4]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use image::Rgba;
 
@@ -421,6 +508,42 @@ mod tests {
         assert_eq!(count_bright_columns(&out, 90), 20);
     }
 
+    /// The shape of a studio product shot: an object standing on a wooden
+    /// tabletop. The grain is fine, high-contrast striping that runs the full
+    /// width — every column crosses it — while the object is a smooth block
+    /// with a clear outline. Measured raw, the grain is the busiest thing in
+    /// the frame and the carve squeezes the object to keep it; measured as
+    /// texture, it is backdrop, and the object keeps its width.
+    #[test]
+    fn wood_grain_is_not_subject() {
+        let (w, h) = (320, 180);
+        let mut img = RgbaImage::from_pixel(w, h, Rgba([25, 25, 30, 255]));
+        for y in 100..h {
+            for x in 0..w {
+                // Stripes a few pixels apart, wavering a little, with a darker
+                // seam between planks every 64px.
+                let phase = y as f32 * 2.3 + (x as f32 / 17.0).sin() * 1.5;
+                let grain = 150.0 + 30.0 * phase.sin();
+                let plank = if x % 64 == 0 { 0.6 } else { 1.0 };
+                let v = (grain * plank) as u8;
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([v, (v as f32 * 0.8) as u8, (v as f32 * 0.6) as u8, 255]),
+                );
+            }
+        }
+        for y in 40..130 {
+            for x in 130..190 {
+                let v = (205 + (x - 130) / 2).min(255) as u8;
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        let out = carve_to_square(&DynamicImage::ImageRgba8(img), 180);
+        assert_eq!((out.width(), out.height()), (180, 180));
+        assert_eq!(count_bright_columns(&out, 70), 60);
+    }
+
     #[test]
     fn an_extreme_panorama_is_cropped_before_it_is_carved() {
         // 6:1 is far past the carve budget, so it must still come out square
@@ -458,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn purge_keeps_live_previews_and_drops_the_rest() {
+    fn purge_keeps_live_previews_and_drops_dead_or_superseded_ones() {
         let dir = std::env::temp_dir().join(format!("meshtrove-squares-{}", uuid::Uuid::new_v4()));
         let live_sha = "a".repeat(64);
         let dead_sha = "b".repeat(64);
@@ -467,12 +590,17 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"x").unwrap();
         }
+        // A square of the live blob from an older carve, as it was named then.
+        let superseded =
+            cache_path(&dir, &live_sha, 512, "jpg").with_file_name(format!("{live_sha}-512.jpg"));
+        std::fs::write(&superseded, b"x").unwrap();
         let live: std::collections::HashSet<String> = [live_sha.clone()].into_iter().collect();
 
-        assert_eq!(purge_stale(&dir, &live, true).unwrap(), 1);
+        assert_eq!(purge_stale(&dir, &live, true).unwrap(), 2);
         assert!(cache_path(&dir, &dead_sha, 512, "jpg").exists());
-        assert_eq!(purge_stale(&dir, &live, false).unwrap(), 1);
+        assert_eq!(purge_stale(&dir, &live, false).unwrap(), 2);
         assert!(!cache_path(&dir, &dead_sha, 512, "jpg").exists());
+        assert!(!superseded.exists());
         assert!(cache_path(&dir, &live_sha, 512, "jpg").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
