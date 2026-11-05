@@ -784,7 +784,7 @@ export default memo(function ImportLayoutPanel({
               <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
                 Will become
               </Typography>
-              {plan.models.slice(0, 30).map((model, i) => (
+              {plan.models.map((model, i) => (
                 <Box key={`${model.name}-${i}`} sx={{ mb: 0.5 }}>
                   <Stack
                     direction="row"
@@ -861,11 +861,6 @@ export default memo(function ImportLayoutPanel({
                   ))}
                 </Box>
               ))}
-              {plan.models.length > 30 && (
-                <Typography variant="body2" color="text.secondary">
-                  …and {plan.models.length - 30} more models
-                </Typography>
-              )}
             </Box>
           )}
 
