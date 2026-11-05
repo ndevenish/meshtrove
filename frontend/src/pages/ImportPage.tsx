@@ -241,6 +241,27 @@ function ImportWorkbench() {
     [],
   )
 
+  // Send the files a carve's rules did (or didn't) match off to an import of
+  // their own, paths untouched, so another layout can carve them on the same
+  // segments this one read. Stays here, like a folder split: the plan re-runs
+  // against what is left, and the new import is a link away on the toast.
+  const splitFiles = useCallback(
+    async (fileIds: string[], name: string) => {
+      if (!importId) return
+      try {
+        const created = await api.splitImport(importId, [], name, fileIds, true)
+        await refreshStagedFiles()
+        setSplitOff(created)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    // refreshStagedFiles closes over only stable things (the query client, the
+    // route id and a state setter).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [importId],
+  )
+
   // Seed the editable name once the import loads, and preselect the bundle when
   // the drop happened on a bundle page (?bundle=…).
   useEffect(() => {
@@ -760,6 +781,8 @@ function ImportWorkbench() {
               files={fileList}
               annotations={layout.plan.annotations}
               rules={layout.spec.rules}
+              importName={staged.name}
+              onSplit={splitFiles}
             />
           ) : (
             <FileTree

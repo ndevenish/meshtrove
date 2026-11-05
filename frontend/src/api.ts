@@ -937,8 +937,17 @@ export const api = {
   /// `fileIds` carves out individual staged files, for a set that interleaves
   /// two products in one directory and so offers no folder to split on. Either
   /// may be empty, but not both.
-  splitImport: (id: string, folders: string[], name?: string, fileIds: string[] = []) =>
-    request<ImportSummary>(`/api/imports/${id}/split`, json({ folders, file_ids: fileIds, name })),
+  splitImport: (
+    id: string,
+    folders: string[],
+    name?: string,
+    fileIds: string[] = [],
+    keepPaths = false,
+  ) =>
+    request<ImportSummary>(
+      `/api/imports/${id}/split`,
+      json({ folders, file_ids: fileIds, name, keep_paths: keepPaths }),
+    ),
   /** remove a folder level that only wraps other folders: everything under it
       moves up into its parent, so the wrapper stops being a segment a layout's
       rules have to be written around */

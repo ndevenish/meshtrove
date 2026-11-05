@@ -5,6 +5,10 @@ import {
   Button,
   Checkbox,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   IconButton,
   InputLabel,
@@ -19,6 +23,7 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
+import CallSplitIcon from '@mui/icons-material/CallSplit'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlined'
 import SaveIcon from '@mui/icons-material/Save'
 import ViewInArIcon from '@mui/icons-material/ViewInAr'
@@ -1176,6 +1181,8 @@ const JUMP_MODES: Record<
     test: (a: FileAnnotation) => boolean
     count: (n: number, total: number) => string
     none: string
+    /** what a split of these files is called by default, after the import */
+    splitSuffix: string
   }
 > = {
   unmatched: {
@@ -1183,18 +1190,21 @@ const JUMP_MODES: Record<
     test: (a) => !a.matched,
     count: (n, total) => `${n} of ${total} unmatched`,
     none: 'every file matches',
+    splitSuffix: 'unmatched',
   },
   matched: {
     label: 'matched',
     test: (a) => a.matched,
     count: (n, total) => `${n} of ${total} matched`,
     none: 'nothing matches yet',
+    splitSuffix: 'matched',
   },
   conflict: {
     label: 'conflicts',
     test: (a) => a.invalid_rules.length > 0,
     count: (n) => `${n} with a rule conflict`,
     none: 'no rule conflicts',
+    splitSuffix: 'conflicts',
   },
 }
 
@@ -1213,12 +1223,22 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
   files,
   annotations,
   rules,
+  importName,
+  onSplit,
 }: {
   files: FileRecord[]
   annotations: FileAnnotation[]
   /** the active rules, only so a self-contradicting one can be named in the
       warning marker */
   rules?: LayoutRule[]
+  /** the import being carved, to name a split-off half after */
+  importName?: string
+  /** Move the files the jump is cycling through — every unmatched one, say —
+      into an import of their own, paths unchanged. A tangled drop is often
+      easiest carved in passes: write the rules for one part of it, send the
+      rest off to be carved by a different layout. When set, the toolbar offers
+      it. */
+  onSplit?: (fileIds: string[], name: string) => Promise<void>
 }) {
   const byId = useMemo(() => new Map(annotations.map((a) => [a.id, a])), [annotations])
   const groups = useMemo(() => groupByPrefix(files, byId), [files, byId])
@@ -1234,6 +1254,20 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
   // — or a switch of mode — just restarts the cycle from the top instead of
   // pointing at a row that no longer qualifies).
   const [cursor, setCursor] = useState('')
+  const [confirmSplit, setConfirmSplit] = useState(false)
+  const [splitName, setSplitName] = useState('')
+  const [splitting, setSplitting] = useState(false)
+  const defaultSplitName = `${importName ?? 'Import'} (${JUMP_MODES[mode].splitSuffix})`
+  const split = async () => {
+    if (!onSplit || targets.length === 0) return
+    setSplitting(true)
+    try {
+      await onSplit(targets, splitName.trim() || defaultSplitName)
+      setConfirmSplit(false)
+    } finally {
+      setSplitting(false)
+    }
+  }
   const jumpNext = () => {
     if (targets.length === 0) return
     // indexOf -1 (no jump yet, or the cursor's file got matched) rolls to 0.
@@ -1292,7 +1326,59 @@ export const AnnotatedFileList = memo(function AnnotatedFileList({
             ? JUMP_MODES[mode].none
             : JUMP_MODES[mode].count(targets.length, files.length)}
         </Typography>
+        {/* Splitting every file off would only rename the import, so it is
+            offered only while something would stay behind. */}
+        {onSplit && targets.length > 0 && targets.length < files.length && (
+          <Button
+            size="small"
+            startIcon={<CallSplitIcon sx={{ fontSize: 16 }} />}
+            onClick={() => {
+              setSplitName('')
+              setConfirmSplit(true)
+            }}
+            sx={{ textTransform: 'none', ml: 'auto !important' }}
+          >
+            Split to another import
+          </Button>
+        )}
       </Stack>
+      <Dialog
+        open={confirmSplit}
+        fullWidth
+        maxWidth="xs"
+        onClose={() => !splitting && setConfirmSplit(false)}
+      >
+        <DialogTitle>Split to another import?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Move the {targets.length} {JUMP_MODES[mode].label} file
+            {targets.length === 1 ? '' : 's'} to an import of their own, at the paths they have now.
+            Nothing is deleted; the rest stay here.
+          </Typography>
+          <TextField
+            fullWidth
+            size="small"
+            autoFocus
+            label="Name the new import"
+            placeholder={defaultSplitName}
+            slotProps={{ inputLabel: { shrink: true } }}
+            value={splitName}
+            disabled={splitting}
+            onChange={(e) => setSplitName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void split()
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={splitting} onClick={() => setConfirmSplit(false)}>
+            Cancel
+          </Button>
+          <Button variant="contained" disabled={splitting} onClick={() => void split()}>
+            Split
+          </Button>
+        </DialogActions>
+      </Dialog>
       {groups.map((group, gi) => (
         <Box key={`${gi}-${group.key}`}>
           {group.prefix && (

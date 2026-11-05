@@ -278,6 +278,16 @@ pub struct SplitInput {
     /// folder, and to the name of the folder the selection sits under otherwise.
     #[serde(default)]
     pub name: Option<String>,
+    /// Move the files at the paths they have now, dropping no prefix.
+    ///
+    /// For a selection that is not a place in the tree but a verdict on it — the
+    /// files a carve's rules did or didn't match. Those are scattered across the
+    /// whole drop, so the directory they share is usually just its wrapper, and
+    /// the layout that carves the split-off half next reads the same segments
+    /// the first one did. Stripping them would leave it a different tree to write
+    /// rules for.
+    #[serde(default)]
+    pub keep_paths: bool,
 }
 
 /// Lift one or more staged folders out into an import of their own.
@@ -390,7 +400,9 @@ async fn split(
     // directory therefore land at the new import's root, which is what a carve
     // wants: nothing about where they used to sit says what they are.
     let selection: Vec<String> = folders.iter().chain(&file_dirs).cloned().collect();
-    let prefix_segs: Vec<&str> = if !file_ids.is_empty() {
+    let prefix_segs: Vec<&str> = if input.keep_paths {
+        Vec::new()
+    } else if !file_ids.is_empty() {
         // A file sitting at the import's own root shares no directory with
         // anything, and its empty path must not be read as one leading segment.
         if selection.iter().any(String::is_empty) {
