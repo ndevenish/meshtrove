@@ -509,7 +509,13 @@ fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
                 }
             }
             if !ids.is_empty() {
-                return ids;
+                // Same-named members (a hero and a bust of one character) tie
+                // here just as they would on a prefix: let the category split them.
+                let mut cands: Vec<usize> = (0..members.len())
+                    .filter(|&i| ids.contains(&members[i].id))
+                    .collect();
+                narrow_by_category(pm, members, &mut cands);
+                return cands.into_iter().map(|i| members[i].id).collect();
             }
 
             // Tier 2: prefix fallback. A member matches if any of its spellings is
@@ -534,30 +540,37 @@ fn resolve(patch: &Patch, members: &[Member]) -> Vec<Vec<Uuid>> {
                 cands.retain(|&i| matched_len(i) == longest);
             }
 
-            // Still tied: the scraped category (Enemies, NPCs, …) rides along as a
-            // tag on the model it belongs to. Narrow to members carrying it — but
-            // only if that leaves at least one, so a category no member happens to
-            // tag doesn't wipe out an otherwise-good set.
-            if cands.len() > 1
-                && let Some(cat) = pm
-                    .category
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-            {
-                let by_cat: Vec<usize> = cands
-                    .iter()
-                    .copied()
-                    .filter(|&i| members[i].tags.iter().any(|t| t.eq_ignore_ascii_case(cat)))
-                    .collect();
-                if !by_cat.is_empty() {
-                    cands = by_cat;
-                }
-            }
+            narrow_by_category(pm, members, &mut cands);
 
             cands.into_iter().map(|i| members[i].id).collect()
         })
         .collect()
+}
+
+/// Still tied: the scraped category (Enemies, NPCs, Heroes, …) rides along as a
+/// tag on the model it belongs to. Narrow to members carrying it — but only if
+/// that leaves at least one, so a category no member happens to tag doesn't wipe
+/// out an otherwise-good set.
+fn narrow_by_category(pm: &PatchModel, members: &[Member], cands: &mut Vec<usize>) {
+    if cands.len() < 2 {
+        return;
+    }
+    let Some(cat) = pm
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    else {
+        return;
+    };
+    let by_cat: Vec<usize> = cands
+        .iter()
+        .copied()
+        .filter(|&i| members[i].tags.iter().any(|t| t.eq_ignore_ascii_case(cat)))
+        .collect();
+    if !by_cat.is_empty() {
+        *cands = by_cat;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2090,6 +2103,23 @@ mod tests {
         assert_eq!(
             resolve_one(pm("Gold Buried Tomb", Some("Bonus")), &members),
             vec![members[1].id]
+        );
+    }
+
+    #[test]
+    fn category_breaks_a_tie_among_exact_name_matches() {
+        // A hero and a bust of the same character share a name exactly.
+        let members = [
+            member("Matt Jones", &["heroes"]),
+            member("Matt Jones", &["bust"]),
+        ];
+        assert_eq!(
+            resolve_one(pm("Matt Jones", Some("Bust")), &members),
+            vec![members[1].id]
+        );
+        assert_eq!(
+            resolve_one(pm("Matt Jones", Some("Heroes")), &members),
+            vec![members[0].id]
         );
     }
 
