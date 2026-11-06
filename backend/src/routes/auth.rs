@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, anyhow};
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use axum::{
     Json, Router,
@@ -38,9 +38,9 @@ pub struct Credentials {
 /// admin password-reset in routes/users.rs can reuse the same parameters.
 pub(crate) async fn hash_password(password: String) -> Result<String> {
     tokio::task::spawn_blocking(move || {
-        let salt = SaltString::generate(&mut OsRng);
+        // argon2 draws a fresh random salt from the OS RNG itself.
         Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
+            .hash_password(password.as_bytes())
             .map(|h| h.to_string())
             .map_err(|e| anyhow!("hashing password: {e}"))
     })
@@ -287,4 +287,24 @@ pub async fn ensure_startup_users(state: &AppState) -> Result<()> {
         tracing::info!(username, "ensured admin user exists");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hashes written before the argon2 0.6 upgrade must still verify, or every
+    /// existing user is locked out.
+    #[tokio::test]
+    async fn verifies_existing_hashes_and_round_trips_new_ones() {
+        // Made by argon2 0.5.3's defaults, for the password "hunter2".
+        let old = "$argon2id$v=19$m=19456,t=2,p=1$Ym3PXdHJKsf4OMtjQ4zCsQ$4Y9FqHDFviDPnCG+EuzvmgFnuSw6nWSBLeH0gFyvhK4";
+        assert!(verify_password("hunter2".into(), old.into()).await);
+        assert!(!verify_password("hunter3".into(), old.into()).await);
+
+        let h = hash_password("hunter2".into()).await.unwrap();
+        assert!(h.starts_with("$argon2id$"));
+        assert!(verify_password("hunter2".into(), h.clone()).await);
+        assert!(!verify_password("nope".into(), h).await);
+    }
 }

@@ -16,6 +16,20 @@
       "matchManagers": ["npm"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "Node minor updates"
+    },
+    {
+      "description": "Below 1.0 a minor bump (0.5 -> 0.6) is semver-breaking: keep it out of the safe Rust group",
+      "matchManagers": ["cargo"],
+      "matchCurrentVersion": "<1.0.0",
+      "matchUpdateTypes": ["minor"],
+      "groupName": "Rust 0.x breaking updates"
+    },
+    {
+      "description": "Below 1.0 a minor bump (0.5 -> 0.6) is semver-breaking: keep it out of the safe Node group",
+      "matchManagers": ["npm"],
+      "matchCurrentVersion": "<1.0.0",
+      "matchUpdateTypes": ["minor"],
+      "groupName": "Node 0.x breaking updates"
     }
   ]
 }
