@@ -74,9 +74,11 @@ const ROLE_ORDER: GroupRole[] = [
   'folder',
   'ignore',
 ]
-/// Roles a layout can only hand out once, across every rule (a model has one
-/// name, one creator, one version, and is stored at one path) — the server
-/// rejects a spec that hands one out twice.
+/// Roles a file can only have one answer for (a model has one name, one
+/// creator, one version, and is stored at one path). Several rules may hold one
+/// — rules for different subtrees never meet on a file — and the server flags
+/// any file where they disagree. Within one rule, though, every group fires
+/// together, so two groups holding one would always clash: there it moves.
 const SINGULAR_ROLES: GroupRole[] = ['model_name', 'creator_ref', 'model_version', 'folder']
 
 /// What a rule is called in a message when the user hasn't named it.
@@ -247,27 +249,21 @@ export default memo(function ImportLayoutPanel({
   const updateRule = (index: number, patch: Partial<LayoutRule>) =>
     setRules((prev) => prev.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)))
 
-  /// Give one group a role, demoting whoever else held it when the role is one
-  /// of the singular ones. The server rejects a spec claiming two model names
-  /// (or creator ids, or versions), and a rejected plan greys out every group
-  /// row — including the stale one that caused it — so the panel would be stuck
-  /// with no way back short of deleting the rule. Handing the role over is what
-  /// the user meant anyway: this group is the model name *instead*.
+  /// Give one group a role. A singular role moves off any other group *in the
+  /// same rule* — this group is the model name instead — but other rules keep
+  /// theirs: whether they clash is a per-file question the plan answers.
   const setGroupRole = (index: number, group: number, role: GroupRole) =>
     setRules((prev) =>
       prev.map((rule, i) => {
-        const demoted = SINGULAR_ROLES.includes(role)
+        if (i !== index) return rule
+        const roles = SINGULAR_ROLES.includes(role)
           ? Object.fromEntries(
               Object.entries(rule.roles).map(([key, held]) =>
                 held === role ? [key, 'ignore' as GroupRole] : [key, held],
               ),
             )
           : rule.roles
-        return i === index
-          ? { ...rule, roles: { ...demoted, [String(group)]: role } }
-          : demoted === rule.roles
-            ? rule
-            : { ...rule, roles: demoted }
+        return { ...rule, roles: { ...roles, [String(group)]: role } }
       }),
     )
 
@@ -275,15 +271,24 @@ export default memo(function ImportLayoutPanel({
   // everything"), so an empty new block never floods the preview.
   const live = rules.filter((rule) => rule.pattern.trim())
 
-  // The rule that claims the folder, by label, if any. It rewrites the path, so
-  // "Discard folders" — which rewrites it to nothing — stands down while it is
-  // there, and never reaches the commit as a competing answer.
-  const folderRule = useMemo(() => {
-    const index = rules.findIndex(
-      (rule) => rule.enabled && rule.pattern.trim() && Object.values(rule.roles).includes('folder'),
-    )
-    return index < 0 ? null : ruleLabel(rules[index], index)
-  }, [rules])
+  // The rules that set the folder, by label, if any. They rewrite the path, so
+  // "Discard folders" — which rewrites it to nothing — stands down while they
+  // are there, and never reaches the commit as a competing answer.
+  const folderRules = useMemo(
+    () =>
+      rules.flatMap((rule, index) =>
+        rule.enabled && rule.pattern.trim() && Object.values(rule.roles).includes('folder')
+          ? [ruleLabel(rule, index)]
+          : [],
+      ),
+    [rules],
+  )
+  const folderRule =
+    folderRules.length === 0
+      ? null
+      : folderRules.length === 1
+        ? `${folderRules[0]} sets the folder, so this is off — clear its Folder group to discard folders instead.`
+        : `${folderRules.join(', ')} set the folder, so this is off — clear their Folder groups to discard folders instead.`
   const effectiveFlatten = flatten && !folderRule
 
   // Debounced server-side dry run; also the sole source of the parent's spec.
@@ -716,7 +721,7 @@ export default memo(function ImportLayoutPanel({
                 <Typography variant="body2">Discard folders</Typography>
                 <Typography variant="caption" color="text.secondary">
                   {folderRule
-                    ? `${folderRule} sets the folder, so this is off — clear its Folder group to discard folders instead.`
+                    ? folderRule
                     : 'The carve has already read them — keep the files flat inside the model instead of nested under the folders they came in.'}
                 </Typography>
               </Box>
@@ -1057,6 +1062,7 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
   indented: boolean
 }) {
   const invalid = annotation?.invalid_rules ?? []
+  const conflicts = annotation?.conflicts ?? []
   return (
     <Stack
       id={`import-file-${file.id}`}
@@ -1109,6 +1115,23 @@ const AnnotatedFileRow = memo(function AnnotatedFileRow({
             } ignored for this file.`}
           >
             <WarningAmberIcon color="warning" sx={{ fontSize: 16 }} />
+          </Tooltip>
+        )}
+        {conflicts.length > 0 && (
+          // Also not a blocker: rules disagreed on a one-answer role, so this
+          // file gets none rather than whichever rule came last.
+          <Tooltip
+            title={conflicts
+              .map(
+                (c) =>
+                  `${c.rules
+                    .map((i) => (rules?.[i] ? ruleLabel(rules[i], i) : `Rule ${i + 1}`))
+                    .join(' and ')} disagree on the ${ROLE_STYLES[c.role].label.toLowerCase()}`,
+              )
+              .join('; ')
+              .concat(', so it is left unset for this file.')}
+          >
+            <WarningAmberIcon color="error" sx={{ fontSize: 16 }} />
           </Tooltip>
         )}
         {annotation?.matched && (
@@ -1200,7 +1223,7 @@ const JUMP_MODES: Record<
   },
   conflict: {
     label: 'conflicts',
-    test: (a) => a.invalid_rules.length > 0,
+    test: (a) => a.invalid_rules.length > 0 || a.conflicts.length > 0,
     count: (n) => `${n} with a rule conflict`,
     none: 'no rule conflicts',
     splitSuffix: 'conflicts',

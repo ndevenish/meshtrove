@@ -497,6 +497,12 @@ export interface PathPart {
   role?: GroupRole
 }
 
+export interface RoleConflict {
+  role: GroupRole
+  /** the rules that answered, in rule order */
+  rules: number[]
+}
+
 export interface FileAnnotation {
   id: string
   /** matched by at least one enabled rule */
@@ -505,6 +511,10 @@ export interface FileAnnotation {
   /** indices of rules that captured two different values for one group here —
       their output was dropped for this file (a warning, never a blocker) */
   invalid_rules: number[]
+  /** one-answer roles (name, creator id, version, folder) that several rules
+      answered differently here — left unset for this file (a warning, never a
+      blocker) */
+  conflicts: RoleConflict[]
   model_name?: string
   creator_ref?: string
   model_version?: string

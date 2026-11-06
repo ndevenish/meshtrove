@@ -502,8 +502,11 @@ Example — Loot layout B:
 ### Roles
 
 Each capture group is assigned one of: **model name**, **creator id**,
-**version**, **folder** (at most one group each, across the whole layout),
-**model tag**, **variant tag**, **ignore** (any number of groups each).
+**version**, **folder** (one answer per file: several rules may hold one —
+rules for different subtrees never meet — but where two disagree on a file,
+that file gets no answer and is flagged as a conflict, rather than rule order
+deciding), **model tag**, **variant tag**, **ignore** (any number of groups
+each).
 There is no "variant" role — a variant *is* its tag set, so the union of a
 file's variant-tag captures (after mapping, below) simply *is* its variant,
 materialized per distinct tag set per model via the existing `tag_key`

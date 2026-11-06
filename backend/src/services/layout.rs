@@ -37,19 +37,19 @@ use crate::error::ApiError;
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     ModelName,
-    /// The creator's own id/SKU for the model. Singular per layout, like the
+    /// The creator's own id/SKU for the model. Singular per file, like the
     /// model name — a model has one — but stored verbatim (an id, not a title,
     /// so no camel-case expansion).
     CreatorRef,
     /// The creator's version for the model — "v2", a rework year. Singular per
-    /// layout for the same reason as the name, and verbatim for the same reason
+    /// file for the same reason as the name, and verbatim for the same reason
     /// as the creator id: it is a label the creator chose, not a title.
     ModelVersion,
     ModelTag,
     VariantTag,
     /// The file's own folder: whatever this group captures *replaces* the path
     /// the file came in with, verbatim (a path is not a title, so no camel-case
-    /// expansion and no value map). Singular per layout — a file has one path —
+    /// expansion and no value map). Singular per file — a file has one path —
     /// and the general form of `flatten`, which is the same rewrite to nothing:
     /// a drop wrapped in one useless top folder keeps `PlayTiles/` and loses
     /// `Stagetop Games Table/`, instead of choosing between the whole tree and
@@ -197,6 +197,10 @@ pub struct FileAnnotation {
     /// to take. Their output is dropped and the file is flagged; the other rules
     /// still apply and the commit is *not* blocked.
     pub invalid_rules: Vec<usize>,
+    /// Singular roles that two or more rules answered differently for this
+    /// file. The role is left unset here rather than settled by rule order; like
+    /// `invalid_rules`, a warning, not a blocker.
+    pub conflicts: Vec<RoleConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,6 +215,49 @@ pub struct FileAnnotation {
     /// under, replacing the one it arrived with. Absent = keep what it has.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+}
+
+/// Rules that disagreed on one file's singular role (see [`FileAnnotation::conflicts`]).
+#[derive(Serialize, ToSchema, Debug, PartialEq)]
+pub struct RoleConflict {
+    pub role: Role,
+    /// The rules that answered, in rule order.
+    pub rules: Vec<usize>,
+}
+
+/// One file's answer for a singular role, gathered across every rule (and
+/// every group) that holds it. Agreement — the same value from two rules, or
+/// the same rule firing twice — is one answer; disagreement is a conflict.
+#[derive(Default)]
+struct Singular {
+    /// (comparison key, value) of the first answer.
+    first: Option<(String, String)>,
+    rules: Vec<usize>,
+    conflicted: bool,
+}
+
+impl Singular {
+    fn offer(&mut self, rule: usize, key: String, value: String) {
+        if !self.rules.contains(&rule) {
+            self.rules.push(rule);
+        }
+        match &self.first {
+            None => self.first = Some((key, value)),
+            Some((seen, _)) if *seen != key => self.conflicted = true,
+            Some(_) => {}
+        }
+    }
+
+    fn resolve(self, role: Role, conflicts: &mut Vec<RoleConflict>) -> Option<String> {
+        if self.conflicted {
+            conflicts.push(RoleConflict {
+                role,
+                rules: self.rules,
+            });
+            return None;
+        }
+        self.first.map(|(_, value)| value)
+    }
 }
 
 /// One planned variant of a planned model. Empty `tags` = matched files that
@@ -441,10 +488,6 @@ pub fn analyze(
     vocab: &HashSet<String>,
 ) -> Result<Plan, ApiError> {
     let mut compiled: Vec<CompiledRule> = Vec::with_capacity(spec.rules.len());
-    let mut name_groups = 0usize;
-    let mut creator_ref_groups = 0usize;
-    let mut model_version_groups = 0usize;
-    let mut folder_groups = 0usize;
     for rule in &spec.rules {
         // Searched, not anchored — a small rule finds its fragment wherever it
         // sits. The seeded patterns anchor themselves (`^…$`), so they still
@@ -470,11 +513,6 @@ pub fn analyze(
                 roles[index] = *role;
             }
         }
-        name_groups += roles.iter().filter(|r| **r == Role::ModelName).count();
-        creator_ref_groups += roles.iter().filter(|r| **r == Role::CreatorRef).count();
-        model_version_groups += roles.iter().filter(|r| **r == Role::ModelVersion).count();
-        folder_groups += roles.iter().filter(|r| **r == Role::Folder).count();
-
         compiled.push(CompiledRule {
             regex,
             group_count,
@@ -489,32 +527,10 @@ pub fn analyze(
             enabled: rule.enabled && !rule.pattern.trim().is_empty(),
         });
     }
-    // The model name is singular across the whole layout: two rules each
-    // claiming it would leave the carve picking one by rule order.
-    if name_groups > 1 {
-        return Err(ApiError::BadRequest(
-            "at most one capture group, in one rule, can be the model name".into(),
-        ));
-    }
-    // The creator id is singular for the same reason the name is: a model has one.
-    if creator_ref_groups > 1 {
-        return Err(ApiError::BadRequest(
-            "at most one capture group, in one rule, can be the creator id".into(),
-        ));
-    }
-    // Likewise the version: one model, one version.
-    if model_version_groups > 1 {
-        return Err(ApiError::BadRequest(
-            "at most one capture group, in one rule, can be the version".into(),
-        ));
-    }
-    // And the folder: a file is stored at one path, so two groups claiming it
-    // would leave the carve picking one by rule order.
-    if folder_groups > 1 {
-        return Err(ApiError::BadRequest(
-            "at most one capture group, in one rule, can be the folder".into(),
-        ));
-    }
+    // The singular roles (name, creator id, version, folder) are *not* limited
+    // to one group across the layout: two rules shaped for different subtrees
+    // never meet on a file, so there is nothing to choose between. Whether they
+    // meet is a per-file question, answered by `Singular` below.
 
     let mut annotations = Vec::with_capacity(files.len());
     // Per-rule preview state: the groups each pattern captures (examples filled
@@ -556,10 +572,10 @@ pub fn analyze(
         let mut matched_any = false;
         let mut invalid_rules: Vec<usize> = Vec::new();
         let mut spans: Vec<(usize, usize, Role)> = Vec::new();
-        let mut model_name: Option<String> = None;
-        let mut creator_ref: Option<String> = None;
-        let mut model_version: Option<String> = None;
-        let mut folder: Option<String> = None;
+        let mut model_name = Singular::default();
+        let mut creator_ref = Singular::default();
+        let mut model_version = Singular::default();
+        let mut folder = Singular::default();
         let mut model_tags: Vec<String> = Vec::new();
         let mut variant_tags: Vec<String> = Vec::new();
         let mut unmapped: Vec<String> = Vec::new();
@@ -637,14 +653,20 @@ pub fn analyze(
                     // constantly, and the capture becomes the model's name verbatim —
                     // so `DwarfBerserker` or `dwarf_berserker` would be the name in
                     // the library. Put the spaces back.
-                    Role::ModelName => model_name = Some(crate::util::humanize_token(raw)),
+                    Role::ModelName => {
+                        let name = crate::util::humanize_token(raw);
+                        model_name.offer(rule_index, fold(&name), name)
+                    }
                     // An id, not a title: keep it exactly as captured.
-                    Role::CreatorRef => creator_ref = Some(raw.clone()),
+                    Role::CreatorRef => creator_ref.offer(rule_index, raw.clone(), raw.clone()),
                     // A label the creator chose — verbatim, like the creator id.
-                    Role::ModelVersion => model_version = Some(raw.clone()),
+                    Role::ModelVersion => model_version.offer(rule_index, raw.clone(), raw.clone()),
                     // A path, not a title: taken exactly as captured (minus the
                     // segments that would make it unsafe to store).
-                    Role::Folder => folder = Some(clean_folder(raw)),
+                    Role::Folder => {
+                        let path = clean_folder(raw);
+                        folder.offer(rule_index, path.clone(), path)
+                    }
                     // A tag is a name a human reads in the browse sidebar, so it gets
                     // the same treatment a variant tag's captured value does: the
                     // folder `Fantasy_Creatures` tags the model "Fantasy Creatures",
@@ -686,6 +708,12 @@ pub fn analyze(
 
         variant_tags.sort_unstable();
         variant_tags.dedup();
+
+        let mut conflicts: Vec<RoleConflict> = Vec::new();
+        let model_name = model_name.resolve(Role::ModelName, &mut conflicts);
+        let creator_ref = creator_ref.resolve(Role::CreatorRef, &mut conflicts);
+        let model_version = model_version.resolve(Role::ModelVersion, &mut conflicts);
+        let folder = folder.resolve(Role::Folder, &mut conflicts);
 
         // Highlight spans: non-overlapping capture ranges pooled from every valid
         // rule, first-come wins on nesting so the UI never has to deal with
@@ -747,6 +775,7 @@ pub fn analyze(
                 matched: false,
                 parts,
                 invalid_rules,
+                conflicts,
                 model_name: None,
                 creator_ref: None,
                 model_version: None,
@@ -824,6 +853,7 @@ pub fn analyze(
             matched: true,
             parts,
             invalid_rules,
+            conflicts,
             model_name,
             creator_ref,
             model_version,
@@ -1104,12 +1134,44 @@ mod tests {
     }
 
     #[test]
-    fn two_rules_cannot_both_name_the_model() {
+    fn two_rules_may_name_the_model_where_they_agree_or_never_meet() {
+        // Two rules for two differently shaped subtrees: each names its own
+        // files, and a file both reach is fine as long as they agree.
+        let spec = spec_of(vec![
+            rule(r"^Heroes/([^/]+)/", &[("1", Role::ModelName)]),
+            rule(r"^Villains/[^/]+/([^/]+)/", &[("1", Role::ModelName)]),
+            rule(r"/(Ogre)/", &[("1", Role::ModelName)]),
+        ]);
+        let files = vec![
+            file(1, "Heroes/Paladin", "body.stl"),
+            file(2, "Villains/Big/Ogre", "club.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        assert_eq!(plan.annotations[0].model_name.as_deref(), Some("Paladin"));
+        assert_eq!(plan.annotations[1].model_name.as_deref(), Some("Ogre"));
+        assert!(plan.annotations.iter().all(|a| a.conflicts.is_empty()));
+    }
+
+    #[test]
+    fn rules_that_name_one_file_differently_leave_it_unnamed_and_flagged() {
         let spec = spec_of(vec![
             rule(r"^([^/]+)/", &[("1", Role::ModelName)]),
             rule(r"/([^/]+)\.stl$", &[("1", Role::ModelName)]),
         ]);
-        assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_err());
+        let files = vec![file(1, "Paladin", "body.stl")];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        let annotation = &plan.annotations[0];
+        assert_eq!(annotation.model_name, None);
+        assert_eq!(
+            annotation.conflicts,
+            vec![RoleConflict {
+                role: Role::ModelName,
+                rules: vec![0, 1]
+            }]
+        );
+        // Unnamed under a bundle target = not carved, rather than carved under
+        // whichever rule happened to come last.
+        assert!(plan.models.is_empty());
     }
 
     #[test]
@@ -1119,7 +1181,10 @@ mod tests {
             rule(r"^([^/]+)/", &[("1", Role::ModelVersion)]),
             rule(r"/([^/]+)\.stl$", &[("1", Role::ModelVersion)]),
         ]);
-        assert!(analyze(&two, CarveTarget::Bundle, &[], &vocab()).is_err());
+        let files = vec![file(1, "V1", "V2.stl")];
+        let plan = analyze(&two, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        assert_eq!(plan.annotations[0].model_version, None);
+        assert_eq!(plan.annotations[0].conflicts[0].role, Role::ModelVersion);
 
         // And kept exactly as captured: a version is a label, not a title, so it
         // gets no camel-case expansion the way the model name does.
@@ -1417,12 +1482,34 @@ mod tests {
     }
 
     #[test]
-    fn two_rules_cannot_both_claim_the_folder() {
+    fn folder_rules_for_disjoint_subtrees_each_set_their_own() {
+        // The case the old one-folder-per-layout limit blocked: two subtrees
+        // shaped differently, a Folder rule apiece, never on the same file.
+        let spec = spec_of(vec![
+            rule(r"^Big/(.+)/[^/]+$", &[("1", Role::Folder)]),
+            rule(r"^Small/[^/]+/(.+)/[^/]+$", &[("1", Role::Folder)]),
+        ]);
+        let files = vec![
+            file(1, "Big/Decks", "a.stl"),
+            file(2, "Small/Wrapper/Decks", "b.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Model, &files, &vocab()).unwrap();
+        assert_eq!(plan.annotations[0].folder.as_deref(), Some("Decks"));
+        assert_eq!(plan.annotations[1].folder.as_deref(), Some("Decks"));
+        assert!(plan.annotations.iter().all(|a| a.conflicts.is_empty()));
+    }
+
+    #[test]
+    fn folder_rules_that_disagree_on_a_file_leave_its_path_alone() {
         let spec = spec_of(vec![
             rule(r"^([^/]+)/", &[("1", Role::Folder)]),
             rule(r"/([^/]+)/", &[("1", Role::Folder)]),
         ]);
-        assert!(analyze(&spec, CarveTarget::Model, &[], &vocab()).is_err());
+        let files = vec![file(1, "Outer/Inner", "a.stl")];
+        let plan = analyze(&spec, CarveTarget::Model, &files, &vocab()).unwrap();
+        assert_eq!(plan.annotations[0].folder, None);
+        assert_eq!(plan.annotations[0].conflicts[0].role, Role::Folder);
+        assert!(plan.folder_moves(None).is_empty());
     }
 
     #[test]
@@ -1486,9 +1573,11 @@ mod tests {
         spec.rules[0].roles.insert("9".into(), Role::ModelTag);
         assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_ok());
 
+        // Nor is a second model-name group: whether two groups clash is a
+        // per-file question (see rules_that_name_one_file_differently_…).
         let mut spec = loot_spec();
-        spec.rules[0].roles.insert("1".into(), Role::ModelName); // second model-name group
-        assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_err());
+        spec.rules[0].roles.insert("1".into(), Role::ModelName);
+        assert!(analyze(&spec, CarveTarget::Bundle, &[], &vocab()).is_ok());
     }
 
     #[test]
