@@ -5,7 +5,7 @@
 # The SPA talks to the backend over same-origin relative paths, so there is no
 # build-time API URL to inject.
 # ---------------------------------------------------------------------------
-FROM node:22-slim AS frontend
+FROM node:26-slim AS frontend
 WORKDIR /app/frontend
 # Install deps first, off just the manifests, so the layer caches across source
 # edits.
