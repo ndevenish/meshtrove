@@ -425,6 +425,10 @@ export default memo(function ImportLayoutPanel({
       <Autocomplete
         multiple
         freeSolo
+        // Commit typed-but-unentered text on blur: otherwise it sits in the
+        // input looking like a mapping while the value stays unmapped, and the
+        // carve silently refuses it.
+        autoSelect
         size="small"
         disabled={disabled}
         options={(vocab ?? []).map((t) => t.name)}

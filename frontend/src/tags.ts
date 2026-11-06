@@ -46,7 +46,8 @@ function dedupe(parts: readonly string[]): string[] {
 /// shattered by a later edit.
 export const changeTags =
   (set: (tags: string[]) => void) => (_e: unknown, value: readonly string[], reason: string) => {
-    if (reason === 'createOption') {
+    // "blur" is autoSelect committing the typed text when focus leaves.
+    if (reason === 'createOption' || reason === 'blur') {
       const typed = value[value.length - 1] ?? ''
       set(dedupe([...value.slice(0, -1), ...splitOne(typed)]))
     } else {
