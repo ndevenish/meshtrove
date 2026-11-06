@@ -5,7 +5,6 @@
 //! admin who created it. Only the SHA-256 hex of the token is stored — the
 //! plaintext is returned once, at creation, and never again.
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -39,7 +38,7 @@ pub(crate) fn hash_token(token: &str) -> String {
 /// secret scanners (a leaked token is recognizable) and to humans reading logs.
 fn generate_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("OS random number generator failed");
     format!(
         "mtrv_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
