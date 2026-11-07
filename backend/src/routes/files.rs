@@ -132,8 +132,12 @@ pub fn guess_kind(filename: &str) -> FileKind {
 /// folders but is never a model file: skip it on the way in. `logical` is the
 /// file's full logical path (`path/filename`). Matches at any depth, so a
 /// `.DS_Store` buried three folders down or a nested `__MACOSX/` is caught too.
+/// Windows' `Thumbs.db`/`desktop.ini` match case-insensitively, as Windows does.
 pub fn is_os_junk(logical: &str) -> bool {
-    logical.rsplit('/').next() == Some(".DS_Store")
+    let name = logical.rsplit('/').next().unwrap_or(logical);
+    name == ".DS_Store"
+        || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.eq_ignore_ascii_case("desktop.ini")
         || logical.split('/').any(|seg| seg == "__MACOSX")
 }
 
@@ -314,7 +318,7 @@ async fn consume_fields(
                     .file_name()
                     .ok_or_else(|| ApiError::BadRequest("file field needs a filename".into()))?
                     .to_string();
-                // Drop OS cruft (.DS_Store, __MACOSX) the same way the zip
+                // Drop OS cruft (.DS_Store, __MACOSX, Thumbs.db) the same way the zip
                 // importer does — a dropped folder carries it just as an archive
                 // does. The field goes unread; next_field drains it for us.
                 let logical = if path.is_empty() {
@@ -1390,11 +1394,17 @@ mod tests {
         assert!(is_os_junk("Heroes/32mm/.DS_Store"));
         assert!(is_os_junk("__MACOSX/._Gold.stl"));
         assert!(is_os_junk("Pack/__MACOSX/._Gold.stl"));
+        // Windows thumbnail caches and folder settings, in any case.
+        assert!(is_os_junk("Thumbs.db"));
+        assert!(is_os_junk("Heroes/32mm/thumbs.db"));
+        assert!(is_os_junk("Heroes/Desktop.ini"));
         // Real files, including names that merely resemble the markers.
         assert!(!is_os_junk("Gold.stl"));
         assert!(!is_os_junk("Heroes/Gold_32mm/Gold.stl"));
         assert!(!is_os_junk("notes_about_DS_Store.txt"));
         assert!(!is_os_junk("__MACOSX_backup/Gold.stl"));
+        assert!(!is_os_junk("Thumbs.db/Gold.stl"));
+        assert!(!is_os_junk("MyThumbs.db"));
     }
 
     #[test]

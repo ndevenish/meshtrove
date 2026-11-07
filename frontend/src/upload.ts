@@ -17,7 +17,13 @@ export type Drop = { name: string; files: StagedFile[] }
 /// `is_os_junk`), so junk never wastes an upload — and never lingers "pending"
 /// in a batch retry, which reconciles against what actually staged.
 function isOsJunk({ file, path }: StagedFile): boolean {
-  return file.name === '.DS_Store' || path.split('/').includes('__MACOSX')
+  const lower = file.name.toLowerCase()
+  return (
+    file.name === '.DS_Store' ||
+    lower === 'thumbs.db' ||
+    lower === 'desktop.ini' ||
+    path.split('/').includes('__MACOSX')
+  )
 }
 
 /// Derive a human name: strip a leading "DownloadAll_" prefix, split camel case,
