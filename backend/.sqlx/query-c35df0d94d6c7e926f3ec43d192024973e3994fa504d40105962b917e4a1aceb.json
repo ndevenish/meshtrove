@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             coalesce(f.model_id, v.model_id) as \"model_id?\",\n             f.bundle_id,\n             f.import_id,\n             coalesce(mm.created_by, vm.created_by) as \"model_created_by?\",\n             -- coalesce() makes these expressions, which sqlx leaves as\n             -- \"unknown\" nullability (a cast is still traced): as bare LEFT JOIN\n             -- columns their inferred nullability followed the query plan, so\n             -- the committed .sqlx cache flipped between databases. `?` decides\n             -- the type anyway.\n             coalesce(bb.created_by) as \"bundle_created_by?\",\n             coalesce(ii.created_by) as \"import_created_by?\"\n           FROM files f\n           LEFT JOIN models mm ON mm.id = f.model_id\n           LEFT JOIN model_variants v ON v.id = f.variant_id\n           LEFT JOIN models vm ON vm.id = v.model_id\n           LEFT JOIN bundles bb ON bb.id = f.bundle_id\n           LEFT JOIN imports ii ON ii.id = f.import_id\n           WHERE f.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_id?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "bundle_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "bundle_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "import_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "import_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "model_created_by?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "bundle_created_by?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "import_created_by?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c35df0d94d6c7e926f3ec43d192024973e3994fa504d40105962b917e4a1aceb"
+}

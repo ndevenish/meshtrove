@@ -779,8 +779,13 @@ async fn file_context(state: &AppState, file_id: Uuid) -> Result<(FileContext, U
              f.bundle_id,
              f.import_id,
              coalesce(mm.created_by, vm.created_by) as "model_created_by?",
-             bb.created_by as "bundle_created_by?",
-             ii.created_by as "import_created_by?"
+             -- coalesce() makes these expressions, which sqlx leaves as
+             -- "unknown" nullability (a cast is still traced): as bare LEFT JOIN
+             -- columns their inferred nullability followed the query plan, so
+             -- the committed .sqlx cache flipped between databases. `?` decides
+             -- the type anyway.
+             coalesce(bb.created_by) as "bundle_created_by?",
+             coalesce(ii.created_by) as "import_created_by?"
            FROM files f
            LEFT JOIN models mm ON mm.id = f.model_id
            LEFT JOIN model_variants v ON v.id = f.variant_id
