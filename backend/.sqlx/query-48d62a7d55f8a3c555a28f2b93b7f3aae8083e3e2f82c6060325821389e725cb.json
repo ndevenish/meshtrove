@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, name, print_notes, derived_from_variant_id, created_at\n               FROM model_variants WHERE model_id = $1 ORDER BY created_at, id",
+  "query": "SELECT v.id, v.name, v.print_notes, v.derived_from_variant_id, v.created_at\n               FROM model_variants v WHERE v.model_id = $1\n               ORDER BY coalesce((SELECT array_agg(lower(t.name::text) COLLATE \"C\"\n                                                   ORDER BY lower(t.name::text) COLLATE \"C\")\n                                    FROM variant_tag_assignments a\n                                    JOIN variant_tags t ON t.id = a.tag_id\n                                   WHERE a.variant_id = v.id), '{}'),\n                        v.name NULLS FIRST, v.created_at, v.id",
   "describe": {
     "columns": [
       {
@@ -72,5 +72,5 @@
       false
     ]
   },
-  "hash": "c2e2bc9b45d9f6bab48ec941d902cb90243fbc78e3523331eac2d6bbcffc5f29"
+  "hash": "48d62a7d55f8a3c555a28f2b93b7f3aae8083e3e2f82c6060325821389e725cb"
 }

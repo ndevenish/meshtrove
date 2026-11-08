@@ -818,9 +818,16 @@ async fn gather_models(
             ));
         }
 
+        // Same order as the model page (`fetch_variants`): by tag set, tag by tag.
         let variant_rows = sqlx::query!(
-            r#"SELECT id, name, print_notes, derived_from_variant_id, created_at
-               FROM model_variants WHERE model_id = $1 ORDER BY created_at, id"#,
+            r#"SELECT v.id, v.name, v.print_notes, v.derived_from_variant_id, v.created_at
+               FROM model_variants v WHERE v.model_id = $1
+               ORDER BY coalesce((SELECT array_agg(lower(t.name::text) COLLATE "C"
+                                                   ORDER BY lower(t.name::text) COLLATE "C")
+                                    FROM variant_tag_assignments a
+                                    JOIN variant_tags t ON t.id = a.tag_id
+                                   WHERE a.variant_id = v.id), '{}'),
+                        v.name NULLS FIRST, v.created_at, v.id"#,
             r.id
         )
         .fetch_all(db)

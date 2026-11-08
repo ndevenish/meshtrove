@@ -61,7 +61,12 @@ pub async fn fetch_variants(
     state: &AppState,
     model_id: Uuid,
 ) -> Result<Vec<VariantDetail>, ApiError> {
-    // The anonymous variant leads: it is the model's default bucket of files.
+    // Ordered by tag set, compared tag by tag: `{32mm}` < `{32mm, supported}` <
+    // `{75mm}` < `{blank}`. A prefix sorts first, so the anonymous variant's
+    // empty set leads — it is the model's default bucket of files. Tags are
+    // compared case-folded in byte order ("C"), so the result doesn't move with
+    // the database's locale. Two variants never share a tag set, so name and
+    // age only break ties that can't happen; they keep the order total.
     let rows = sqlx::query!(
         r#"SELECT v.id, v.model_id, v.name, v.print_notes, v.derived_from_variant_id, v.created_at,
                   (SELECT count(*) FROM files f WHERE f.variant_id = v.id) as "file_count!",
@@ -72,7 +77,12 @@ pub async fn fetch_variants(
                               JOIN variant_tags t ON t.id = a.tag_id
                              WHERE a.variant_id = v.id), '{}') as "tags!: Vec<String>"
            FROM model_variants v WHERE v.model_id = $1
-           ORDER BY (v.tag_key <> '') , v.created_at"#,
+           ORDER BY coalesce((SELECT array_agg(lower(t.name::text) COLLATE "C"
+                                               ORDER BY lower(t.name::text) COLLATE "C")
+                                FROM variant_tag_assignments a
+                                JOIN variant_tags t ON t.id = a.tag_id
+                               WHERE a.variant_id = v.id), '{}'),
+                    v.name NULLS FIRST, v.created_at, v.id"#,
         model_id,
     )
     .fetch_all(&state.db)

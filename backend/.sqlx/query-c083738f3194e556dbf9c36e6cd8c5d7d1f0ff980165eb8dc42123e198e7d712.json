@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT v.id, v.model_id, v.name, v.print_notes, v.derived_from_variant_id, v.created_at,\n                  (SELECT count(*) FROM files f WHERE f.variant_id = v.id) as \"file_count!\",\n                  coalesce((SELECT sum(b.size) FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256\n                            WHERE f.variant_id = v.id), 0)::bigint as \"total_size!\",\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name)\n                              FROM variant_tag_assignments a\n                              JOIN variant_tags t ON t.id = a.tag_id\n                             WHERE a.variant_id = v.id), '{}') as \"tags!: Vec<String>\"\n           FROM model_variants v WHERE v.model_id = $1\n           ORDER BY (v.tag_key <> '') , v.created_at",
+  "query": "SELECT v.id, v.model_id, v.name, v.print_notes, v.derived_from_variant_id, v.created_at,\n                  (SELECT count(*) FROM files f WHERE f.variant_id = v.id) as \"file_count!\",\n                  coalesce((SELECT sum(b.size) FROM files f JOIN blobs b ON b.sha256 = f.blob_sha256\n                            WHERE f.variant_id = v.id), 0)::bigint as \"total_size!\",\n                  coalesce((SELECT array_agg(t.name::text ORDER BY t.name)\n                              FROM variant_tag_assignments a\n                              JOIN variant_tags t ON t.id = a.tag_id\n                             WHERE a.variant_id = v.id), '{}') as \"tags!: Vec<String>\"\n           FROM model_variants v WHERE v.model_id = $1\n           ORDER BY coalesce((SELECT array_agg(lower(t.name::text) COLLATE \"C\"\n                                               ORDER BY lower(t.name::text) COLLATE \"C\")\n                                FROM variant_tag_assignments a\n                                JOIN variant_tags t ON t.id = a.tag_id\n                               WHERE a.variant_id = v.id), '{}'),\n                    v.name NULLS FIRST, v.created_at, v.id",
   "describe": {
     "columns": [
       {
@@ -105,5 +105,5 @@
       null
     ]
   },
-  "hash": "04a3aaa3b53482d9c24d32626f0d974157cd8cb91666c84a4d885ece346186ca"
+  "hash": "c083738f3194e556dbf9c36e6cd8c5d7d1f0ff980165eb8dc42123e198e7d712"
 }
