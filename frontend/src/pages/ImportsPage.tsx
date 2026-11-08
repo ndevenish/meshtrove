@@ -14,10 +14,12 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api } from '../api'
 import DropboxPanel from '../components/DropboxPanel'
+import { useDocumentTitle } from '../documentTitle'
 
 /// Everything dropped but not yet placed. Imports live only here — they are
 /// deliberately absent from browse until they become a model or a bundle.
 export default function ImportsPage() {
+  useDocumentTitle('Importing')
   const { data: staged, isLoading } = useQuery({
     queryKey: ['imports'],
     queryFn: () => api.imports(),

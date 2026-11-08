@@ -38,6 +38,7 @@ import ImportStagingProgress from '../components/ImportStagingProgress'
 import { useImportDraftState, clearImportDraft } from '../importDraft'
 import { changeTags, pasteTags } from '../tags'
 import { CustomFieldControl, type ScalarValue } from '../components/CustomFieldControl'
+import { useDocumentTitle } from '../documentTitle'
 
 type Destination = 'new_model' | 'new_bundle' | 'bundle'
 
@@ -120,6 +121,7 @@ function ImportWorkbench() {
     // While the archive is unpacking, the file list is still growing.
     refetchInterval: (query) => (query.state.data?.unpacking ? 1500 : false),
   })
+  useDocumentTitle(staged ? `Import ${staged.name}` : undefined)
   // The shape of the drop: every folder and how many files it holds. One
   // aggregate, and small — a few KB for an import whose full listing is
   // megabytes — so it is both what the progress view watches while the archive

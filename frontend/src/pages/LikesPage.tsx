@@ -5,10 +5,12 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import ItemGrid from '../components/ItemGrid'
 import { useAuth } from '../main'
+import { useDocumentTitle } from '../documentTitle'
 
 /// Everything the logged-in user has liked, newest like first — what the front
 /// page's "Liked" row is a single-row window onto.
 export default function LikesPage() {
+  useDocumentTitle('Likes')
   const [params, setParams] = useSearchParams()
   const { user, loading } = useAuth()
   const page = Number(params.get('page') ?? '1')

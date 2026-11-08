@@ -20,10 +20,12 @@ import TagsPanel from '../components/TagsPanel'
 import StoragePanel from '../components/StoragePanel'
 import UsersPanel from '../components/UsersPanel'
 import ApiTokensPanel from '../components/ApiTokensPanel'
+import { useDocumentTitle } from '../documentTitle'
 
 /// Renderer configuration + bulk re-render. Changing the renderer only
 /// affects new renders; "re-render stale" migrates existing images.
 export default function AdminPage() {
+  useDocumentTitle('Admin')
   const { user } = useAuth()
   const [tool, setTool] = useState<string | null>(null)
   const [args, setArgs] = useState<string | null>(null)

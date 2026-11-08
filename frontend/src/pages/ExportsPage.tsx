@@ -18,11 +18,13 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, exportDownloadUrl, formatBytes } from '../api'
+import { useDocumentTitle } from '../documentTitle'
 
 /// Exports the user has built. A build runs as a background job, so this page
 /// polls while any are still building; a finished one is downloaded here and
 /// deleted when no longer needed.
 export default function ExportsPage() {
+  useDocumentTitle('Exports')
   const queryClient = useQueryClient()
   const { data: exports, isLoading } = useQuery({
     queryKey: ['exports'],

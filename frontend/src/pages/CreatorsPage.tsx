@@ -20,8 +20,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type Creator } from '../api'
 import { useAuth } from '../main'
+import { useDocumentTitle } from '../documentTitle'
 
 export default function CreatorsPage() {
+  useDocumentTitle('Creators')
   const [params] = useSearchParams()
   const { user } = useAuth()
   const queryClient = useQueryClient()

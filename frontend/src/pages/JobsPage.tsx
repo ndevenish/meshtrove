@@ -14,6 +14,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type Job } from '../api'
 import { useAuth } from '../main'
+import { useDocumentTitle } from '../documentTitle'
 
 const STATUS_COLOR: Record<Job['status'], 'default' | 'info' | 'success' | 'error' | 'warning'> = {
   queued: 'default',
@@ -24,6 +25,7 @@ const STATUS_COLOR: Record<Job['status'], 'default' | 'info' | 'success' | 'erro
 }
 
 export default function JobsPage() {
+  useDocumentTitle('Jobs')
   const { user } = useAuth()
   const queryClient = useQueryClient()
   const { data: jobs } = useQuery({
