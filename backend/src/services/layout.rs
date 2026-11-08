@@ -102,6 +102,14 @@ pub struct LayoutRule {
     /// import; saving the layout captures the toggles as the template's defaults.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The variant tags this rule finds are the *folder's*, not the file's: every
+    /// file in a folder where the rule hit anything gets the union of what it
+    /// found across that folder. A creator's "ReadyToSlice" set is one variant
+    /// even though only its big parts are suffixed `_Hollow` — per file, the
+    /// solid tongue would split away from its set. Equivalent to a rule written
+    /// against the folder name, without having to know how each pack spells it.
+    #[serde(default)]
+    pub whole_folder: bool,
 }
 
 /// The user-editable definition: a list of rules whose captures merge. One
@@ -449,6 +457,76 @@ struct CompiledRule {
     roles: Vec<Role>,
     value_map: BTreeMap<String, Vec<String>>,
     enabled: bool,
+    whole_folder: bool,
+}
+
+/// One rule searched over one path. `None` = no match at all.
+struct RuleHit {
+    /// Group index -> the group's one answer.
+    captured: BTreeMap<usize, GroupCapture>,
+    /// One group captured two different values: the rule has no single answer.
+    contradicted: bool,
+}
+
+/// Search `rule` across `full`, collecting each group's examples into
+/// `examples` along the way. A rule is searched, so one group can fire several
+/// times down the path; consistency is what makes that a single answer.
+fn run_rule(
+    rule: &CompiledRule,
+    full: &str,
+    examples: &mut [GroupInfo],
+) -> Result<Option<RuleHit>, ApiError> {
+    let mut captured: BTreeMap<usize, GroupCapture> = BTreeMap::new();
+    let mut contradicted = false;
+    let mut hit = false;
+    for caps in rule.regex.captures_iter(full) {
+        let caps = caps.map_err(|e| ApiError::BadRequest(format!("pattern failed to run: {e}")))?;
+        hit = true;
+        for index in 1..rule.group_count {
+            let Some(m) = caps.get(index) else { continue };
+            let raw = m.as_str().trim();
+            if raw.is_empty() {
+                continue;
+            }
+            // Examples are collected even when the rule turns out to
+            // contradict itself — seeing both values side by side in the
+            // role table is how you spot why it was dropped.
+            if let Some(info) = examples.get_mut(index - 1)
+                && !info.examples.iter().any(|e| e == raw)
+                && info.examples.len() < 3
+            {
+                info.examples.push(raw.to_string());
+            }
+            let folded = fold(raw);
+            match captured.entry(index) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((folded, raw.to_string(), vec![(m.start(), m.end())]));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let seen = slot.get_mut();
+                    if seen.0 == folded {
+                        seen.2.push((m.start(), m.end()));
+                    } else {
+                        // 32mm here and 75mm there, from one group: this
+                        // rule has no single answer for this file.
+                        contradicted = true;
+                    }
+                }
+            }
+        }
+    }
+    Ok(hit.then_some(RuleHit {
+        captured,
+        contradicted,
+    }))
+}
+
+/// What a whole-folder rule found across one folder: the union of its resolved
+/// variant tags, and the humanised captures it couldn't resolve.
+#[derive(Default)]
+struct FolderTags {
+    tags: Vec<String>,
+    unmapped: Vec<String>,
 }
 
 /// What a rule's variant-tag capture resolves to: its explicit mapping, else an
@@ -525,6 +603,7 @@ pub fn analyze(
             // that matches everywhere: inert, exactly like a disabled one, so
             // pressing "Add rule" doesn't flood the preview before you type.
             enabled: rule.enabled && !rule.pattern.trim().is_empty(),
+            whole_folder: rule.whole_folder,
         });
     }
     // The singular roles (name, creator id, version, folder) are *not* limited
@@ -548,6 +627,52 @@ pub fn analyze(
         .collect();
     let mut rule_values: Vec<BTreeMap<String, CapturedValue>> =
         compiled.iter().map(|_| BTreeMap::new()).collect();
+
+    // Whole-folder rules answer per folder, so gather what each found across
+    // every file of a folder before any file is placed. Keyed by rule, then by
+    // the file's folder as it arrived (before any flatten or folder rewrite).
+    let mut folder_tags: Vec<HashMap<&str, FolderTags>> =
+        compiled.iter().map(|_| HashMap::new()).collect();
+    for (rule_index, rule) in compiled.iter().enumerate() {
+        if !rule.enabled || !rule.whole_folder {
+            continue;
+        }
+        for file in files {
+            // Examples are gathered in the main pass; don't count them twice.
+            let Some(hit) = run_rule(rule, &file.full_path(), &mut [])? else {
+                continue;
+            };
+            let acc = folder_tags[rule_index]
+                .entry(file.path.as_str())
+                .or_default();
+            if hit.contradicted {
+                // Still marks the folder as hit, but says nothing about it.
+                continue;
+            }
+            for (index, (_folded, raw, _spans)) in &hit.captured {
+                if rule.roles[*index] != Role::VariantTag {
+                    continue;
+                }
+                let resolved = resolve(&rule.value_map, vocab, raw);
+                let humanised = crate::util::humanize_token(raw);
+                rule_values[rule_index]
+                    .entry(value_key(raw))
+                    .or_insert_with(|| CapturedValue {
+                        raw: humanised.clone(),
+                        tags: resolved.clone(),
+                    });
+                match resolved {
+                    Some(tags) => acc.tags.extend(tags),
+                    None => {
+                        if !acc.unmapped.contains(&humanised) {
+                            acc.unmapped.push(humanised);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Model tags in first-seen (file/path) order — the bundle's category order.
     let mut model_tag_order: Vec<String> = Vec::new();
     let mut seen_model_tags: HashSet<String> = HashSet::new();
@@ -584,52 +709,27 @@ pub fn analyze(
             if !rule.enabled {
                 continue;
             }
-            // Group index -> the group's one answer. A rule is searched, so one
-            // group can fire several times down the path; consistency is what
-            // makes that a single answer.
-            let mut captured: BTreeMap<usize, GroupCapture> = BTreeMap::new();
-            let mut contradicted = false;
-            let mut hit = false;
-            for caps in rule.regex.captures_iter(&full) {
-                let caps =
-                    caps.map_err(|e| ApiError::BadRequest(format!("pattern failed to run: {e}")))?;
-                hit = true;
-                for index in 1..rule.group_count {
-                    let Some(m) = caps.get(index) else { continue };
-                    let raw = m.as_str().trim();
-                    if raw.is_empty() {
-                        continue;
-                    }
-                    // Examples are collected even when the rule turns out to
-                    // contradict itself — seeing both values side by side in the
-                    // role table is how you spot why it was dropped.
-                    if let Some(info) = rule_groups[rule_index].get_mut(index - 1)
-                        && !info.examples.iter().any(|e| e == raw)
-                        && info.examples.len() < 3
-                    {
-                        info.examples.push(raw.to_string());
-                    }
-                    let folded = fold(raw);
-                    match captured.entry(index) {
-                        std::collections::btree_map::Entry::Vacant(slot) => {
-                            slot.insert((folded, raw.to_string(), vec![(m.start(), m.end())]));
-                        }
-                        std::collections::btree_map::Entry::Occupied(mut slot) => {
-                            let seen = slot.get_mut();
-                            if seen.0 == folded {
-                                seen.2.push((m.start(), m.end()));
-                            } else {
-                                // 32mm here and 75mm there, from one group: this
-                                // rule has no single answer for this file.
-                                contradicted = true;
-                            }
-                        }
+            // A whole-folder rule's variant tags come from its folder, whether
+            // or not it hit this particular file: a folder it hit anywhere is
+            // a folder it matched, exactly as a pattern on the folder name would.
+            if rule.whole_folder
+                && let Some(acc) = folder_tags[rule_index].get(file.path.as_str())
+            {
+                matched_any = true;
+                variant_tags.extend(acc.tags.iter().cloned());
+                for value in &acc.unmapped {
+                    if !unmapped.contains(value) {
+                        unmapped.push(value.clone());
                     }
                 }
             }
-            if !hit {
+            let Some(RuleHit {
+                captured,
+                contradicted,
+            }) = run_rule(rule, &full, &mut rule_groups[rule_index])?
+            else {
                 continue; // a rule that doesn't match just says nothing
-            }
+            };
             matched_any = true;
             if contradicted {
                 // Drop this rule's whole contribution (and its highlights) for
@@ -683,6 +783,8 @@ pub fn analyze(
                             model_tag_order.push(humanised);
                         }
                     }
+                    // Already taken from the folder, above.
+                    Role::VariantTag if rule.whole_folder => {}
                     Role::VariantTag => {
                         let resolved = resolve(&rule.value_map, vocab, raw);
                         let humanised = crate::util::humanize_token(raw);
@@ -923,6 +1025,7 @@ mod tests {
             roles: roles.iter().map(|(k, r)| ((*k).to_string(), *r)).collect(),
             value_map: HashMap::new(),
             enabled: true,
+            whole_folder: false,
         }
     }
 
@@ -955,6 +1058,7 @@ mod tests {
                 ("NoSupports".into(), vec!["unsupported".into()]),
             ]),
             enabled: true,
+            whole_folder: false,
         }])
     }
 
@@ -1018,6 +1122,57 @@ mod tests {
         );
         assert!(plan.models.iter().any(|m| m.name == "Sanjay"));
         assert!(plan.unmapped_values().is_empty());
+    }
+
+    /// Loot's ReadyToSlice set hollows only its big parts. Per file, the solid
+    /// tongue splits off into the plain `supported` variant — and lands among the
+    /// Lychee projects. Per folder, the set stays one variant.
+    #[test]
+    fn a_whole_folder_rule_tags_the_set_not_the_part() {
+        let mut support = rule(
+            r"(?i)((?:Un)?Supported(?:_Hollow)?)",
+            &[("1", Role::VariantTag)],
+        );
+        support.value_map = HashMap::from([(
+            "supported hollow".into(),
+            vec!["supported".into(), "hollow".into()],
+        )]);
+        let files = vec![
+            file(1, "Star_ReadyToSlice", "Star_Body_Supported_Hollow.stl"),
+            file(2, "Star_ReadyToSlice", "Star_Tongue_Supported.stl"),
+            file(3, "Star_ReadyToSlice", "notes.txt"),
+            file(4, "Star_LYCHEE", "Star_Body_Supported.lys"),
+            file(5, "Star_LYCHEE", "Star_Tongue_Supported.lys"),
+        ];
+        let vocab: HashSet<String> = ["supported", "hollow"].map(String::from).into();
+        let variants = |spec: &LayoutSpec| -> Vec<(Vec<String>, Vec<Uuid>)> {
+            let plan = analyze(spec, CarveTarget::Model, &files, &vocab).unwrap();
+            plan.models[0]
+                .variants
+                .iter()
+                .map(|v| (v.tags.clone(), v.files.clone()))
+                .collect()
+        };
+        let id = Uuid::from_u128;
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // Off: the tongue joins the Lychee files, and the notes match nothing.
+        assert_eq!(
+            variants(&spec_of(vec![support.clone()])),
+            vec![
+                (tags(&["hollow", "supported"]), vec![id(1)]),
+                (tags(&["supported"]), vec![id(2), id(4), id(5)]),
+            ]
+        );
+
+        support.whole_folder = true;
+        assert_eq!(
+            variants(&spec_of(vec![support])),
+            vec![
+                (tags(&["hollow", "supported"]), vec![id(1), id(2), id(3)]),
+                (tags(&["supported"]), vec![id(4), id(5)]),
+            ]
+        );
     }
 
     #[test]

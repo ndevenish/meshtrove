@@ -463,7 +463,8 @@ export interface LayoutRule {
   /** lowercased raw capture -> variant tag names ([] = maps to nothing) */
   value_map: Record<string, string[]>
   /** off = contributes nothing, like a rule that never matches */
-  enabled: boolean
+  enabled: boolean /** variant tags found anywhere in a folder apply to every file in it */
+  whole_folder?: boolean
 }
 
 /// The user-editable layout definition: several small patterns, each searched

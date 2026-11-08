@@ -559,6 +559,26 @@ export default memo(function ImportLayoutPanel({
             slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: 13 } } }}
             sx={{ mb: 1 }}
           />
+          {Object.values(rule.roles).includes('variant_tag') && (
+            <Tooltip title="Tag the set, not the part: every file in a folder where this rule finds anything gets the variant tags it found across that whole folder. Keeps a ReadyToSlice set together when only its big parts say _Hollow.">
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={!!rule.whole_folder}
+                    onChange={(e) => {
+                      updateRule(index, { whole_folder: e.target.checked })
+                      setSelected('custom')
+                    }}
+                  />
+                }
+                label={
+                  <Typography variant="body2">Variant tags apply to the whole folder</Typography>
+                }
+                sx={{ ml: 0, mb: 1 }}
+              />
+            </Tooltip>
+          )}
 
           {groupIndices.map((group) => {
             const info = planGroups.get(group)
