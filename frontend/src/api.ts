@@ -462,6 +462,9 @@ export interface LayoutRule {
   roles: Record<string, GroupRole>
   /** lowercased raw capture -> variant tag names ([] = maps to nothing) */
   value_map: Record<string, string[]>
+  /** lowercased raw capture -> model tag names, for model-tag groups ([] = drop
+      it; no entry = the humanised capture is the tag, as it always was) */
+  model_tag_map?: Record<string, string[]>
   /** off = contributes nothing, like a rule that never matches */
   enabled: boolean /** variant tags found anywhere in a folder apply to every file in it */
   whole_folder?: boolean
@@ -567,7 +570,8 @@ export interface CapturedValue {
       lowercase is the value-map key, so `Supported_LYCHEE` and `SupportedLychee`
       are one entry */
   raw: string
-  /** resolved variant tag names; null = unmapped */
+  /** resolved tag names; null = unmapped (variant tags only — a model-tag
+      capture always resolves, by default to itself) */
   tags: string[] | null
 }
 
@@ -579,6 +583,8 @@ export interface CapturedValue {
 export interface RulePlan {
   groups: GroupInfo[]
   values: CapturedValue[]
+  /** the distinct captures of this rule's model-tag groups, and their tags */
+  model_values: CapturedValue[]
 }
 
 export interface LayoutPlan {

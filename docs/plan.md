@@ -570,8 +570,8 @@ captures — symmetric at both levels:
 A layout is a **list of rules**, not one regex (2026-07-18). One pattern that
 has to capture the model name, the category, the scale *and* the support state
 at once is fragile to write and impossible to reuse; several small ones compose.
-Each rule carries its own `pattern`, `roles`, `value_map`, a label and an
-enable/disable switch, and is **searched** across the path rather than anchored
+Each rule carries its own `pattern`, `roles`, `value_map`, `model_tag_map`, a
+label and an enable/disable switch, and is **searched** across the path rather than anchored
 to it. Their results merge: model tags and variant tags union, and exactly one
 rule in a layout may carry the `model_name` role (the layout is rejected if two
 do). Within one rule a capture group must produce the *same* value everywhere it
@@ -579,6 +579,13 @@ matches in a file — `32mm` here and `75mm` there is no answer at all, so that
 rule is dropped for that file and the file is flagged (a warning; it never
 blocks the commit). The enable switch is per-import working state, persisted in
 the import draft; saving the layout captures the toggles as its defaults.
+
+`value_map` turns a rule's variant-tag captures into variant tags; a capture
+with no entry and no same-named tag is *unmapped* and blocks the commit.
+`model_tag_map` does the same for its model-tag captures (`1 - Heroes` →
+`Heroes`, or several tags, or `[]` to drop it), but a capture with no entry is
+never unmapped — it tags the model with the humanised capture, so remapping is
+opt-in and an untouched layout carves exactly as before (2026-11-09).
 
 `POST /api/imports/{id}/plan` takes `{rules, flatten}` and dry-runs
 the carve, returning the grouped tree (model → tag sets → file counts +

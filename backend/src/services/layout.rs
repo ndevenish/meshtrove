@@ -97,6 +97,13 @@ pub struct LayoutRule {
     /// the same name, else count as unmapped.
     #[serde(default)]
     pub value_map: HashMap<String, Vec<String>>,
+    /// Lowercased humanised capture -> model tag names, for this rule's
+    /// model-tag groups ("1 - heroes" -> Heroes). Keyed exactly like
+    /// `value_map`; an empty list drops the capture. Unlike a variant tag, a
+    /// value with no entry is never unmapped: it tags the model with the
+    /// humanised capture itself, as it always has.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_tag_map: HashMap<String, Vec<String>>,
     /// Off = contributes nothing, exactly like a rule that never matches. The
     /// panel's rule list is per-import working state, so a toggle scopes to this
     /// import; saving the layout captures the toggles as the template's defaults.
@@ -341,6 +348,10 @@ pub struct CapturedValue {
 pub struct RulePlan {
     pub groups: Vec<GroupInfo>,
     pub values: Vec<CapturedValue>,
+    /// The distinct raw values its model-tag groups produced, and the model
+    /// tags each became. `tags` is never null here: an unmapped capture is its
+    /// own tag.
+    pub model_values: Vec<CapturedValue>,
 }
 
 /// The dry-run result: preview for the UI, carve for the commit.
@@ -456,6 +467,7 @@ struct CompiledRule {
     group_count: usize,
     roles: Vec<Role>,
     value_map: BTreeMap<String, Vec<String>>,
+    model_tag_map: BTreeMap<String, Vec<String>>,
     enabled: bool,
     whole_folder: bool,
 }
@@ -551,6 +563,26 @@ fn resolve(
     vocab.contains(&folded).then(|| vec![folded])
 }
 
+/// What a rule's model-tag capture becomes: its explicit mapping (display case
+/// kept — a model tag is a name a human reads), else the humanised capture.
+fn resolve_model_tags(model_tag_map: &BTreeMap<String, Vec<String>>, raw: &str) -> Vec<String> {
+    match model_tag_map.get(&value_key(raw)) {
+        Some(tags) => tags
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        None => {
+            let humanised = crate::util::humanize_token(raw);
+            if humanised.is_empty() {
+                vec![]
+            } else {
+                vec![humanised]
+            }
+        }
+    }
+}
+
 /// Run a layout over a file list. Pure — `vocab` is the lowercased variant-tag
 /// vocabulary, fetched by the caller — so the same call backs the plan
 /// endpoint, the commit, and the tests.
@@ -599,6 +631,7 @@ pub fn analyze(
             // "supported_lychee" still matches the folder that spelled it any which way —
             // and a legacy spelling can't shadow the UI's re-mapping of the same value.
             value_map: canonical_value_map(&rule.value_map),
+            model_tag_map: canonical_value_map(&rule.model_tag_map),
             // A blank pattern is a rule the user has only just added, not one
             // that matches everywhere: inert, exactly like a disabled one, so
             // pressing "Add rule" doesn't flood the preview before you type.
@@ -626,6 +659,8 @@ pub fn analyze(
         })
         .collect();
     let mut rule_values: Vec<BTreeMap<String, CapturedValue>> =
+        compiled.iter().map(|_| BTreeMap::new()).collect();
+    let mut rule_model_values: Vec<BTreeMap<String, CapturedValue>> =
         compiled.iter().map(|_| BTreeMap::new()).collect();
 
     // Whole-folder rules answer per folder, so gather what each found across
@@ -770,17 +805,27 @@ pub fn analyze(
                     // A tag is a name a human reads in the browse sidebar, so it gets
                     // the same treatment a variant tag's captured value does: the
                     // folder `Fantasy_Creatures` tags the model "Fantasy Creatures",
-                    // not a tag with an underscore in it.
+                    // not a tag with an underscore in it — unless the rule's model
+                    // tag map says what it should become instead.
                     Role::ModelTag => {
+                        let resolved = resolve_model_tags(&rule.model_tag_map, raw);
                         let humanised = crate::util::humanize_token(raw);
                         if humanised.is_empty() {
                             continue;
                         }
-                        if !model_tags.iter().any(|t| fold(t) == fold(&humanised)) {
-                            model_tags.push(humanised.clone());
-                        }
-                        if seen_model_tags.insert(fold(&humanised)) {
-                            model_tag_order.push(humanised);
+                        rule_model_values[rule_index]
+                            .entry(value_key(raw))
+                            .or_insert_with(|| CapturedValue {
+                                raw: humanised,
+                                tags: Some(resolved.clone()),
+                            });
+                        for tag in resolved {
+                            if !model_tags.iter().any(|t| fold(t) == fold(&tag)) {
+                                model_tags.push(tag.clone());
+                            }
+                            if seen_model_tags.insert(fold(&tag)) {
+                                model_tag_order.push(tag);
+                            }
                         }
                     }
                     // Already taken from the folder, above.
@@ -996,9 +1041,11 @@ pub fn analyze(
         rules: rule_groups
             .into_iter()
             .zip(rule_values)
-            .map(|(groups, values)| RulePlan {
+            .zip(rule_model_values)
+            .map(|((groups, values), model_values)| RulePlan {
                 groups,
                 values: values.into_values().collect(),
+                model_values: model_values.into_values().collect(),
             })
             .collect(),
         models,
@@ -1024,6 +1071,7 @@ mod tests {
             pattern: pattern.into(),
             roles: roles.iter().map(|(k, r)| ((*k).to_string(), *r)).collect(),
             value_map: HashMap::new(),
+            model_tag_map: HashMap::new(),
             enabled: true,
             whole_folder: false,
         }
@@ -1057,6 +1105,7 @@ mod tests {
                 // camelCase capture, so a "nosupports" key would never match.
                 ("NoSupports".into(), vec!["unsupported".into()]),
             ]),
+            model_tag_map: HashMap::new(),
             enabled: true,
             whole_folder: false,
         }])
@@ -1692,6 +1741,53 @@ mod tests {
         // The unmatched PDF is one plain segment.
         let pdf = &plan.annotations[3];
         assert!(!pdf.matched && pdf.parts.len() == 1 && pdf.parts[0].role.is_none());
+    }
+
+    #[test]
+    fn model_tag_map_remaps_captures() {
+        let mut spec = spec_of(vec![rule(
+            r"^(\d+ - [^/]+)/([^/]+)/",
+            &[("1", Role::ModelTag), ("2", Role::ModelName)],
+        )]);
+        spec.rules[0].model_tag_map = HashMap::from([
+            // Legacy-spelt key: canonicalised like a variant value map.
+            (
+                "1_-_heroes".into(),
+                vec!["Heroes".into(), "Characters".into()],
+            ),
+            ("3 - scenery".into(), vec![]),
+        ]);
+        let files = vec![
+            file(1, "1 - Heroes/Gold", "a.stl"),
+            file(2, "2 - Enemies/Orc", "b.stl"),
+            file(3, "3 - Scenery/Tree", "c.stl"),
+        ];
+        let plan = analyze(&spec, CarveTarget::Bundle, &files, &vocab()).unwrap();
+        let tags_of = |name: &str| {
+            plan.models
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap()
+                .tags
+                .clone()
+        };
+        assert_eq!(tags_of("Gold"), vec!["Heroes", "Characters"]);
+        // Unmapped: the humanised capture, exactly as before.
+        assert_eq!(tags_of("Orc"), vec!["2 - Enemies"]);
+        // Mapped to nothing: dropped, and never unmapped.
+        assert!(tags_of("Tree").is_empty());
+        assert!(plan.unmapped_values().is_empty());
+        assert_eq!(
+            plan.model_tag_order,
+            vec!["Heroes", "Characters", "2 - Enemies"]
+        );
+        let values: Vec<(&str, Option<&Vec<String>>)> = plan.rules[0]
+            .model_values
+            .iter()
+            .map(|v| (v.raw.as_str(), v.tags.as_ref()))
+            .collect();
+        assert_eq!(values.len(), 3);
+        assert!(values.iter().all(|(_, t)| t.is_some()));
     }
 
     #[test]

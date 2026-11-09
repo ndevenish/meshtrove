@@ -62,6 +62,9 @@ fn validate(input: &LayoutInput) -> Result<String, ApiError> {
 fn canonicalise(spec: &mut LayoutSpec) -> serde_json::Value {
     for rule in &mut spec.rules {
         rule.value_map = canonical_value_map(&rule.value_map).into_iter().collect();
+        rule.model_tag_map = canonical_value_map(&rule.model_tag_map)
+            .into_iter()
+            .collect();
     }
     serde_json::to_value(&spec.rules).expect("rules serialize")
 }

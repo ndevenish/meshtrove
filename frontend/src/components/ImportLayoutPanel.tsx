@@ -81,6 +81,10 @@ const ROLE_ORDER: GroupRole[] = [
 /// together, so two groups holding one would always clash: there it moves.
 const SINGULAR_ROLES: GroupRole[] = ['model_name', 'creator_ref', 'model_version', 'folder']
 
+/// Which of a rule's two value maps a mapping row edits.
+type MapKind = 'variant' | 'model'
+const MAP_FIELD = { variant: 'value_map', model: 'model_tag_map' } as const
+
 /// What a rule is called in a message when the user hasn't named it.
 const ruleLabel = (rule: LayoutRule, index: number): string =>
   rule.name.trim() || `Rule ${index + 1}`
@@ -94,8 +98,8 @@ const blankRule = (): LayoutRule => ({
 })
 
 /// The layout carve panel: compose the carve out of several small patterns,
-/// assign each one's capture groups a role, map raw captured values onto variant
-/// tags, and preview the merged result. All matching happens server-side (the
+/// assign each one's capture groups a role, map raw captured values onto model
+/// and variant tags, and preview the merged result. All matching happens server-side (the
 /// `planner` prop — `POST /api/imports/{id}/plan` for a staged drop, the model
 /// carve endpoint for one already in the library): patterns are opaque strings
 /// here, and the executing end runs the same analysis, so what this previews is
@@ -204,6 +208,7 @@ export default memo(function ImportLayoutPanel({
     queryKey: ['variant-tags'],
     queryFn: () => api.variantTags(),
   })
+  const { data: modelVocab } = useQuery({ queryKey: ['tags'], queryFn: () => api.tags() })
 
   // Coverage ranking for the picker: dry-run every saved layout once the file
   // tree stops moving. A layout that errors (or matches nothing) still lists —
@@ -358,30 +363,35 @@ export default memo(function ImportLayoutPanel({
   }, [plan, mergeChoices, bundleId])
 
   // A raw value's current mapping *for this rule*: explicit entry wins, else what
-  // the server resolved (an existing tag of the same name), else unmapped.
+  // the server resolved — for a variant tag an existing tag of the same name, else
+  // unmapped; for a model tag the capture itself.
   const mappingFor = (
-    rule: LayoutRule,
+    map: Record<string, string[]>,
     raw: string,
     resolved: string[] | null,
   ): string[] | null => {
     const key = raw.toLowerCase()
-    if (key in rule.value_map) return rule.value_map[key]
+    if (key in map) return map[key]
     return resolved
   }
 
   // Set a value's mapping, or `null` to clear the explicit entry and fall back
-  // to unmapped. An explicit empty list is "recognised, no tags" — distinct from
-  // an absent entry, which the commit refuses; the "No tags" checkbox is the one
-  // affordance that reaches the empty state without adding then deleting a chip.
-  const setMapping = (index: number, key: string, tags: string[] | null) =>
+  // to the default (unmapped for a variant tag, the capture itself for a model
+  // tag). An explicit empty list is "recognised, no tags" — distinct from an
+  // absent entry, which the commit refuses for a variant tag; the "No tags"
+  // checkbox is the one affordance that reaches the empty state without adding
+  // then deleting a chip.
+  const setMapping = (index: number, kind: MapKind, key: string, tags: string[] | null) =>
     setRules((prev) =>
       prev.map((rule, i) => {
         if (i !== index) return rule
+        const field = MAP_FIELD[kind]
+        const map = rule[field] ?? {}
         if (tags === null) {
-          const { [key]: _drop, ...rest } = rule.value_map
-          return { ...rule, value_map: rest }
+          const { [key]: _drop, ...rest } = map
+          return { ...rule, [field]: rest }
         }
-        return { ...rule, value_map: { ...rule.value_map, [key]: tags } }
+        return { ...rule, [field]: { ...map, [key]: tags } }
       }),
     )
 
@@ -409,6 +419,7 @@ export default memo(function ImportLayoutPanel({
   // writes; `label` is what's shown (the humanised capture, or the raw key).
   const valueRow = (
     index: number,
+    kind: MapKind,
     mapKey: string,
     label: string,
     mapped: string[] | null,
@@ -436,27 +447,33 @@ export default memo(function ImportLayoutPanel({
         autoSelect
         size="small"
         disabled={disabled}
-        options={(vocab ?? []).map((t) => t.name)}
+        options={((kind === 'model' ? modelVocab : vocab) ?? []).map((t) => t.name)}
         value={mapped ?? []}
-        onChange={changeTags((tags) => setMapping(index, mapKey, tags))}
+        onChange={changeTags((tags) => setMapping(index, kind, mapKey, tags))}
         renderInput={(props) => (
           <TextField
             {...props}
-            onPaste={pasteTags(mapped ?? [], (tags) => setMapping(index, mapKey, tags))}
+            onPaste={pasteTags(mapped ?? [], (tags) => setMapping(index, kind, mapKey, tags))}
             error={!disabled && mapped === null}
             placeholder={!disabled && mapped === null ? 'pick tags, or tick “No tags”' : undefined}
           />
         )}
         sx={{ flexGrow: 1, maxWidth: 420 }}
       />
-      <Tooltip title="Recognise this value but add no variant tags — its files land in a plain, untagged variant. Use this to confirm you meant to leave it blank.">
+      <Tooltip
+        title={
+          kind === 'model'
+            ? 'Drop this value: its models get no model tag from it. Untick to go back to tagging them with the captured value itself.'
+            : 'Recognise this value but add no variant tags — its files land in a plain, untagged variant. Use this to confirm you meant to leave it blank.'
+        }
+      >
         <FormControlLabel
           control={
             <Checkbox
               size="small"
               disabled={disabled}
               checked={mapped !== null && mapped.length === 0}
-              onChange={(e) => setMapping(index, mapKey, e.target.checked ? [] : null)}
+              onChange={(e) => setMapping(index, kind, mapKey, e.target.checked ? [] : null)}
             />
           }
           label={<Typography variant="body2">No tags</Typography>}
@@ -487,6 +504,12 @@ export default memo(function ImportLayoutPanel({
     const activeValueKeys = new Set(values.map((v) => v.raw.toLowerCase()))
     const staleValueKeys = Object.keys(rule.value_map)
       .filter((k) => !activeValueKeys.has(k))
+      .sort()
+    const modelMap = rule.model_tag_map ?? {}
+    const modelValues = found?.model_values ?? []
+    const activeModelKeys = new Set(modelValues.map((v) => v.raw.toLowerCase()))
+    const staleModelKeys = Object.keys(modelMap)
+      .filter((k) => !activeModelKeys.has(k))
       .sort()
 
     const roleOf = (group: number): GroupRole => rule.roles[String(group)] ?? 'ignore'
@@ -639,13 +662,35 @@ export default memo(function ImportLayoutPanel({
               {values.map((value) =>
                 valueRow(
                   index,
+                  'variant',
                   value.raw.toLowerCase(),
                   value.raw,
-                  mappingFor(rule, value.raw, value.tags),
+                  mappingFor(rule.value_map, value.raw, value.tags),
                   false,
                 ),
               )}
-              {staleValueKeys.map((key) => valueRow(index, key, key, rule.value_map[key], true))}
+              {staleValueKeys.map((key) =>
+                valueRow(index, 'variant', key, key, rule.value_map[key], true),
+              )}
+            </Box>
+          )}
+
+          {(modelValues.length > 0 || staleModelKeys.length > 0) && (
+            <Box sx={{ mt: 1 }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                Captured values → model tags
+              </Typography>
+              {modelValues.map((value) =>
+                valueRow(
+                  index,
+                  'model',
+                  value.raw.toLowerCase(),
+                  value.raw,
+                  mappingFor(modelMap, value.raw, value.tags),
+                  false,
+                ),
+              )}
+              {staleModelKeys.map((key) => valueRow(index, 'model', key, key, modelMap[key], true))}
             </Box>
           )}
         </Box>
