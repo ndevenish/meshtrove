@@ -853,6 +853,26 @@ export default memo(function ImportLayoutPanel({
             Add rule
           </Button>
 
+          {plan && (
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1.5 }}>
+              <TextField
+                size="small"
+                label="Save as layout"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                error={!!saveError}
+                helperText={saveError || undefined}
+              />
+              <Tooltip title="Save these rules, roles and value maps for the next archive">
+                <span>
+                  <IconButton onClick={save} disabled={!saveName.trim()}>
+                    <SaveIcon />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Stack>
+          )}
+
           {plan && plan.models.length > 0 && (
             <Box sx={{ mb: 1.5 }}>
               <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
@@ -936,26 +956,6 @@ export default memo(function ImportLayoutPanel({
                 </Box>
               ))}
             </Box>
-          )}
-
-          {plan && (
-            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-              <TextField
-                size="small"
-                label="Save as layout"
-                value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
-                error={!!saveError}
-                helperText={saveError || undefined}
-              />
-              <Tooltip title="Save these rules, roles and value maps for the next archive">
-                <span>
-                  <IconButton onClick={save} disabled={!saveName.trim()}>
-                    <SaveIcon />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Stack>
           )}
         </>
       )}
