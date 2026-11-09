@@ -924,6 +924,10 @@ export const api = {
   /** Absorb `from` into `id`; returns the bundle that did the absorbing. */
   mergeBundle: (id: string, from: string, other: OtherBundleDisposition) =>
     request<BundleDetail>(`/api/bundles/${id}/merge`, json({ from, other })),
+  /** A fresh member model that inherits the bundle's creator, source URL and
+      model-applicable custom field values. */
+  createBundleMember: (bundleId: string, name: string) =>
+    request<{ id: string }>(`/api/bundles/${bundleId}/members`, json({ name })),
   addModelToBundle: (bundleId: string, modelId: string) =>
     request<void>(`/api/bundles/${bundleId}/models`, json({ model_id: modelId })),
   removeModelFromBundle: (bundleId: string, modelId: string) =>

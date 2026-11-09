@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO models (name, slug, creator_id, source_url, created_by)\n         SELECT $1, $2, b.creator_id, b.source_url, $3 FROM bundles b WHERE b.id = $4\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fe50a3d62a6d4d0d6fc54106ed816f433c2639c12e5d4fdd1df4e6a0166d3fae"
+}

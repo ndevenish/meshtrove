@@ -312,9 +312,9 @@ function MoveToModelDialog({
     try {
       let modelId = existingId
       if (mode === 'new') {
-        const model = await api.createModel({ name: name.trim() })
-        await api.addModelToBundle(bundle.id, model.id)
-        modelId = model.id
+        // Created by the bundle, so it inherits the bundle's creator, source
+        // and custom fields rather than starting blank.
+        modelId = (await api.createBundleMember(bundle.id, name.trim())).id
       }
       await onConfirm(modelId)
     } catch (e) {

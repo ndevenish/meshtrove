@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bundles/{id}/merge", post(merge))
         .route("/api/bundles/{id}/demerge", post(demerge))
         .route("/api/bundles/{id}/models", axum::routing::post(add_model))
+        .route("/api/bundles/{id}/members", post(create_member))
         .route(
             "/api/bundles/{id}/models/{model_id}",
             axum::routing::delete(remove_model),
@@ -741,6 +742,70 @@ async fn add_model(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateMemberInput {
+    pub name: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct CreatedMember {
+    pub id: Uuid,
+}
+
+/// Make a fresh member model, for files lifted out of the bundle's unsorted
+/// bucket. It came out of this bundle, so it starts with what the bundle says
+/// about where it came from: its creator, its source URL, and every custom
+/// field value (a type, a torrent) whose field also applies to models. Nothing
+/// is overwritten — the model is new, so there is nothing to overwrite.
+async fn create_member(
+    State(state): State<AppState>,
+    user: User,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateMemberInput>,
+) -> Result<Json<CreatedMember>, ApiError> {
+    user.require_can_edit(bundle_created_by(&state, id).await?)?;
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+    let slug = crate::routes::models::unique_slug(&state, &name, None, None).await?;
+
+    let mut tx = state.db.begin().await?;
+    let model_id = sqlx::query_scalar!(
+        "INSERT INTO models (name, slug, creator_id, source_url, created_by)
+         SELECT $1, $2, b.creator_id, b.source_url, $3 FROM bundles b WHERE b.id = $4
+         RETURNING id",
+        name,
+        slug,
+        user.id,
+        id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    sqlx::query!(
+        "INSERT INTO bundle_models (bundle_id, model_id) VALUES ($1, $2)",
+        id,
+        model_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let values = custom_fields::values_of(&mut tx, ValueOwner::Bundle(id)).await?;
+    custom_fields::copy_values_onto(
+        &mut tx,
+        &values,
+        ValueOwner::Model(model_id),
+        |v| v.applies_to_models,
+        &user,
+    )
+    .await?;
+    sqlx::query!("UPDATE bundles SET updated_at = now() WHERE id = $1", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(CreatedMember { id: model_id }))
 }
 
 async fn remove_model(
